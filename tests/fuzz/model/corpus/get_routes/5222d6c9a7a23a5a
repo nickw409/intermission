@@ -1,0 +1,5 @@
+GET
+/v1/similar/260
+trace-1
+model=als
+k=3
