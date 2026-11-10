@@ -14,7 +14,8 @@ header comments carefully — they define the protocol exactly. Also `recs/rng.h
    clamp/round rule (test: test_min/test_max; validation: val_min/val_max); users with
    < min_ratings keep ALL their ratings in train and train_minus_val, have no validation/test
    ratings, and are not in eval_users. The hash follows the exact encoding in split.hpp. `hash` is identical for identical
-   inputs+config and changes when the seed or any rating changes. `cold_item_share` matches a
+   inputs+config and changes when the seed, any config field, or the set assignment of any
+   rating changes (rating values are not hashed — see split.hpp). `cold_item_share` matches a
    brute-force recount.
 2. **Metric fixtures:** for EACH of ndcg_at_k, recall_at_k, precision_at_k,
    average_precision_at_k: ≥ 5 hand-computed fixtures, with the hand computation written out in a
