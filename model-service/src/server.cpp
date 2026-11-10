@@ -37,6 +37,10 @@
 
 #include <httplib.h>
 
+#ifndef CPPHTTPLIB_VERSION_NUM
+#error "cpp-httplib does not define CPPHTTPLIB_VERSION_NUM; cannot check the 0.63.0 minimum (audit SA4-6)"
+#endif
+
 namespace recs::service {
 namespace {
 
@@ -44,11 +48,15 @@ namespace {
 // request-parsing vulnerabilities; this stops a downgrade of the pin in cmake/deps.cmake from
 // building. The header defines CPPHTTPLIB_VERSION_NUM as a string literal such as "0x003f00"
 // (0xMMmmpp), so it is parsed here; the integer overload covers a header that switches to a number.
+// Anything unparsable (no 0x prefix, a non-hex digit, no digits, more than 16 digits) gives 0,
+// which fails the assertion.
 [[maybe_unused]] consteval unsigned long long httplib_version_num(unsigned long long v) { return v; }
 consteval unsigned long long httplib_version_num(const char* s) {
-  if (s[0] != '0' || (s[1] != 'x' && s[1] != 'X')) return 0;
+  if (s[0] != '0' || (s[1] != 'x' && s[1] != 'X') || s[2] == '\0') return 0;
   unsigned long long v = 0;
+  int digits = 0;
   for (const char* p = s + 2; *p != '\0'; ++p) {
+    if (++digits > 16) return 0;  // would overflow 64 bits
     const char c = *p;
     int d = -1;
     if (c >= '0' && c <= '9') d = c - '0';
