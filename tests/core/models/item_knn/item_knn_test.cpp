@@ -225,7 +225,7 @@ TEST_CASE("knn gate 1: perfectly correlated and anti-correlated items hit +1 and
   std::vector<Triplet> t = {{0, 0, 5, 0}, {0, 1, 5, 0}, {0, 2, 1, 0}, {0, 3, 3, 0},
                             {1, 0, 1, 0}, {1, 1, 1, 0}, {1, 2, 5, 0}, {1, 3, 3, 0}};
   const auto ds = recs::make_dataset("pm1", 2, 4, std::move(t));
-  const auto rows = full_similarity(ds, Config{{"shrinkage", 0.0}, {"min_support", 1}});
+  const auto rows = full_similarity(ds, Config{{"shrinkage", 0.0}, {"min_support", 1}, {"positive_only", false}});
   auto sim = [&](ItemIdx i, ItemIdx j) {
     for (const auto& p : rows[i]) if (p.item == j) return p;
     FAIL("missing pair");
@@ -352,12 +352,22 @@ TEST_CASE("knn gate 2: hand fixture similarities, scores and explanations", "[kn
 
 TEST_CASE("knn: config defaults and validation", "[knn]") {
   const auto ds = hand_dataset();
+  // The default is the spec's top-N form (normalize = false, positive_only = true) with M and
+  // lambda tuned on the ml-latest-small validation split.
   const auto m = fit_knn(ds, Config::object());
-  CHECK(m->config() == Config{{"neighbors", 100}, {"shrinkage", 100.0}, {"min_support", 20},
-                              {"normalize", true}, {"positive_only", false}});
+  CHECK(m->config() == Config{{"neighbors", 10}, {"shrinkage", 1000.0}, {"min_support", 20},
+                              {"normalize", false}, {"positive_only", true}});
   // Every item is below the default min_support 20: nothing can be scored.
   const auto s = score_of(*m, m->fold_in(training_ratings(ds, 0)));
   for (float v : s) CHECK(v == kNegInf);
+
+  // The rating-prediction form with the spec's starting values is still available explicitly;
+  // missing keys are filled from the defaults.
+  const Config pred{{"neighbors", 100}, {"shrinkage", 100.0}, {"normalize", true}, {"positive_only", false}};
+  const auto mp = fit_knn(ds, pred);
+  CHECK(mp->config() == Config{{"neighbors", 100}, {"shrinkage", 100.0}, {"min_support", 20},
+                               {"normalize", true}, {"positive_only", false}});
+  for (float v : score_of(*mp, mp->fold_in(training_ratings(ds, 0)))) CHECK(v == kNegInf);
 
   auto bad = [&](Config c) { CHECK_THROWS_AS(recs::make_item_knn()->fit(ds, c, {}), std::invalid_argument); };
   bad(Config{{"neighbors", 0}});
@@ -369,6 +379,69 @@ TEST_CASE("knn: config defaults and validation", "[knn]") {
   bad(Config{{"normalize", "false"}});
   bad(Config{{"positive_only", 0}});
   bad(Config{{"positive_only", nullptr}});
+}
+
+// With no scoring flags the model uses the top-N form: positive neighbours only, no division by
+// sum |s'|. On the hand fixture only s'_BC > 0 survives (see the derivation above):
+//   lists A: []  B: [C]  C: [B]
+//   fold-in user A=2, B=5, D=5 (mean 4, B centred +1):
+//   score(C) = s'_CB * 1 = 0.4714045207910316 (unnormalised); A, B, D = -inf
+//   explain(C) = [B with weight 0.4714045207910316]
+TEST_CASE("knn: the default scoring form is the spec's top-N score", "[knn]") {
+  const auto ds = hand_dataset();
+  const Config neighbourhood{{"neighbors", 2}, {"shrinkage", 1.0}, {"min_support", 2}};
+  const auto m = fit_knn(ds, neighbourhood);
+  CHECK(m->config()["normalize"] == false);
+  CHECK(m->config()["positive_only"] == true);
+  auto items_of = [](const std::vector<Scored>& v) {
+    std::vector<ItemIdx> out;
+    for (const auto& x : v) out.push_back(x.item);
+    return out;
+  };
+  CHECK(neighbour_list(*m, 0).empty());
+  CHECK(items_of(neighbour_list(*m, 1)) == std::vector<ItemIdx>{2});
+  CHECK(items_of(neighbour_list(*m, 2)) == std::vector<ItemIdx>{1});
+  CHECK(neighbour_list(*m, 3).empty());
+
+  const std::vector<Rating> user = {{3, 5.0f, 0}, {0, 2.0f, 0}, {1, 5.0f, 0}};
+  const auto st = m->fold_in(user);
+  const auto s = score_of(*m, st);
+  CHECK(s[0] == kNegInf);
+  CHECK(s[1] == kNegInf);
+  CHECK_THAT(s[2], WithinAbs(0.4714045207910316, 1e-6));
+  CHECK(s[3] == kNegInf);
+  const auto e = m->explain(st, 2);
+  REQUIRE(e.because.size() == 1);
+  CHECK(e.because[0].item == 1);
+  CHECK_THAT(e.because[0].weight, WithinAbs(0.4714045207910316, 1e-6));
+
+  // Identical to asking for that form explicitly, bit for bit.
+  Config explicit_topn = neighbourhood;
+  explicit_topn["normalize"] = false;
+  explicit_topn["positive_only"] = true;
+  const auto mx = fit_knn(ds, explicit_topn);
+  CHECK(bitwise_equal(s, score_of(*mx, mx->fold_in(user))));
+}
+
+// The shipped configs use the top-N form: configs/knn.json (ml-latest-small; it matches the code
+// defaults) and configs/knn.ml-32m.tuned.json (ml-32m: M = 50, lambda = 30,000).
+TEST_CASE("knn: shipped configs select the top-N form", "[knn]") {
+  const auto configs = recs::testing::contracts_dir().parent_path() / "configs";
+  auto read = [&](const char* name) {
+    std::ifstream in(configs / name);
+    REQUIRE(in);
+    return Config::parse(in);
+  };
+  const auto small = recs::item_knn_detail::parse_config(read("knn.json"));
+  const auto defaults = recs::item_knn_detail::parse_config(Config::object());
+  CHECK(recs::item_knn_detail::to_config(small) == recs::item_knn_detail::to_config(defaults));
+  CHECK_FALSE(small.normalize);
+  CHECK(small.positive_only);
+  const auto big = recs::item_knn_detail::parse_config(read("knn.ml-32m.tuned.json"));
+  CHECK_FALSE(big.normalize);
+  CHECK(big.positive_only);
+  CHECK(big.neighbors == 50);
+  CHECK(big.shrinkage == 30000.0);
 }
 
 // ---- gate 3 ---------------------------------------------------------------------------------------
@@ -678,7 +751,8 @@ TEST_CASE("knn: load rejects a corrupt or truncated file", "[knn]") {
 TEST_CASE("knn gate 6: identical neighbour lists with 1 and 4 OpenMP threads", "[knn][gate]") {
   recs::Rng rng(0xD007);
   const auto ds = random_dataset(rng, 400, 300, 0.15);
-  const Config cfg{{"neighbors", 20}, {"shrinkage", 10.0}, {"min_support", 15}};
+  const Config cfg{{"neighbors", 20},     {"shrinkage", 10.0},      {"min_support", 15},
+                   {"normalize", true}, {"positive_only", false}};
   const int saved = omp_get_max_threads();
   omp_set_num_threads(1);
   const auto m1 = fit_knn(ds, cfg);
