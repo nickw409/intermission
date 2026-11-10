@@ -16,13 +16,13 @@
 # load average and any running fuzzers before it starts.
 set -Eeuo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STACK_PORT="${STACK_PORT:-18091}" # before stack-lib.sh, which defaults it to 18090
 # shellcheck source=../integration/stack-lib.sh
 source "$here/../integration/stack-lib.sh"
 
 STACK_TAG="${1:?usage: run-load.sh <tag> [dataset]}"
 dataset="${2:-ml-latest-small}"
 STACK_PROJECT="${STACK_PROJECT:-intermission-load}"
-STACK_PORT="${STACK_PORT:-18091}"
 STACK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/intermission-load.XXXXXX")"
 if [[ -z "${KEEP_STACK:-}" ]]; then trap stack_down EXIT; fi
 
