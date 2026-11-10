@@ -1,33 +1,55 @@
-// Binary dataset cache: lets later runs skip CSV parsing (ml-32m parses in tens of seconds, the
-// cache loads in a few).
+// Binary dataset cache: lets later runs skip CSV parsing (ml-32m parses in about 10 s in release,
+// the cache loads in about 5 s).
 //
-// Layout (format version 1). All integers are little-endian; a "str" is a u64 byte length followed
+// Layout (format version 2). All integers are little-endian; a "str" is a u64 byte length followed
 // by the bytes; "opt<T>" is a u8 flag (0 or 1) followed by a T that is 0 when the flag is 0.
 //
-//   header   char[8] magic "RECSDS01"
-//            u32 version, u32 flags (bit 0: genome present)
-//            u32 n_users, u32 n_items, u64 nnz, u64 n_tag_applications
-//   payload  str name
+//   header   char[8] magic "RECSDS01"                                           offset 0
+//            u32 version, u32 flags (bit 0: genome present)                      offsets 8, 12
+//            u32 n_users, u32 n_items, u64 nnz, u64 n_tag_applications           offsets 16, 20, 24, 32
+//   payload  str name                                                            offset 40
+//            u64 n_sources, then per raw file: str file name, u8 present, u64 size, i64 mtime (ns)
 //            i64[n_users] user external ids, i64[n_items] item external ids (dense order)
 //            by_user CSR: u64[n_users + 1] indptr, u32[nnz] indices, f32[nnz] values, i64[nnz] ts
 //            n_items x movie: i64 movie_id, str title, opt<i32> year, u32 n_genres, str[n_genres],
 //                             opt<i64> imdb_id, opt<i64> tmdb_id
 //            n_tag_applications x tag: i64 user_id, u32 item, str tag, i64 ts
-//            if genome: u32 n_items, u32 n_tags, str[n_tags] tag names, f32[n_items * n_tags]
+//            if genome: u32 n_items (== header n_items), u32 n_tags, str[n_tags] tag names,
+//                       f32[n_items * n_tags] relevance
 //   trailer  SHA-256 of header + payload (32 bytes)
+//
+// Version history: 1 had no source fingerprints. 2 added them (after the name).
 //
 // by_item is not stored: it is always transpose(by_user), so it is rebuilt on load. This halves
 // the file (ml-32m: ~0.5 GB instead of ~1 GB) and makes the CSR/CSC invariant hold by construction.
 //
+// Source fingerprints: load_or_build records the size and modification time of every raw file
+// load_movielens may read (present or not). A cache whose fingerprints differ from the raw
+// directory's current state is stale and gets rebuilt. A cache written by plain save_cache has no
+// fingerprints, so load_cache accepts it but load_or_build never trusts it.
+//
+// save_cache checks the dataset against the same rules load_cache enforces before it opens any
+// file, writes to a uniquely named temporary file, fsyncs it and renames it over the target, so a
+// reader sees either the old cache or the complete new one. On any failure the temporary file is
+// removed.
+//
 // load_cache reads the file once, hashing as it goes. Every length read from the file is checked
 // against the bytes that remain before anything is allocated, so a corrupt length can never cause
-// a huge allocation; the checksum, trailing data and the structural invariants (unique ids,
-// a valid CSR, in-range item indices) are all verified before the Dataset is returned.
+// a huge allocation. The checksum, trailing data and the dataset invariants (unique ids, a valid
+// CSR, ratings in {0.5, ..., 5.0}, in-range item indices, genome dimensions matching the item
+// count, relevance in [0, 1]) are all verified before the Dataset is returned.
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <array>
 #include <bit>
+#include <chrono>
+#include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <random>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -43,7 +65,7 @@ namespace {
 static_assert(std::endian::native == std::endian::little, "the cache format assumes a little-endian host");
 
 constexpr char kMagic[8] = {'R', 'E', 'C', 'S', 'D', 'S', '0', '1'};
-constexpr std::uint32_t kVersion = 1;
+constexpr std::uint32_t kVersion = 2;
 constexpr std::uint32_t kFlagGenome = 1u;
 constexpr std::size_t kDigestSize = 32;
 constexpr std::size_t kBufferSize = 1 << 20;
@@ -174,6 +196,77 @@ class Reader {
   std::uint64_t remaining_ = 0;  // payload bytes not yet read (excludes the trailer)
 };
 
+/// Size and modification time of one raw input file, used to detect a stale cache.
+struct SourceFile {
+  std::string name;
+  bool present = false;
+  std::uint64_t size = 0;
+  std::int64_t mtime_ns = 0;
+  bool operator==(const SourceFile&) const = default;
+};
+using Sources = std::vector<SourceFile>;
+
+/// Every file load_movielens may read, in a fixed order.
+Sources fingerprint(const fs::path& raw_dir) {
+  Sources out;
+  for (const char* name : {"movies.csv", "ratings.csv", "links.csv", "tags.csv", "genome-tags.csv",
+                           "genome-scores.csv"}) {
+    SourceFile s;
+    s.name = name;
+    const auto path = raw_dir / name;
+    std::error_code ec;
+    if (fs::is_regular_file(path, ec)) {
+      s.present = true;
+      s.size = fs::file_size(path, ec);
+      if (ec) s.size = 0;
+      const auto t = fs::last_write_time(path, ec);
+      if (!ec) s.mtime_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(t.time_since_epoch()).count();
+    }
+    out.push_back(std::move(s));
+  }
+  return out;
+}
+
+bool valid_rating(float v) {
+  // Also false for NaN. Ratings are multiples of 0.5, so 2v is an exact integer.
+  return v >= 0.5f && v <= 5.0f && 2.0f * v == std::floor(2.0f * v);
+}
+
+bool valid_relevance(float v) { return v >= 0.0f && v <= 1.0f; }  // false for NaN
+
+/// The rules load_cache enforces, checked up front by save_cache. Throws DatasetError.
+void check_saveable(const Dataset& ds) {
+  const auto fail = [](const std::string& what) { throw DatasetError("save_cache: " + what); };
+  if (ds.users.to_dense.size() != ds.users.to_external.size()) fail("user id map is inconsistent");
+  if (ds.items.to_dense.size() != ds.items.to_external.size()) fail("item id map is inconsistent");
+  if (ds.movies.size() != ds.n_items()) fail("movies.size() != n_items");
+  for (std::uint32_t i = 0; i < ds.n_items(); ++i) {
+    if (ds.movies[i].movie_id != ds.items.to_external[i]) fail("movie id does not match the item id map");
+  }
+  const Csr& m = ds.by_user;
+  if (m.n_rows != ds.n_users() || m.n_cols != ds.n_items()) fail("rating matrix shape != n_users x n_items");
+  try {
+    validate(m);
+  } catch (const SparseError& e) {
+    fail(std::string("rating matrix: ") + e.what());
+  }
+  for (const float v : m.values) {
+    if (!valid_rating(v)) fail("rating value " + std::to_string(v) + " out of range");
+  }
+  for (const auto& t : ds.tags) {
+    if (t.item >= ds.n_items()) fail("tag item index out of range");
+  }
+  if (ds.genome) {
+    const auto& g = *ds.genome;
+    if (g.n_items != ds.n_items()) fail("genome n_items != n_items");
+    if (g.tag_names.size() != g.n_tags) fail("genome tag_names.size() != n_tags");
+    if (g.relevance.size() != static_cast<std::uint64_t>(g.n_items) * g.n_tags) fail("genome relevance size");
+    for (const float v : g.relevance) {
+      if (!valid_relevance(v)) fail("genome relevance " + std::to_string(v) + " out of [0, 1]");
+    }
+  }
+}
+
 void read_id_map(Reader& r, IdMap& map, std::uint32_t n, const char* what) {
   std::vector<std::int64_t> ids;
   r.array(ids, n);
@@ -184,64 +277,96 @@ void read_id_map(Reader& r, IdMap& map, std::uint32_t n, const char* what) {
   }
 }
 
-}  // namespace
-
-void save_cache(const Dataset& ds, const fs::path& file) {
-  if (ds.movies.size() != ds.n_items() || ds.by_user.n_rows != ds.n_users() || ds.by_user.n_cols != ds.n_items()) {
-    throw DatasetError("save_cache: dataset sizes are inconsistent");
+/// Flushes a closed file to stable storage. fsync works on a read-only descriptor on Linux.
+void fsync_path(const fs::path& p, bool directory) {
+  const int fd = ::open(p.c_str(), directory ? (O_RDONLY | O_DIRECTORY) : O_RDONLY);
+  if (fd < 0) {
+    if (directory) return;  // best effort for the directory entry
+    throw DatasetError(p.string() + ": cannot reopen cache file to sync it");
   }
-  if (file.has_parent_path()) fs::create_directories(file.parent_path());
-  // Write to a temporary file and rename, so readers never see a half-written cache.
-  fs::path tmp = file;
-  tmp += ".tmp";
-  {
-    Writer w(tmp);
-    w.bytes(kMagic, sizeof kMagic);
-    w.pod<std::uint32_t>(kVersion);
-    w.pod<std::uint32_t>(ds.genome ? kFlagGenome : 0u);
-    w.pod<std::uint32_t>(ds.n_users());
-    w.pod<std::uint32_t>(ds.n_items());
-    w.pod<std::uint64_t>(ds.n_ratings());
-    w.pod<std::uint64_t>(ds.tags.size());
-
-    w.str(ds.name);
-    w.array(ds.users.to_external);
-    w.array(ds.items.to_external);
-    w.array(ds.by_user.indptr);
-    w.array(ds.by_user.indices);
-    w.array(ds.by_user.values);
-    w.array(ds.by_user.ts);
-    for (const auto& m : ds.movies) {
-      w.pod<std::int64_t>(m.movie_id);
-      w.str(m.title);
-      w.opt<std::int32_t>(m.year);
-      w.pod<std::uint32_t>(static_cast<std::uint32_t>(m.genres.size()));
-      for (const auto& g : m.genres) w.str(g);
-      w.opt<std::int64_t>(m.imdb_id);
-      w.opt<std::int64_t>(m.tmdb_id);
-    }
-    for (const auto& t : ds.tags) {
-      w.pod<std::int64_t>(t.user_id);
-      w.pod<std::uint32_t>(t.item);
-      w.str(t.tag);
-      w.pod<std::int64_t>(t.ts);
-    }
-    if (ds.genome) {
-      const auto& g = *ds.genome;
-      if (g.tag_names.size() != g.n_tags || g.relevance.size() != static_cast<std::uint64_t>(g.n_items) * g.n_tags) {
-        throw DatasetError("save_cache: genome sizes are inconsistent");
-      }
-      w.pod<std::uint32_t>(g.n_items);
-      w.pod<std::uint32_t>(g.n_tags);
-      for (const auto& name : g.tag_names) w.str(name);
-      w.array(g.relevance);
-    }
-    w.finish();
-  }
-  fs::rename(tmp, file);
+  const int rc = ::fsync(fd);
+  ::close(fd);
+  if (rc != 0 && !directory) throw DatasetError(p.string() + ": fsync failed");
 }
 
-Dataset load_cache(const fs::path& file) {
+fs::path unique_temp_path(const fs::path& file) {
+  std::random_device rd;
+  const std::uint64_t r = (static_cast<std::uint64_t>(rd()) << 32) ^ rd();
+  char suffix[17];
+  std::snprintf(suffix, sizeof suffix, "%016llx", static_cast<unsigned long long>(r));
+  fs::path tmp = file;
+  tmp += ".tmp-" + std::to_string(::getpid()) + "-" + suffix;
+  return tmp;
+}
+
+void write_payload(Writer& w, const Dataset& ds, const Sources& sources) {
+  w.bytes(kMagic, sizeof kMagic);
+  w.pod<std::uint32_t>(kVersion);
+  w.pod<std::uint32_t>(ds.genome ? kFlagGenome : 0u);
+  w.pod<std::uint32_t>(ds.n_users());
+  w.pod<std::uint32_t>(ds.n_items());
+  w.pod<std::uint64_t>(ds.n_ratings());
+  w.pod<std::uint64_t>(ds.tags.size());
+
+  w.str(ds.name);
+  w.pod<std::uint64_t>(sources.size());
+  for (const auto& s : sources) {
+    w.str(s.name);
+    w.pod<std::uint8_t>(s.present ? 1 : 0);
+    w.pod<std::uint64_t>(s.size);
+    w.pod<std::int64_t>(s.mtime_ns);
+  }
+  w.array(ds.users.to_external);
+  w.array(ds.items.to_external);
+  w.array(ds.by_user.indptr);
+  w.array(ds.by_user.indices);
+  w.array(ds.by_user.values);
+  w.array(ds.by_user.ts);
+  for (const auto& m : ds.movies) {
+    w.pod<std::int64_t>(m.movie_id);
+    w.str(m.title);
+    w.opt<std::int32_t>(m.year);
+    w.pod<std::uint32_t>(static_cast<std::uint32_t>(m.genres.size()));
+    for (const auto& g : m.genres) w.str(g);
+    w.opt<std::int64_t>(m.imdb_id);
+    w.opt<std::int64_t>(m.tmdb_id);
+  }
+  for (const auto& t : ds.tags) {
+    w.pod<std::int64_t>(t.user_id);
+    w.pod<std::uint32_t>(t.item);
+    w.str(t.tag);
+    w.pod<std::int64_t>(t.ts);
+  }
+  if (ds.genome) {
+    const auto& g = *ds.genome;
+    w.pod<std::uint32_t>(g.n_items);
+    w.pod<std::uint32_t>(g.n_tags);
+    for (const auto& name : g.tag_names) w.str(name);
+    w.array(g.relevance);
+  }
+  w.finish();
+}
+
+void write_cache(const Dataset& ds, const fs::path& file, const Sources& sources) {
+  check_saveable(ds);  // before any file is touched
+  if (file.has_parent_path()) fs::create_directories(file.parent_path());
+  const fs::path tmp = unique_temp_path(file);
+  try {
+    {
+      Writer w(tmp);
+      write_payload(w, ds, sources);
+    }
+    fsync_path(tmp, false);
+    fs::rename(tmp, file);
+  } catch (...) {
+    std::error_code ec;
+    fs::remove(tmp, ec);
+    throw;
+  }
+  fsync_path(file.has_parent_path() ? file.parent_path() : fs::path("."), true);
+}
+
+Dataset read_cache(const fs::path& file, Sources* sources_out) {
   Reader r(file);
 
   char magic[sizeof kMagic];
@@ -260,6 +385,22 @@ Dataset load_cache(const fs::path& file) {
 
   Dataset ds;
   ds.name = r.str();
+
+  Sources sources;
+  const auto n_sources = r.pod<std::uint64_t>();
+  r.check_count(n_sources, 8 + 1 + 8 + 8);
+  sources.reserve(static_cast<std::size_t>(n_sources));
+  for (std::uint64_t k = 0; k < n_sources; ++k) {
+    SourceFile s;
+    s.name = r.str();
+    const auto present = r.pod<std::uint8_t>();
+    if (present > 1) r.fail("bad source flag");
+    s.present = present == 1;
+    s.size = r.pod<std::uint64_t>();
+    s.mtime_ns = r.pod<std::int64_t>();
+    sources.push_back(std::move(s));
+  }
+
   read_id_map(r, ds.users, n_users, "user");
   read_id_map(r, ds.items, n_items, "item");
 
@@ -274,6 +415,9 @@ Dataset load_cache(const fs::path& file) {
     validate(m);
   } catch (const SparseError& e) {
     r.fail(std::string("rating matrix: ") + e.what());
+  }
+  for (const float v : m.values) {
+    if (!valid_rating(v)) r.fail("rating value " + std::to_string(v) + " out of range");
   }
 
   r.check_count(n_items, 8 + 8 + 5 + 4 + 9 + 9);  // smallest possible movie record
@@ -308,32 +452,54 @@ Dataset load_cache(const fs::path& file) {
   if ((flags & kFlagGenome) != 0) {
     GenomeMatrix g;
     g.n_items = r.pod<std::uint32_t>();
+    if (g.n_items != n_items) {
+      r.fail("genome n_items " + std::to_string(g.n_items) + " != n_items " + std::to_string(n_items));
+    }
     g.n_tags = r.pod<std::uint32_t>();
     r.check_count(g.n_tags, 8);
     g.tag_names.reserve(g.n_tags);
     for (std::uint32_t k = 0; k < g.n_tags; ++k) g.tag_names.push_back(r.str());
     r.array(g.relevance, static_cast<std::uint64_t>(g.n_items) * g.n_tags);
+    for (const float v : g.relevance) {
+      if (!valid_relevance(v)) r.fail("genome relevance " + std::to_string(v) + " out of [0, 1]");
+    }
     ds.genome = std::move(g);
   }
 
   r.finish();
   ds.by_item = transpose(ds.by_user);
+  if (sources_out != nullptr) *sources_out = std::move(sources);
   return ds;
 }
 
+}  // namespace
+
+void save_cache(const Dataset& ds, const fs::path& file) { write_cache(ds, file, {}); }
+
+Dataset load_cache(const fs::path& file) { return read_cache(file, nullptr); }
+
 Dataset load_or_build(const fs::path& raw_dir, const fs::path& cache_file, std::string name) {
+  // Fingerprint before parsing: if a file changes during the parse, the next run sees the change.
+  const Sources current = fingerprint(raw_dir);
   if (fs::exists(cache_file)) {
     try {
-      Dataset ds = load_cache(cache_file);
-      if (ds.name == name) return ds;
-      std::cerr << "recs: cache " << cache_file.string() << " holds dataset '" << ds.name << "', not '" << name
-                << "'; rebuilding\n";
+      Sources stored;
+      Dataset ds = read_cache(cache_file, &stored);
+      if (ds.name != name) {
+        std::cerr << "recs: cache " << cache_file.string() << " holds dataset '" << ds.name << "', not '" << name
+                  << "'; rebuilding\n";
+      } else if (stored != current) {
+        std::cerr << "recs: raw files in " << raw_dir.string() << " changed since cache " << cache_file.string()
+                  << " was built; rebuilding\n";
+      } else {
+        return ds;
+      }
     } catch (const DatasetError& e) {
       std::cerr << "recs: ignoring unusable cache (" << e.what() << "); rebuilding\n";
     }
   }
   Dataset ds = load_movielens(raw_dir, std::move(name));
-  save_cache(ds, cache_file);
+  write_cache(ds, cache_file, current);
   return ds;
 }
 
