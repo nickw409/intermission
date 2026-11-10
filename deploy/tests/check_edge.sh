@@ -8,8 +8,9 @@
 #   - the only host binding is 127.0.0.1
 #   - security audit fixes: gzip only (no zstd), unknown /assets/* is 404, recs-api's sandbox
 #     CSP survives on /api/posters/*, no h2c, a stalled body gets security headers and a close
-#     (its 499 status is a KNOWN Caddy limitation, reported not failed), and the access
-#     log holds no query strings, headers or cookies but does hold the request id
+#     (its 499 status is the tracked expected failure SA3-5b, see xfail), and the access
+#     log holds no query strings, headers or cookies but does hold the request id, which is
+#     set on every request (Caddy-made responses included) and matches X-Request-ID
 #
 # EDGE_PROJECT overrides the compose project name, EDGE_PORT the loopback port.
 #
@@ -29,6 +30,9 @@ scratch="$(mktemp -d)"
 fails=0
 fail() { echo "  FAIL: $*" >&2; fails=$((fails + 1)); }
 pass() { echo "  ok: $*"; }
+# xfail ID MESSAGE: a known, tracked open finding. Never counted as a pass; listed in the summary.
+xfails=()
+xfail() { echo "  XFAIL [$1, open finding]: $2" >&2; xfails+=("$1"); }
 
 # Scratch data dirs (read-only mounts only; everything writable is a named volume).
 mkdir -p "$scratch/data/artifacts" "$scratch/data/reports" "$scratch/data/backups"
@@ -184,15 +188,18 @@ print(data.decode("latin-1"))
 PY
 )"
 status="$(head -n 1 <<<"$stall" | tr -d '\r')"
-if [[ -z "$status" ]]; then
-  pass "stalled body: connection closed without a response"
-elif [[ "$status" == "HTTP/1.1 408"* ]]; then
-  pass "stalled body -> $status"
-elif [[ "$status" == "HTTP/1.1 499"* ]]; then
-  # KNOWN (audit SA3-5, open): Caddy 2.11.9's reverse_proxy writes this 499 itself when the
-  # request context is cancelled, bypassing handle_errors (see the Caddyfile). Reported, not
-  # counted, until it can be fixed; the headers below are still enforced.
-  echo "  KNOWN: stalled body answered '$status' (Caddy reverse_proxy; see Caddyfile handle_errors)"
+# Expected failure, tracked as open finding SA3-5b (owner decision): the wanted outcome is a
+# 408 or a clean close, but Caddy 2.11.9's reverse_proxy writes this 499 itself when the
+# request context is cancelled, bypassing handle_errors (see the Caddyfile). Which status the
+# client sees is a race between Caddy's read_body timeout and recs-api's own 15 s ReadTimeout:
+# 499 when Caddy's fires first, 504 (through handle_errors) when recs-api's does; both were
+# observed. Either is reported as XFAIL, never as a pass; any other wrong answer fails; and the
+# wanted outcome itself fails as XPASS, so this check must be updated (and SA3-5b closed) the
+# moment the behaviour changes.
+if [[ "$status" == "HTTP/1.1 499"* || "$status" == "HTTP/1.1 504"* ]]; then
+  xfail "SA3-5b" "stalled body answered '$status', want 408 or a clean close (Caddy/recs-api timeout race)"
+elif [[ -z "$status" || "$status" == "HTTP/1.1 408"* ]]; then
+  fail "XPASS: stalled body now gives '${status:-a clean close}'; SA3-5b looks fixed: make this a normal pass and close the finding"
 else
   fail "stalled body answered '$status'"
 fi
@@ -224,6 +231,40 @@ else
   fail "no access log line with uri \"/api/me\" (query stripped)"
 fi
 
+echo "== one request id per request, also for responses Caddy makes itself (M2)"
+# logged_rid STATUS: the response's X-Request-ID (from $scratch/h) must be non-empty, appear as
+# request_id in exactly the access-log line of this request, and that line has STATUS.
+logged_rid() {
+  local want="$1" rid line
+  rid="$(hdr "$scratch/h" X-Request-ID)"
+  [[ -n "$rid" ]] || { fail "$want response has no X-Request-ID"; return; }
+  sleep 1
+  line="$(dc logs --no-color caddy 2>&1 | grep '"logger":"http.log.access' | grep -F "\"request_id\":\"$rid\"" || true)"
+  if [[ "$(grep -c . <<<"$line")" == 1 ]] && grep -q "\"status\":$want" <<<"$line"; then
+    pass "$want: access log request_id = X-Request-ID ($rid)"
+  else
+    fail "$want: no single access-log line with request_id '$rid' and status $want: $line"
+  fi
+}
+code="$(get /assets/also-missing-0123.js)"
+[[ "$code" == 404 ]] || fail "missing asset returned $code"
+logged_rid 404
+head -c 66560 /dev/zero | tr '\0' 'a' > "$scratch/big"
+code="$(get /api/auth/login -X POST "${csrf[@]}" --data-binary "@$scratch/big")"
+[[ "$code" == 413 ]] || fail "65 KB body returned $code"
+logged_rid 413
+code="$(get /)"
+logged_rid 200
+# A valid incoming id is kept end to end (recs-api reuses it too); an invalid one is replaced.
+code="$(get /api/me -H 'X-Request-ID: edge-check-req-1234')"
+[[ "$(hdr "$scratch/h" X-Request-ID)" == edge-check-req-1234 ]] && pass "valid incoming X-Request-ID kept" \
+  || fail "valid incoming X-Request-ID became '$(hdr "$scratch/h" X-Request-ID)'"
+code="$(get /api/me -H 'X-Request-ID: bad id <script>')"
+v="$(hdr "$scratch/h" X-Request-ID)"
+[[ -n "$v" && "$v" != *script* && "$v" =~ ^[A-Za-z0-9._-]{1,64}$ ]] && pass "invalid incoming X-Request-ID replaced ($v)" \
+  || fail "invalid incoming X-Request-ID gave '$v'"
+logged_rid 401
+
 echo "== errors Caddy raises itself (recs-api stopped: 502)"
 dc stop api >/dev/null 2>&1
 code="$(get /api/me)"
@@ -234,6 +275,11 @@ code="$(get /api/me)"
 
 if [[ $fails -gt 0 ]]; then
   echo "FAIL: $fails edge check(s) failed" >&2
+  [[ ${#xfails[@]} -gt 0 ]] && printf '  (and expected failures: %s)\n' "${xfails[*]}" >&2
   exit 1
 fi
-echo "PASS: edge checks"
+if [[ ${#xfails[@]} -gt 0 ]]; then
+  echo "PASS: edge checks, with ${#xfails[@]} EXPECTED FAILURE(S) still open: ${xfails[*]}"
+else
+  echo "PASS: edge checks"
+fi
