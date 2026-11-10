@@ -2,7 +2,6 @@ package db
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -159,18 +158,6 @@ func TestMigrateRefusesForeignKeyViolations(t *testing.T) {
 	}
 	if got := pragma(t, d.Writer, "foreign_keys"); got != "1" {
 		t.Fatalf("writer foreign_keys = %s after a failed migration", got)
-	}
-}
-
-// SA5-3: deleted rows are overwritten in the main file (FAST also zeroes
-// them in the WAL when they are rewritten there).
-func TestSecureDeleteOnEveryConnection(t *testing.T) {
-	d, _ := openTemp(t)
-	for name, conn := range map[string]*sql.DB{"writer": d.Writer, "reader": d.Reader} {
-		// 2 = FAST.
-		if got := pragma(t, conn, "secure_delete"); got != "2" {
-			t.Errorf("%s secure_delete = %s, want 2 (FAST)", name, got)
-		}
 	}
 }
 

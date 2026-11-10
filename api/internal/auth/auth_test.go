@@ -636,12 +636,18 @@ func TestDeleteMeNotifiesAndCheckpoints(t *testing.T) {
 	if len(got) != 1 || got[0] != id {
 		t.Fatalf("user-deleted hooks got %v, want [%d]", got, id)
 	}
-	st, err := os.Stat(h.db.Path() + "-wal")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st.Size() != 0 {
-		t.Fatalf("WAL holds %d bytes after an account deletion", st.Size())
+	// The checkpoint runs in the background, soon after.
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		st, err := os.Stat(h.db.Path() + "-wal")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Size() == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("WAL still holds %d bytes 5 s after an account deletion", st.Size())
+		}
 	}
 	// A failed delete (no session) notifies nobody.
 	if rec := h.do("DELETE", "/api/me", nil, token); rec.Code != 401 {
