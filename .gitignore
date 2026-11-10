@@ -12,10 +12,20 @@
 *.pem
 *.key
 
+# Logs, backups and archives (may hold personal data)
+*.log
+logs/
+*.bak
+backups/
+*.tar
+*.tar.*
+*.zst
+
 # Builds
 /build*/
 /out/
 /web/node_modules/
+**/node_modules/
 /web/dist/
 /api/bin/
 *.o
