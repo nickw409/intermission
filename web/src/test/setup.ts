@@ -10,5 +10,6 @@ beforeAll(() => server.listen({ onUnhandledFrame: 'error' }));
 afterEach(() => {
   cleanup();
   server.resetHandlers();
+  server.events.removeAllListeners();
 });
 afterAll(() => server.close());
