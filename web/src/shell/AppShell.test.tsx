@@ -122,6 +122,18 @@ describe('auth state', () => {
     expect(await screen.findByRole('link', { name: 'Log in' })).toBeInTheDocument();
   });
 
+  it('stays logged in and says so when logout fails for another reason', async () => {
+    const user = userEvent.setup();
+    server.use(handlerFor('logout', 'csrf_rejected'));
+    const { router } = renderApp('/ratings');
+    await user.click(await screen.findByRole('button', { name: /alice/ }));
+    await user.click(screen.getByRole('button', { name: 'Log out' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Your request was blocked. Reload the page and try again.');
+    expect(screen.getByRole('button', { name: /alice/ })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Log in' })).not.toBeInTheDocument();
+    expect(router.state.location.pathname).toBe('/ratings');
+  });
+
   it('closes the account menu with Escape and returns focus to its button', async () => {
     const user = userEvent.setup();
     renderApp('/');
