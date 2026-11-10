@@ -73,6 +73,15 @@ std::string stable(nlohmann::json rep) {
   return rep.dump(2);
 }
 
+// Writes the report to build/<preset>/test-reports/ (replacing an earlier test run's file) so CI
+// can validate real output with the Node contract validator.
+void write_test_report(const nlohmann::json& rep) {
+  const auto dir = test_reports_dir();
+  fs::create_directories(dir);
+  fs::remove(dir / (rep["run_id"].get<std::string>() + ".json"));
+  CHECK(fs::exists(recs::write_report(rep, dir)));
+}
+
 void require_valid(const nlohmann::json& doc) {
   const auto errs = recs::testing::SchemaChecker::from_contract("report.schema.json").errors(doc);
   for (const auto& e : errs) UNSCOPED_INFO(e);
@@ -99,11 +108,7 @@ TEST_CASE("tiny: load -> split -> fit pop -> evaluate -> report", "[c1][integrat
     const double ndcg = rep["metrics"]["ndcg@10"]["mean"].get<double>();
     CHECK(ndcg >= 0.0);
     CHECK(ndcg <= 1.0);
-    // Write to build/<preset>/test-reports/ for the Node validator; overwrite earlier runs.
-    const auto dir = test_reports_dir();
-    fs::create_directories(dir);
-    fs::remove(dir / (rep["run_id"].get<std::string>() + ".json"));
-    CHECK(fs::exists(recs::write_report(rep, dir)));
+    write_test_report(rep);
   }
 }
 
@@ -125,6 +130,7 @@ TEST_CASE("ml-latest-small: popularity end to end (skipped without the data)", "
   const auto ds = recs::load_movielens(raw, "ml-latest-small");
   const auto run = run_pop(ds, "pop", "ml-latest-small_pop_test");
   require_valid(run.report);
+  write_test_report(run.report);
   CHECK(run.report["counts"]["n_users"] == 610);
   CHECK(run.report["counts"]["n_items"] == 9742);
   const auto& ndcg = run.report["metrics"]["ndcg@10"];

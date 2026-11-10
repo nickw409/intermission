@@ -78,6 +78,41 @@ TEST_CASE("rating baselines only score the requested users, in order", "[c1][bas
   CHECK(res[0].sq_err[1] == Approx(0.25));
 }
 
+TEST_CASE("rating baselines sum several held-out ratings per user", "[c1][baselines]") {
+  // u0 holds out i3 = 4.0 and i2 = 3.0; u2 holds out i3 = 2.0, i1 = 5.0 and i2 = 4.5.
+  const std::vector<std::vector<recs::Rating>> ho = {{{3, 4.f, 9}, {2, 3.f, 9}}, {}, {{3, 2.f, 9}, {1, 5.f, 9}, {2, 4.5f, 9}}, {}};
+  const std::vector<recs::UserIdx> us = {0, 2};
+  const auto res = recs::evaluate_rating_baselines(train(), ho, us);
+  // Per baseline: predictions for (u0: i3, i2) and (u2: i3, i1, i2).
+  const std::vector<std::vector<std::vector<double>>> preds = {
+      {{mu, mu}, {mu, mu, mu}},
+      {{mu + bu0, mu + bu0}, {mu + bu2, mu + bu2, mu + bu2}},
+      {{mu + b3, mu + b2}, {mu + b3, mu + b1, mu + b2}},
+      {{mu + b3 + cu0, mu + b2 + cu0}, {mu + b3 + cu2, mu + b1 + cu2, mu + b2 + cu2}},
+  };
+  const std::vector<std::vector<double>> actual = {{4.0, 3.0}, {2.0, 5.0, 4.5}};
+  REQUIRE(res.size() == 4);
+  for (std::size_t b = 0; b < 4; ++b) {
+    INFO(res[b].name);
+    REQUIRE(res[b].sq_err.size() == 2);
+    for (std::size_t j = 0; j < 2; ++j) {
+      double sq = 0.0, ab = 0.0;
+      for (std::size_t q = 0; q < actual[j].size(); ++q) {
+        const double e = actual[j][q] - preds[b][j][q];
+        sq += e * e;
+        ab += std::abs(e);
+      }
+      CHECK(res[b].sq_err[j] == Approx(sq).epsilon(1e-9));
+      CHECK(res[b].abs_err[j] == Approx(ab).epsilon(1e-9));
+      CHECK(res[b].count[j] == static_cast<double>(actual[j].size()));
+    }
+  }
+  // Global mean, written out: u0 = 0.5^2 + 0.5^2 = 0.5; u2 = 1.5^2 + 1.5^2 + 1^2 = 5.5.
+  CHECK(res[0].sq_err[0] == Approx(0.5));
+  CHECK(res[0].sq_err[1] == Approx(5.5));
+  CHECK(res[0].abs_err[1] == Approx(4.0));
+}
+
 TEST_CASE("make_report fills rating_baselines when given", "[c1][baselines][report]") {
   const auto ds = train();
   recs::testing::FixedScoreModel m({4.f, 3.f, 2.f, 1.f});

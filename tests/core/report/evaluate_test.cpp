@@ -282,38 +282,82 @@ TEST_CASE("evaluate: a rating model that cannot score a held-out item predicts t
   CHECK(r.per_user[0].sq_err == Approx(3.25));
 }
 
-TEST_CASE("evaluate is identical with 1 and 4 threads", "[c1][eval][determinism]") {
-  // A random-ish dataset large enough to split work across threads.
-  std::vector<recs::Triplet> t;
-  recs::Rng rng(7);
-  const std::uint32_t n_users = 60, n_items = 40;
-  std::vector<std::vector<recs::Rating>> heldout(n_users);
-  for (std::uint32_t u = 0; u < n_users; ++u) {
-    for (std::uint32_t i = 0; i < n_items; ++i) {
-      const auto x = rng.uniform(10);
-      const float v = static_cast<float>(1 + rng.uniform(10)) / 2.f;
-      if (x < 3) t.push_back({u, i, v, static_cast<std::int64_t>(i)});
-      else if (x == 3) heldout[u].push_back({i, v, 100});
+namespace {
+
+// 60 users x 40 items of pseudo-random ratings: ~30% train, ~10% held out per user.
+struct RandomData {
+  recs::Dataset train;
+  std::vector<std::vector<recs::Rating>> heldout;
+  std::vector<recs::UserIdx> users;
+  RandomData() {
+    std::vector<recs::Triplet> t;
+    recs::Rng rng(7);
+    const std::uint32_t n_users = 60, n_items = 40;
+    heldout.resize(n_users);
+    for (std::uint32_t u = 0; u < n_users; ++u) {
+      for (std::uint32_t i = 0; i < n_items; ++i) {
+        const auto x = rng.uniform(10);
+        const float v = static_cast<float>(1 + rng.uniform(10)) / 2.f;
+        if (x < 3) t.push_back({u, i, v, static_cast<std::int64_t>(i)});
+        else if (x == 3) heldout[u].push_back({i, v, 100});
+      }
+      users.push_back(u);
     }
+    train = recs::make_dataset("rand", n_users, n_items, t);
   }
-  const auto train = recs::make_dataset("rand", n_users, n_items, t);
-  auto pop = recs::make_popularity();
-  pop->fit(train, recs::Config::object(), {});
-  std::vector<recs::UserIdx> users(n_users);
-  for (std::uint32_t u = 0; u < n_users; ++u) users[u] = u;
+};
+
+// Report JSON without the fields the determinism gate removes, for `threads` OpenMP threads.
+std::string stable_report(const recs::Model& m, const RandomData& d, int threads, bool baselines) {
+  omp_set_num_threads(threads);
   recs::EvalOptions opt;
-  const auto split = make_split_for(train);
-  auto run = [&](int threads) {
-    omp_set_num_threads(threads);
-    const auto r = recs::evaluate(*pop, train, heldout, users, opt);
-    auto rep = recs::make_report(header_for(split), r, opt);
-    for (const char* k : {"run_id", "created_at", "train_seconds", "eval_seconds", "peak_rss_bytes"}) rep.erase(k);
-    return rep.dump(2);
-  };
-  const auto one = run(1);
-  const auto four = run(4);
-  const auto again = run(4);
+  const auto r = recs::evaluate(m, d.train, d.heldout, d.users, opt);
+  const auto split = make_split_for(d.train);
+  auto h = header_for(split);
+  std::vector<recs::RatingBaselineResult> bl;
+  if (baselines) {
+    bl = recs::evaluate_rating_baselines(d.train, d.heldout, d.users);
+    h.rating_baselines = &bl;
+  }
+  auto rep = recs::make_report(h, r, opt);
   omp_set_num_threads(2);
+  for (const char* k : {"run_id", "created_at", "train_seconds", "eval_seconds", "peak_rss_bytes"}) rep.erase(k);
+  return rep.dump(2);
+}
+
+}  // namespace
+
+TEST_CASE("evaluate is identical with 1 and 4 threads", "[c1][eval][determinism]") {
+  const RandomData d;
+  auto pop = recs::make_popularity();
+  pop->fit(d.train, recs::Config::object(), {});
+  const auto one = stable_report(*pop, d, 1, false);
+  CHECK(one == stable_report(*pop, d, 4, false));
+  CHECK(one == stable_report(*pop, d, 4, false));
+}
+
+TEST_CASE("evaluate is identical with 1 and 4 threads: parity and rating paths", "[c1][eval][determinism]") {
+  const RandomData d;
+  const recs::testing::PerturbedModel m(40);
+  // Guard that the fixture exercises what it should: fractional parity and rating errors.
+  omp_set_num_threads(2);
+  const auto r = recs::evaluate(m, d.train, d.heldout, d.users, recs::EvalOptions{});
+  REQUIRE(r.has_rating_task);
+  REQUIRE(r.foldin_jaccard10.has_value());
+  CHECK(*r.foldin_jaccard10 > 0.0);
+  CHECK(*r.foldin_jaccard10 < 1.0);
+  std::size_t fractional = 0;
+  for (const auto& pu : r.per_user) {
+    if (pu.sq_err != std::floor(pu.sq_err)) ++fractional;
+  }
+  CHECK(fractional > 30);
+
+  const auto one = stable_report(m, d, 1, true);
+  const auto four = stable_report(m, d, 4, true);
   CHECK(one == four);
-  CHECK(four == again);
+  CHECK(four == stable_report(m, d, 4, true));
+  const auto j = nlohmann::json::parse(one);
+  CHECK_FALSE(j["rating_metrics"].is_null());
+  CHECK_FALSE(j["rating_baselines"].is_null());
+  CHECK_FALSE(j["foldin_jaccard@10"].is_null());
 }
