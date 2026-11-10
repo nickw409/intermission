@@ -148,8 +148,18 @@ func (d *DB) Version(ctx context.Context) (int, error) {
 }
 
 // Migrate backs up the database and applies pending migrations; see migrate.go.
+//
+// It runs at every startup, so it also does the startup housekeeping:
+// backup retention (inside migrate) and, best effort, a TRUNCATE checkpoint,
+// so data deleted before a crash or restart doesn't wait in app.db-wal.
 func (d *DB) Migrate(ctx context.Context, logger *slog.Logger) error {
-	return d.migrate(ctx, logger, embedded())
+	if err := d.migrate(ctx, logger, embedded()); err != nil {
+		return err
+	}
+	if err := d.CheckpointTruncateRetry(ctx); err != nil {
+		logger.Warn("startup WAL checkpoint did not complete", "err", err)
+	}
+	return nil
 }
 
 // OnUserDeleted registers f to run after an account is deleted. Packages

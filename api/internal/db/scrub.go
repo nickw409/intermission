@@ -21,7 +21,8 @@ import (
 // re-arms) one background goroutine that tries on the maintenance
 // connection, whose busy timeout is short (maintBusyMS), and retries with
 // backoff until it succeeds or the schedule runs out. If it runs out, the
-// next scheduled, startup or nightly checkpoint finishes the job.
+// next scheduled one, the startup one (DB.Migrate) or the nightly one
+// (export-ratings) finishes the job.
 
 // maintBusyMS is the maintenance connection's busy timeout: the longest one
 // checkpoint attempt can hold off writers.

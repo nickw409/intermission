@@ -106,11 +106,13 @@ func (d *DB) migrate(ctx context.Context, logger *slog.Logger, fsys fs.FS) error
 			return fmt.Errorf("backup before migrating: %w", err)
 		}
 		logger.Info("database backup written before migrating", "backup", path, "version", current)
-		if err := pruneBackups(filepath.Dir(path), time.Now(), filepath.Base(path)); err != nil {
+		future, err := pruneBackups(filepath.Dir(path), time.Now(), filepath.Base(path))
+		if err != nil {
 			// The new backup exists; failing to delete old ones is not a
 			// reason to refuse to start.
 			logger.Warn("pruning old pre-migration backups failed", "err", err)
 		}
+		warnFuture(logger, future)
 	}
 
 	if err := d.applyWithoutForeignKeys(ctx, ms[current:], latest); err != nil {
@@ -202,10 +204,13 @@ func (d *DB) applyWithoutForeignKeys(ctx context.Context, pending []migration, l
 // weeks. So pruneBackups deletes a backup that is beyond the newest
 // keepBackups OR at least maxBackupAge old, except that a backup younger
 // than minBackupAge is never deleted (a fresh migration always leaves a
-// rollback point), nor is the one just written. A name dated more than
-// clockSkew in the future (the clock stepped back, or a bad name) or whose
-// timestamp doesn't parse can't be trusted to age out, so it counts as
-// expired.
+// rollback point), nor is the one just written. A name whose timestamp
+// doesn't parse counts as expired. A name dated more than clockSkew in the
+// future is most likely a real, recent backup and the clock stepped back:
+// it is never deleted, does not count towards the newest keepBackups, and is
+// reported so the caller can warn that the clock or the file dates look
+// wrong. (Deleting such files would wipe every recent backup whenever the
+// host clock jumps back.)
 const (
 	keepBackups  = 3
 	maxBackupAge = 35 * 24 * time.Hour
@@ -225,18 +230,31 @@ var backupName = regexp.MustCompile(`^app-pre-migrate-v\d+-(\d{8}T\d{6}\.\d{9}Z)
 // nightly run. Failures are logged, never fatal.
 func (d *DB) PruneBackups(logger *slog.Logger) {
 	dir := filepath.Join(filepath.Dir(d.path), "backups")
-	if err := pruneBackups(dir, time.Now(), ""); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	future, err := pruneBackups(dir, time.Now(), "")
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		logger.Warn("pruning old pre-migration backups failed", "err", err)
+	}
+	warnFuture(logger, future)
+}
+
+// warnFuture logs the backups pruneBackups kept because they are dated in
+// the future (file names only).
+func warnFuture(logger *slog.Logger, future []string) {
+	if len(future) > 0 {
+		logger.Warn("pre-migration backups are dated more than a day in the future; the system clock "+
+			"or the file dates look wrong. They are kept and not pruned until the clock catches up",
+			"files", future)
 	}
 }
 
 // pruneBackups applies the retention rules above to the pre-migration
 // backups in dir, as of now; protect (a base name, or "") is never deleted.
-// Files that don't match backupName are never touched.
-func pruneBackups(dir string, now time.Time, protect string) error {
+// It returns the names it kept because they are dated in the future. Files
+// that don't match backupName are never touched.
+func pruneBackups(dir string, now time.Time, protect string) (future []string, err error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	type backupFile struct {
 		name string
@@ -250,8 +268,12 @@ func pruneBackups(dir string, now time.Time, protect string) error {
 			continue
 		}
 		at, err := time.Parse(backupStampLayout, m[1])
-		if err != nil || at.Sub(now) > clockSkew {
+		if err != nil {
 			expired = append(expired, e.Name())
+			continue
+		}
+		if at.Sub(now) > clockSkew {
+			future = append(future, e.Name())
 			continue
 		}
 		valid = append(valid, backupFile{e.Name(), at})
@@ -275,7 +297,8 @@ func pruneBackups(dir string, now time.Time, protect string) error {
 			errs = append(errs, err)
 		}
 	}
-	return errors.Join(errs...)
+	sort.Strings(future)
+	return future, errors.Join(errs...)
 }
 
 func (d *DB) isEmpty(ctx context.Context) (bool, error) {

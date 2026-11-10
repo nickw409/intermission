@@ -1,8 +1,10 @@
 package db
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -214,13 +216,15 @@ func TestPruneBackupsRetention(t *testing.T) {
 			[]string{"a", "b", "c", "d", "e"}},
 		{"old lone backup goes", map[string]time.Duration{"a": 40 * day},
 			nil},
-		// Negative ages are in the future: the clock stepped back, or a bad name.
-		{"dated more than a day ahead is expired", map[string]time.Duration{"a": -2 * day, "b": -30 * day, "c": 2 * day},
-			[]string{"c"}},
+		// Negative ages are in the future: most likely the clock stepped back, so these are
+		// real, recent backups. Never deleted, not counted towards the newest 3, warned about.
+		{"dated more than a day ahead is kept and not counted", map[string]time.Duration{
+			"a": -2 * day, "b": -30 * day, "c": 2 * day, "d": 3 * day, "e": 4 * day, "f": 5 * day},
+			[]string{"a", "b", "c", "d", "e"}},
 		{"dated less than a day ahead is kept", map[string]time.Duration{"a": -time.Hour},
 			[]string{"a"}},
-		{"clock stepped back: only the file just written survives", map[string]time.Duration{"a": -2 * day, "b": -3 * day, "protected": -4 * day},
-			[]string{"protected"}},
+		{"clock stepped back: everything survives", map[string]time.Duration{"a": -2 * day, "b": -3 * day, "protected": -4 * day},
+			[]string{"a", "b", "protected"}},
 		{"the file just written is kept whatever its date", map[string]time.Duration{"protected": 90 * day},
 			[]string{"protected"}},
 	}
@@ -247,8 +251,14 @@ func TestPruneBackupsRetention(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, bogus), []byte("x"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if err := pruneBackups(dir, now, names["protected"]); err != nil {
+			future, err := pruneBackups(dir, now, names["protected"])
+			if err != nil {
 				t.Fatal(err)
+			}
+			for label, age := range tc.ages {
+				if want := age < -clockSkew && label != "protected"; contains(future, names[label]) != want {
+					t.Errorf("%s (age %v): reported as future-dated=%v, want %v", label, age, !want, want)
+				}
 			}
 			if _, err := os.Stat(filepath.Join(dir, bogus)); !os.IsNotExist(err) {
 				t.Errorf("unparsable backup name kept: %v", err)
@@ -345,6 +355,46 @@ func contains(list []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// PR #42 re-review 1: a backup written while the clock was ahead is not
+// deleted on the next startup; the startup log warns about it (file names
+// only). Startup also truncates the WAL (re-review 6).
+func TestStartupKeepsFutureDatedBackupAndCheckpoints(t *testing.T) {
+	d, path := openTemp(t)
+	ctx := context.Background()
+	if err := d.Migrate(ctx, quietLogger()); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(filepath.Dir(path), "backups")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ahead := backupFileName(2, time.Now().Add(3*24*time.Hour))
+	if err := os.WriteFile(filepath.Join(dir, ahead), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, d, "INSERT INTO users (username, pw_hash, created_at) VALUES ('walfill', 'h', 0)")
+	var logs bytes.Buffer
+	if err := d.Migrate(ctx, slog.New(slog.NewTextHandler(&logs, nil))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ahead)); err != nil {
+		t.Fatalf("future-dated backup deleted at startup: %v", err)
+	}
+	if !strings.Contains(logs.String(), "clock") || !strings.Contains(logs.String(), ahead) {
+		t.Errorf("no warning about the future-dated backup: %s", logs.String())
+	}
+	if strings.Contains(logs.String(), "walfill") {
+		t.Errorf("user data in the log: %s", logs.String())
+	}
+	st, err := os.Stat(path + "-wal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Size() != 0 {
+		t.Errorf("WAL is %d bytes after startup", st.Size())
+	}
 }
 
 // PR #42 review H2: retention also runs when there is nothing to migrate,
