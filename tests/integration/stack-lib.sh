@@ -145,7 +145,8 @@ stack_invite() {
   printf '%s\n' "$code"
 }
 
-# stack_signup USER CODE: create an account through Caddy. The password is read from stdin, and
+# stack_signup USER CODE: create an account through Caddy. The password is read from stdin (one
+# line; a trailing newline is dropped), and
 # the password and invite code reach curl through a 0600 file, never through any argv.
 stack_signup() {
   local user="$1" code="$2" body
@@ -153,6 +154,7 @@ stack_signup() {
   { cat; printf '\n%s' "$code"; } | python3 -c '
 import json, sys
 password, code = sys.stdin.read().rsplit("\n", 1)
+password = password.rstrip("\n")  # a trailing newline from the producer is not part of it
 print(json.dumps({"username": sys.argv[1], "password": password, "invite_code": code}))' "$user" > "$body"
   local rc=0
   curl -fsS -o /dev/null --max-time 10 -X POST -H "Host: ${STACK_ORIGIN#*://}" -H "Origin: $STACK_ORIGIN" \
