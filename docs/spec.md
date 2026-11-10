@@ -172,7 +172,7 @@ Also report a pure count-based variant. Both are baselines that every other mode
 ### Content-based
 
 - Movie vector: tag-genome relevance if available, else TF-IDF over user tags plus one-hot genres, L2-normalized.
-- User profile: Σ (rᵤⱼ − μᵤ)·vⱼ over rated movies, where μᵤ is the user's mean rating.
+- User profile: Σ (rᵤⱼ − μ − bᵤ − bⱼ)·vⱼ over rated movies: each rating minus the damped baseline predictor (Koren 2010). μ is the mean training rating; bⱼ = Σᵤ (rᵤⱼ − μ)/(βᵢ + nⱼ) is learned at training time and saved with the model; bᵤ = Σⱼ (rᵤⱼ − μ − bⱼ)/(βᵤ + nᵤ) is computed at fold-in. Choose βᵤ and βᵢ on the validation split (ml-latest-small: βᵤ = 100, βᵢ = 1,000). Centering on the user's own mean, the original formula, is kept as a config option (`centering: user_mean`, with `global_mean` and `damped_user_mean`) for comparison only: its weights sum to zero, so a feature shared by every rated movie cancels, and a user who rated only comedies gets no comedy signal. Amended 2026-11-10 by owner decision; see `docs/phase-1.md` (Content centering).
 - Score: cosine(profile, vᵢ). Explanation: the rated movie whose vector contributes most to that score.
 
 ### Item-KNN

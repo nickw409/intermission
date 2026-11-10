@@ -18,6 +18,7 @@
 #include <omp.h>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "content_fixtures.hpp"
 #include "property.hpp"
@@ -155,10 +156,9 @@ TEST_CASE("Content load: damaged or hostile files are rejected, never trusted", 
   for (const auto& e : fs::directory_iterator(dir.path())) files.push_back(e.path());
   REQUIRE(!files.empty());
 
-  fs::path bin;
-  for (const auto& f : files)
-    if (f.extension() == ".bin") bin = f;
-  REQUIRE(!bin.empty());
+  REQUIRE(files.size() == 3);  // features.bin, centering.bin, config.json
+  REQUIRE(fs::exists(dir.path() / "features.bin"));
+  REQUIRE(fs::exists(dir.path() / "centering.bin"));
 
   // Truncation at many lengths, trailing garbage, and a missing file, for every file.
   for (const auto& file : files) {
@@ -184,32 +184,48 @@ TEST_CASE("Content load: damaged or hostile files are rejected, never trusted", 
     write_file(file, good);
   }
 
-  // Single-byte corruption anywhere in the binary file. Flipping bits in a float value can give
+  // Single-byte corruption anywhere in each binary file. Flipping bits in a float value can give
   // another valid model, so not every flip must throw; what must hold is that load() either throws
-  // or yields a usable model (no crash, no NaN scores, sanitizer-clean).
-  const std::string good = read_file(bin);
-  std::size_t rejected = 0, positions = 0;
-  for (std::size_t pos = 0; pos < good.size(); pos += std::max<std::size_t>(1, good.size() / 211)) {
-    ++positions;
-    std::string bad = good;
-    bad[pos] = static_cast<char>(bad[pos] ^ 0x5A);
-    write_file(bin, bad);
-    auto m = make_content();
-    try {
-      m->load(dir.path());
-    } catch (const std::exception&) {
-      ++rejected;
-      continue;
+  // or yields a usable model (no crash, no NaN scores, sanitizer-clean). (Header and structure
+  // checks behind a valid checksum are tested below, with the file resealed.)
+  for (const char* name : {"features.bin", "centering.bin"}) {
+    INFO("file " << name);
+    const auto bin = dir.path() / name;
+    const std::string good = read_file(bin);
+    std::size_t rejected = 0, positions = 0;
+    for (std::size_t pos = 0; pos < good.size(); pos += std::max<std::size_t>(1, good.size() / 211)) {
+      ++positions;
+      std::string bad = good;
+      bad[pos] = static_cast<char>(bad[pos] ^ 0x5A);
+      write_file(bin, bad);
+      auto m = make_content();
+      try {
+        m->load(dir.path());
+      } catch (const std::exception&) {
+        ++rejected;
+        continue;
+      }
+      const auto state = m->fold_in(user_ratings(ds, 0));
+      for (float s : scores_of(*m, state)) CHECK(!std::isnan(s));
     }
-    const auto state = m->fold_in(user_ratings(ds, 0));
-    for (float s : scores_of(*m, state)) CHECK(!std::isnan(s));
+    INFO("rejected " << rejected << " of " << positions);
+    CHECK(rejected > 0);
+    write_file(bin, good);
   }
-  INFO("rejected " << rejected << " of " << positions);
-  CHECK(rejected > 0);
-  // (Header and structure checks behind a valid checksum are tested below, with the file resealed.)
-  write_file(bin, good);
   auto ok = make_content();
   CHECK_NOTHROW(ok->load(dir.path()));
+}
+
+TEST_CASE("Content load: an artifact without centering.bin asks for a retrain", "[content][persist]") {
+  Rng rng(99);
+  const auto ds = random_dataset(rng, 8, 20, 0.4);
+  auto trained = make_content();
+  trained->fit(ds, Config::object(), TrainContext{});
+  ScratchDir dir;
+  trained->save(dir.path());
+  fs::remove(dir.path() / "centering.bin");  // the layout before the centering change
+  auto m = make_content();
+  CHECK_THROWS_WITH(m->load(dir.path()), Catch::Matchers::ContainsSubstring("predates centering.bin; retrain"));
 }
 
 TEST_CASE("Content: score_trained_user is unavailable after load (no training matrix is saved)",
@@ -367,4 +383,82 @@ TEST_CASE("Content load: structurally invalid files with a valid checksum are re
   write_file(cfg, good_cfg);
   CHECK_NOTHROW(target->load(dir.path()));
   CHECK(bitwise_equal(scores_of(*target, state), before));
+}
+
+TEST_CASE("Content load: a damaged centering file is rejected, never trusted", "[content][persist]") {
+  // centering.bin layout, from the format comment in content.cpp: a 48-byte header
+  //   0 magic[8] | 8 u32 version | 12 u32 n_items | 16 u32 centering | 20 f64 user_damping
+  //   28 f64 item_damping | 36 f64 mu | 44 u32 has_item_bias
+  // then b_i (f64 x n_items) for "baseline", SHA-256 (32 bytes).
+  Rng rng(2718);
+  const auto ds = random_dataset(rng, 10, 40, 0.3);
+  for (const char* centering : {"baseline", "global_mean"}) {
+    INFO("centering " << centering);
+    const bool baseline = std::string_view(centering) == "baseline";
+    auto trained = make_content();
+    trained->fit(ds, Config{{"centering", centering}}, TrainContext{});
+    ScratchDir dir;
+    trained->save(dir.path());
+    const auto bin = dir.path() / "centering.bin";
+    const auto cfg = dir.path() / "config.json";
+    const std::string good = read_file(bin);
+    REQUIRE(good.size() == 48 + (baseline ? 8 * ds.n_items() : 0) + 32);
+
+    auto target = make_content();
+    target->load(dir.path());
+    const auto state = target->fold_in(user_ratings(ds, 0));
+    const auto before = scores_of(*target, state);
+
+    using Corrupt = std::function<void(std::string&)>;
+    std::vector<std::pair<std::string, Corrupt>> cases{
+        {"magic", [](std::string& b) { b[0] = 'X'; }},
+        {"format version", [](std::string& b) { put<std::uint32_t>(b, 8, 2); }},
+        {"n_items != feature file", [&](std::string& b) { put<std::uint32_t>(b, 12, ds.n_items() + 1); }},
+        {"centering != config.json", [&](std::string& b) { put<std::uint32_t>(b, 16, baseline ? 1 : 3); }},
+        {"unknown centering", [](std::string& b) { put<std::uint32_t>(b, 16, 77); }},
+        {"user_damping != config.json", [](std::string& b) { put<double>(b, 20, 3.0); }},
+        {"item_damping != config.json", [](std::string& b) { put<double>(b, 28, 3.0); }},
+        {"mu NaN", [](std::string& b) { put(b, 36, std::numeric_limits<double>::quiet_NaN()); }},
+        {"mu infinity", [](std::string& b) { put(b, 36, std::numeric_limits<double>::infinity()); }},
+        {"mu 1e300", [](std::string& b) { put(b, 36, 1e300); }},
+        {"mu below the rating range", [](std::string& b) { put(b, 36, 0.49); }},
+        {"mu above the rating range", [](std::string& b) { put(b, 36, 5.01); }},
+        {"item-bias flag flipped", [&](std::string& b) { put<std::uint32_t>(b, 44, baseline ? 0 : 1); }},
+        {"item-bias flag 2", [](std::string& b) { put<std::uint32_t>(b, 44, 2); }},
+    };
+    if (baseline) {
+      cases.push_back({"b_i NaN", [](std::string& b) { put(b, 48, std::numeric_limits<double>::quiet_NaN()); }});
+      cases.push_back({"b_i -1e300", [&](std::string& b) { put(b, 48 + 8 * (ds.n_items() - 1), -1e300); }});
+      cases.push_back({"b_i 4.51", [](std::string& b) { put(b, 48, 4.51); }});
+      cases.push_back({"b_i -4.51", [](std::string& b) { put(b, 48, -4.51); }});
+      cases.push_back({"b_i array cut short", [](std::string& b) { b.erase(48, 8); }});
+    } else {
+      cases.push_back({"unexpected b_i array", [](std::string& b) { b.insert(48, std::string(8, '\0')); }});
+    }
+    for (const auto& [what, corrupt] : cases) {
+      INFO(what);
+      std::string bad = good;
+      corrupt(bad);
+      REQUIRE(bad != good);
+      reseal(bad);
+      write_file(bin, bad);
+      CHECK_THROWS(target->load(dir.path()));
+      CHECK(bitwise_equal(scores_of(*target, state), before));
+    }
+    write_file(bin, good);
+
+    // config.json valid on its own but naming another centering or damping.
+    const std::string good_cfg = read_file(cfg);
+    auto other = Config::parse(good_cfg);
+    other["centering"] = baseline ? "global_mean" : "baseline";
+    write_file(cfg, other.dump());
+    CHECK_THROWS(target->load(dir.path()));
+    other = Config::parse(good_cfg);
+    other["user_damping"] = 7.0;
+    write_file(cfg, other.dump());
+    CHECK_THROWS(target->load(dir.path()));
+    write_file(cfg, good_cfg);
+    CHECK_NOTHROW(target->load(dir.path()));
+    CHECK(bitwise_equal(scores_of(*target, state), before));
+  }
 }
