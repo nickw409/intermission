@@ -16,6 +16,10 @@ RUN npm ci --no-audit --no-fund
 COPY contracts/ /src/contracts/
 COPY web/ ./
 RUN npm run build
+# The Caddyfile passes through this stage so its mode is fixed (0644) whatever the build
+# context's permissions are (COPY --chmod needs BuildKit).
+COPY deploy/Caddyfile /out/Caddyfile
+RUN chmod -R a+rX dist && chmod 0644 /out/Caddyfile
 
 FROM caddy:2.11.9@sha256:0c2243efcf437ab7f7a978f1027fcf0d4f9be8a75df27b1b3fbc5dbe0ffa8cf0 AS caddy
 
@@ -26,7 +30,7 @@ LABEL org.opencontainers.image.title="intermission-web" \
       org.opencontainers.image.revision="${GIT_SHA}"
 COPY --from=caddy /usr/bin/caddy /usr/local/bin/caddy
 COPY --from=web /src/web/dist/ /srv/www/
-COPY deploy/Caddyfile /etc/caddy/Caddyfile
+COPY --from=web /out/Caddyfile /etc/caddy/Caddyfile
 # Caddy keeps autosave config and state under XDG dirs; compose mounts /tmp as tmpfs.
 ENV XDG_CONFIG_HOME=/tmp/caddy-config XDG_DATA_HOME=/tmp/caddy-data
 USER 10004:10004

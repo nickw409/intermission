@@ -51,7 +51,7 @@ dc up -d caddy api model >/dev/null 2>&1 || { dc logs --no-color >&2; echo "FAIL
 base="http://127.0.0.1:$port"
 host="localhost:8080" # host of RECS_SITE_ORIGIN in .env.example
 for _ in $(seq 1 60); do
-  curl -fsS -o /dev/null --max-time 2 "$base/" && break
+  curl -fs -o /dev/null --max-time 2 "$base/" && break
   sleep 1
 done
 

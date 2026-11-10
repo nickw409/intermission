@@ -42,7 +42,7 @@ deploy() {
   local t="$1"
   log "deploying $t"
   env_set TAG "$t" || return 1
-  compose up -d --remove-orphans caddy api model || { log "docker compose up failed"; return 1; }
+  compose up -d caddy api model || { log "docker compose up failed"; return 1; }
   # Every service must now run the new image (guards against a half-applied `up`).
   local svc img
   for svc in caddy api model; do

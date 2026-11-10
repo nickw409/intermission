@@ -31,7 +31,8 @@ cleanup() {
   git -C "$REPO_DIR" worktree remove --force "$src" >/dev/null 2>&1 || rm -rf "$src"
 }
 trap cleanup EXIT
-git -C "$REPO_DIR" worktree add --detach --quiet "$src" "$full"
+# lib.sh sets umask 077 for secrets; source files copied into images need normal modes.
+(umask 022 && git -C "$REPO_DIR" worktree add --detach --quiet "$src" "$full")
 
 for name in "${IMAGES[@]}"; do
   log "building intermission-$name:$tag"
