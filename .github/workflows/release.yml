@@ -1,0 +1,93 @@
+# Release images and deploy gates. Owned by workstream M (deploy).
+#
+# On every push to main: build all five images tagged with the short SHA
+# (intermission-{api,model,train,web,backup}:<sha>), run the image and edge gates against
+# them, and keep the image set as a workflow artifact for 7 days.
+# On pull requests that touch the deploy setup: the same gates, without the artifact.
+#
+# There is no registry: production builds the same SHA locally with deploy/build.sh (from a
+# clean git worktree, same Dockerfiles, base images pinned by digest), or loads this artifact:
+#   gh run download <run-id> -n images-<sha> && zstd -dc images-<sha>.tar.zst | docker load
+#
+# Every action is pinned to a full commit SHA.
+name: release
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - deploy/**
+      - .dockerignore
+      - .github/workflows/release.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy-config:
+    name: deploy (compose, scripts, backup tool, alert rules)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - name: Compose hardening and published-port gate
+        run: python3 deploy/tests/check_compose.py
+      - name: shellcheck
+        run: shellcheck -x deploy/*.sh deploy/tests/*.sh
+      - name: lib.sh guards (placeholder secrets, env mode, SHA check, shared lock)
+        run: deploy/tests/test_lib.sh
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version: '1.27.3', cache-dependency-path: deploy/tools/recs-backup/go.sum }
+      - name: recs-backup vet, staticcheck, govulncheck, tests
+        working-directory: deploy/tools/recs-backup
+        run: |
+          go vet ./...
+          go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
+          go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+          go test -race -count=1 ./...
+      - name: Alert rules are valid and pass their unit tests
+        run: |
+          promtool() {
+            docker run --rm --network none --entrypoint /bin/promtool -v "$PWD/deploy:/deploy:ro" \
+              -v "$PWD/deploy/alerts:/etc/prometheus/alerts:ro" \
+              prom/prometheus:v3.16.0-distroless@sha256:e8b8fb0e336fe0affce6f9ea347b11d24975465fd3ba8119420186679c3efd5f "$@"
+          }
+          promtool check rules /deploy/alerts/intermission.yml
+          promtool check config /deploy/monitoring/prometheus.yml
+          promtool test rules /deploy/tests/alerts.test.yml
+
+  images:
+    name: images (build, non-root/no-shell, edge)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - name: Build all images for this commit
+        id: build
+        run: |
+          tag="$(git rev-parse --short=7 HEAD)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          BUILD_JOBS=4 deploy/build.sh HEAD
+          docker images --filter "reference=intermission-*:$tag"
+      - name: Images run as non-root and have no shell
+        run: deploy/tests/check_images.sh "${{ steps.build.outputs.tag }}"
+      - name: Edge gate (headers, 413, /metrics hidden, loopback-only port)
+        run: deploy/tests/check_edge.sh "${{ steps.build.outputs.tag }}"
+      - name: Save the image set
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          tag="${{ steps.build.outputs.tag }}"
+          docker save $(for n in api model train web backup; do echo "intermission-$n:$tag"; done) \
+            | zstd -T0 -10 -o "images-$tag.tar.zst"
+          ls -l "images-$tag.tar.zst"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          name: images-${{ steps.build.outputs.tag }}
+          path: images-${{ steps.build.outputs.tag }}.tar.zst
+          retention-days: 7
+          if-no-files-found: error

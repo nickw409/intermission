@@ -1,0 +1,97 @@
+# Intermission edge (spec: "Hosting and deployment" step 6, "System architecture").
+#
+# Tailscale Funnel terminates TLS on the host and forwards to 127.0.0.1:8080, which compose
+# maps to this container's :8080. Caddy therefore speaks plain HTTP and never manages
+# certificates. It serves the built SPA, proxies /api/* and /healthz to recs-api, and sets the
+# security headers. Nothing else is reachable: no admin API, no /metrics, no debug routes.
+
+{
+	# No admin endpoint (it would otherwise listen on localhost:2019 inside the container).
+	admin off
+	# Funnel owns TLS; never try to obtain certificates or redirect to HTTPS.
+	auto_https off
+	persist_config off
+
+	servers :8080 {
+		timeouts {
+			read_header 5s
+			read_body 15s
+			write 30s
+			idle 2m
+		}
+		max_header_size 16KB
+		# trusted_proxies is deliberately unset: the client address Caddy sees is the Docker
+		# gateway, and forwarded headers from the internet are not trusted. See
+		# deploy/runbooks/funnel-setup.md ("Does Funnel pass the client IP?").
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}
+
+:8080 {
+	# JSON access log on stdout. Caddy redacts Cookie, Set-Cookie and Authorization by default.
+	log {
+		output stdout
+		format json
+	}
+
+	encode zstd gzip
+
+	# Applied to every response, including proxied ones (defer = run when the response is
+	# written, after the upstream's own headers).
+	header {
+		defer
+		Strict-Transport-Security "max-age=31536000"
+		Content-Security-Policy "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+		-Via
+		-X-Powered-By
+	}
+
+	# Internal endpoints are never proxied (recs-api's /metrics is scraped on the internal
+	# network only). Matched before the SPA fallback so they 404 instead of returning index.html.
+	@internal path /metrics /metrics/* /debug/* /debug
+	handle @internal {
+		respond 404
+	}
+
+	handle /api/* {
+		# 64 KB cap on request bodies (spec). Larger bodies get 413 from Caddy.
+		request_body {
+			max_size 64KB
+		}
+		reverse_proxy api:8081 {
+			# Host is preserved by default; recs-api's CrossOriginProtection compares Origin
+			# with Host, so it must stay the public hostname.
+			transport http {
+				dial_timeout 2s
+				response_header_timeout 15s
+			}
+		}
+	}
+
+	handle /healthz {
+		reverse_proxy api:8081 {
+			transport http {
+				dial_timeout 2s
+				response_header_timeout 5s
+			}
+		}
+	}
+
+	# The SPA: real files when they exist, otherwise index.html (client-side routing).
+	handle {
+		root * /srv/www
+		@hashed path /assets/*
+		header @hashed Cache-Control "public, max-age=31536000, immutable"
+		@html not path /assets/*
+		header @html Cache-Control "no-cache"
+		try_files {path} /index.html
+		file_server
+	}
+}
