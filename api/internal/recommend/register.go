@@ -32,8 +32,13 @@ const (
 	maxCompare     = modelclient.MaxCompare
 	maxModelsParam = 64 // characters, compare's models parameter
 	maxBecause     = 3  // RecItem.because maxItems
-	// DefaultCacheEntries bounds the recommendation cache.
-	DefaultCacheEntries = 4096
+	// Recommendation cache bounds: entries, approximate bytes, and entries
+	// per user.
+	DefaultCacheEntries = 16384
+	DefaultCacheBytes   = 64 << 20
+	DefaultCachePerUser = 32
+	// maxEchoedName caps a model name repeated back in an error message.
+	maxEchoedName = 32
 	// modelBudget caps the time one request spends waiting on recs-model
 	// across all its calls (version, models, recommend, batch), so a slow
 	// model still yields 503 within a second.
@@ -48,6 +53,9 @@ var (
 )
 
 func errUnknownModel(name string) error {
+	if len(name) > maxEchoedName {
+		name = name[:maxEchoedName] + "..."
+	}
 	return apperr.New(http.StatusBadRequest, apperr.CodeUnknownModel, fmt.Sprintf("unknown model %q", name))
 }
 
@@ -88,9 +96,32 @@ type CompareResponse struct {
 
 // Register adds this package's routes to mux. Called once from main.go.
 //
-//	GET /api/recommend?model=&k=                 (session, 30/min per session)
-//	GET /api/recommend/compare?models=a,b,c&k=   (session, same bucket)
+//	GET /api/recommend?model=&k=                 (session, 30/min per session and per user)
+//	GET /api/recommend/compare?models=a,b,c&k=   (session, same buckets)
+//
+// The per-user bucket has the same shape as the per-session one, so logging
+// in again for a fresh session doesn't reset the budget.
 func Register(mux *http.ServeMux, d *app.Deps) {
+	register(mux, d, options{})
+}
+
+// options are the tunable parts; zero values mean the defaults above.
+type options struct {
+	cacheEntries int
+	cacheBytes   int64
+	cachePerUser int
+}
+
+func register(mux *http.ServeMux, d *app.Deps, o options) {
+	if o.cacheEntries <= 0 {
+		o.cacheEntries = DefaultCacheEntries
+	}
+	if o.cacheBytes <= 0 {
+		o.cacheBytes = DefaultCacheBytes
+	}
+	if o.cachePerUser <= 0 {
+		o.cachePerUser = DefaultCachePerUser
+	}
 	logger := d.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -100,12 +131,23 @@ func Register(mux *http.ServeMux, d *app.Deps) {
 		model:  d.Model,
 		movies: d.Movies,
 		logger: logger,
-		cache:  newLRU(DefaultCacheEntries),
+		cache:  newLRU(o.cacheEntries, o.cacheBytes, o.cachePerUser),
 	}
 	session := auth.RequireSession(d)
-	limit := ratelimit.Middleware(ratelimit.NewKeyed(ratelimit.RecommendPerSession), auth.SessionKey)
+	perSession := ratelimit.Middleware(ratelimit.NewKeyed(ratelimit.RecommendPerSession), auth.SessionKey)
+	perUser := ratelimit.Middleware(ratelimit.NewKeyed(ratelimit.RecommendPerSession), userKey)
+	limit := func(next http.Handler) http.Handler { return perSession(perUser(next)) }
 	mux.Handle("GET /api/recommend", session(limit(http.HandlerFunc(h.recommend))))
 	mux.Handle("GET /api/recommend/compare", session(limit(http.HandlerFunc(h.compare))))
+}
+
+// userKey is the per-user rate-limit key.
+func userKey(r *http.Request) (string, bool) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		return "", false
+	}
+	return "user:" + strconv.FormatInt(uid, 10), true
 }
 
 type handler struct {
@@ -163,7 +205,21 @@ func (h *handler) compare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.serve(w, r, "compare", models, k, func(e *entry) any {
-		return CompareResponse{ModelVersion: e.modelVersion, ColdStart: e.coldStart, Results: e.results}
+		// The cache key ignores model order; list results in this request's
+		// order. (A cold start answer is a single pop list.)
+		results := e.results
+		if !e.coldStart {
+			results = make([]result, 0, len(models))
+			for _, m := range models {
+				for _, res := range e.results {
+					if res.Model == m {
+						results = append(results, res)
+						break
+					}
+				}
+			}
+		}
+		return CompareResponse{ModelVersion: e.modelVersion, ColdStart: e.coldStart, Results: results}
 	})
 }
 
@@ -242,7 +298,11 @@ func (h *handler) serve(w http.ResponseWriter, r *http.Request, op string, model
 		models = []modelclient.ModelName{def}
 	}
 
-	key := cacheKey{userID: uid, ratingsVersion: user.version, modelVersion: version, op: op, models: joinModels(models), k: k}
+	keyModels := models
+	if op == "compare" {
+		keyModels = slices.Sorted(slices.Values(models))
+	}
+	key := cacheKey{userID: uid, ratingsVersion: user.version, modelVersion: version, op: op, models: joinModels(keyModels), k: k}
 	e, hit := h.cache.get(key)
 	if !hit {
 		e, err = h.compute(ctx, version, op, models, k, user)

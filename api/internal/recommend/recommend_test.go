@@ -486,7 +486,7 @@ func TestCacheKey(t *testing.T) {
 }
 
 func TestLRUBounded(t *testing.T) {
-	c := newLRU(3)
+	c := newLRU(3, 1<<20, 100)
 	for i := 0; i < 5; i++ {
 		c.put(cacheKey{userID: int64(i)}, &entry{modelVersion: strconv.Itoa(i)})
 	}

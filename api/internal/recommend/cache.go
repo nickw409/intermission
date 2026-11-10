@@ -20,9 +20,13 @@ import (
 //     every lookup the handler asks recs-model for its current version
 //     (GET /v1/version) and looks up that version, so after a hot swap the
 //     old answers are never found again.
-//   - op, models and k: what was asked.
+//   - op, models and k: what was asked. For compare the model list is
+//     sorted, so permutations share one entry; the handler renders results
+//     in the order each request asked for.
 //
-// Eviction is least-recently-used with a fixed number of entries.
+// Eviction is least-recently-used under three bounds: a number of entries,
+// an approximate number of bytes, and a number of entries per user (so one
+// user cycling through k values can't push everyone else out).
 
 // cacheKey identifies one cached answer.
 type cacheKey struct {
@@ -30,7 +34,7 @@ type cacheKey struct {
 	ratingsVersion int64
 	modelVersion   string
 	op             string // "recommend" or "compare"
-	models         string // comma-joined model names, in request order
+	models         string // comma-joined model names (sorted for compare)
 	k              int
 }
 
@@ -47,25 +51,55 @@ type result struct {
 	Items []RecItem             `json:"items"`
 }
 
-// lru is a fixed-size least-recently-used map. Safe for concurrent use.
+// size approximates the memory an entry and its key hold: a fixed cost per
+// struct plus the bytes of every string.
+func (e *entry) size(k cacheKey) int64 {
+	const (
+		entryOverhead   = 160
+		itemOverhead    = 96
+		becauseOverhead = 48
+	)
+	n := int64(entryOverhead + len(k.modelVersion) + len(k.models) + len(k.op) + len(e.modelVersion))
+	for _, r := range e.results {
+		n += int64(48 + len(r.Model))
+		for _, it := range r.Items {
+			n += int64(itemOverhead + len(it.Title))
+			for _, b := range it.Because {
+				n += int64(becauseOverhead + len(b.Title))
+			}
+		}
+	}
+	return n
+}
+
+// lru is a bounded least-recently-used map. Safe for concurrent use.
 // Entries are never modified after put, so callers may share them.
 type lru struct {
-	mu    sync.Mutex
-	max   int
-	order *list.List // front = most recently used; values are *lruItem
-	items map[cacheKey]*list.Element
+	mu         sync.Mutex
+	maxEntries int
+	maxBytes   int64
+	perUser    int
+	total      int64
+	order      *list.List // front = most recently used; values are *lruItem
+	items      map[cacheKey]*list.Element
+	users      map[int64]int // entries held per user
 }
 
 type lruItem struct {
-	key cacheKey
-	val *entry
+	key  cacheKey
+	val  *entry
+	size int64
 }
 
-func newLRU(max int) *lru {
-	if max < 1 {
-		max = 1
+func newLRU(maxEntries int, maxBytes int64, perUser int) *lru {
+	return &lru{
+		maxEntries: max(maxEntries, 1),
+		maxBytes:   max(maxBytes, 1),
+		perUser:    max(perUser, 1),
+		order:      list.New(),
+		items:      make(map[cacheKey]*list.Element),
+		users:      make(map[int64]int),
 	}
-	return &lru{max: max, order: list.New(), items: make(map[cacheKey]*list.Element)}
 }
 
 func (c *lru) get(k cacheKey) (*entry, bool) {
@@ -80,18 +114,41 @@ func (c *lru) get(k cacheKey) (*entry, bool) {
 }
 
 func (c *lru) put(k cacheKey, v *entry) {
+	size := v.size(k)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if el, ok := c.items[k]; ok {
-		el.Value.(*lruItem).val = v
-		c.order.MoveToFront(el)
+	if size > c.maxBytes {
 		return
 	}
-	c.items[k] = c.order.PushFront(&lruItem{key: k, val: v})
-	for c.order.Len() > c.max {
-		oldest := c.order.Back()
-		c.order.Remove(oldest)
-		delete(c.items, oldest.Value.(*lruItem).key)
+	if el, ok := c.items[k]; ok {
+		c.removeLocked(el)
+	}
+	c.items[k] = c.order.PushFront(&lruItem{key: k, val: v, size: size})
+	c.total += size
+	c.users[k.userID]++
+
+	// This user's least recently used entries first, then everyone's.
+	if c.users[k.userID] > c.perUser {
+		for el := c.order.Back(); el != nil && c.users[k.userID] > c.perUser; {
+			prev := el.Prev()
+			if el.Value.(*lruItem).key.userID == k.userID {
+				c.removeLocked(el)
+			}
+			el = prev
+		}
+	}
+	for c.order.Len() > c.maxEntries || c.total > c.maxBytes {
+		c.removeLocked(c.order.Back())
+	}
+}
+
+func (c *lru) removeLocked(el *list.Element) {
+	it := el.Value.(*lruItem)
+	c.order.Remove(el)
+	delete(c.items, it.key)
+	c.total -= it.size
+	if c.users[it.key.userID]--; c.users[it.key.userID] <= 0 {
+		delete(c.users, it.key.userID)
 	}
 }
 
@@ -99,4 +156,10 @@ func (c *lru) len() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.order.Len()
+}
+
+func (c *lru) bytes() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.total
 }
