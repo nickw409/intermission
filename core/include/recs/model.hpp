@@ -34,7 +34,7 @@ namespace fs = std::filesystem;
 /// Model-specific user state. Each model fills the fields it needs and documents which.
 struct UserState {
   std::vector<Rating> ratings;  // the ratings the state was built from (dense item ids)
-  double mean = 0.0;            // user mean rating (KNN, content)
+  double mean = 0.0;            // centering offset: user mean rating (KNN); μ + b_u (content)
   double bias = 0.0;            // user bias b_u (MF)
   std::vector<float> vec;       // factor vector (MF, ALS) or profile vector (content)
 };
