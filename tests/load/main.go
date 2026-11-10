@@ -5,19 +5,28 @@
 // minute, so this takes a few minutes), and give each one -ratings ratings on popular movies
 // from /api/onboarding.
 //
-// Measurement: -clients workers run closed-loop with no think time. Each iteration takes a user
-// that still has recommendation budget, changes one of that user's ratings (PUT, not timed;
-// it bumps the user's ratings_version, so the recommendation cache misses), then times
-// GET /api/recommend?model=<model>&k=<k> until the whole body is read. Every response must be
-// 200 with cold_start false, the requested model, at least one item and an X-Model-Version
-// header; anything else is an error and fails the run.
+// Measurement, in rounds. In each round every one of the -clients clients takes a different
+// user and
+//  1. changes one of that user's ratings (PUT, not timed; it bumps the user's ratings_version,
+//     so recs-api's recommendation cache misses);
+//  2. waits at a barrier until every client has done its PUT;
+//  3. is released together with all the others and times GET /api/recommend?model=<model>&k=<k>
+//     until the whole body is read.
 //
-// recs-api allows 30 recommendation calls per minute per user (burst 30), so each user is
-// used at most 30 times; the timed sample is users × 30 − warmup requests. Warm: the first
-// -warmup timed requests (and the setup's onboarding calls) warm recs-model and recs-api's
-// movie cache and are discarded.
+// So -clients cache-missing GETs are genuinely in flight at once. The generator counts GETs in
+// flight and reports the peak and the time-weighted average (sum of GET latencies / time the
+// GET phases took); the run fails if the peak is below -clients.
 //
-// The session cookie is Secure, so it is carried by hand over this plain-HTTP loopback hop.
+// Every response must be 200 with cold_start false, the requested model, at least one item and
+// an X-Model-Version header; anything else is an error and fails the run, as does p99 at or
+// above -p99-ms.
+//
+// recs-api allows 30 recommendation calls per minute per user (burst 30), so each user is used
+// at most -per-user times: users x per-user / clients rounds. The first -warmup requests (whole
+// rounds) warm recs-model and recs-api's movie cache and are discarded.
+//
+// The session cookie is Secure, so it is carried by hand over this plain-HTTP loopback hop. The
+// invite code comes from the LOAD_INVITE environment variable, not argv.
 package main
 
 import (
@@ -53,7 +62,6 @@ func main() {
 	var c config
 	flag.StringVar(&c.base, "base", "http://127.0.0.1:18090", "Caddy base URL")
 	flag.StringVar(&c.origin, "origin", "http://intermission.test", "site origin recs-api is configured with (sets Host and Origin)")
-	flag.StringVar(&c.invite, "invite", "", "invite code with at least -users uses (required)")
 	flag.StringVar(&c.model, "model", "knn", "model to request")
 	flag.StringVar(&c.label, "label", "", "free-text label for the report (dataset, config)")
 	flag.StringVar(&c.out, "out", "", "write the JSON summary here too")
@@ -67,8 +75,9 @@ func main() {
 	flag.Float64Var(&c.thresholdMS, "p99-ms", 75, "fail if p99 is at or above this many milliseconds")
 	flag.StringVar(&c.beforeMeasure, "before-measure", "", "shell command run (and waited for) between setup and measurement, e.g. waiting for a quiet host")
 	flag.Parse()
+	c.invite = os.Getenv("LOAD_INVITE")
 	if c.invite == "" {
-		fmt.Fprintln(os.Stderr, "-invite is required")
+		fmt.Fprintln(os.Stderr, "LOAD_INVITE (an invite code with at least -users uses) is required")
 		os.Exit(2)
 	}
 	if err := run(c); err != nil {
@@ -236,44 +245,90 @@ func run(c config) error {
 		}
 	}
 
-	total := len(users) * c.perUser
-	if total <= c.warmup {
-		return fmt.Errorf("users*per-user (%d) must exceed warmup (%d)", total, c.warmup)
+	if c.clients > len(users) {
+		return fmt.Errorf("need at least as many users (%d) as clients (%d)", len(users), c.clients)
 	}
-	var next atomic.Int64 // ticket: which (user, use) to run next
-	samples := make([]sample, total)
+	rounds := len(users) * c.perUser / c.clients
+	warmupRounds := (c.warmup + c.clients - 1) / c.clients
+	if rounds <= warmupRounds {
+		return fmt.Errorf("users*per-user/clients = %d rounds; need more than the %d warmup rounds", rounds, warmupRounds)
+	}
+	samples := make([]sample, rounds*c.clients)
+	rngs := make([]*rand.Rand, c.clients)
+	for w := range rngs {
+		rngs[w] = rand.New(rand.NewPCG(c.seed+uint64(w)+1, 7))
+	}
+	var inflight, peak atomic.Int64
+	var getPhases time.Duration // timed rounds only
 	load0 := loadavg()
 	start := time.Now()
-	var wg sync.WaitGroup
-	for w := 0; w < c.clients; w++ {
-		wg.Add(1)
-		go func(w int) {
-			defer wg.Done()
-			wr := rand.New(rand.NewPCG(c.seed+uint64(w)+1, 7))
-			for {
-				i := int(next.Add(1) - 1)
-				if i >= total {
-					return
-				}
-				// Round-robin over users, so no user is hammered back to back.
-				usr := users[i%len(users)]
-				samples[i] = once(s, c, usr, wr)
+	for r := 0; r < rounds; r++ {
+		// This round's users: consecutive, so each is used exactly rounds*clients/users times and
+		// never twice in one round.
+		us := make([]*user, c.clients)
+		for w := range us {
+			us[w] = users[(r*c.clients+w)%len(users)]
+		}
+		// 1. Untimed PUTs, all of them finished before any GET starts.
+		putErr := make([]error, c.clients)
+		var wg sync.WaitGroup
+		for w := 0; w < c.clients; w++ {
+			wg.Add(1)
+			go func(w int) {
+				defer wg.Done()
+				putErr[w] = bump(s, us[w], rngs[w])
+			}(w)
+		}
+		wg.Wait()
+		// 2-3. Barrier, then every GET released at once.
+		release := make(chan struct{})
+		var ready sync.WaitGroup
+		for w := 0; w < c.clients; w++ {
+			i := r*c.clients + w
+			if putErr[w] != nil {
+				samples[i] = sample{err: putErr[w]}
+				continue
 			}
-		}(w)
+			ready.Add(1)
+			wg.Add(1)
+			go func(w int) {
+				defer wg.Done()
+				ready.Done()
+				<-release
+				n := inflight.Add(1)
+				for {
+					p := peak.Load()
+					if n <= p || peak.CompareAndSwap(p, n) {
+						break
+					}
+				}
+				samples[i] = recommend(s, c, us[w])
+				inflight.Add(-1)
+			}(w)
+		}
+		ready.Wait()
+		t0 := time.Now()
+		close(release)
+		wg.Wait()
+		if r >= warmupRounds {
+			getPhases += time.Since(t0)
+		}
 	}
-	wg.Wait()
 	wall := time.Since(start)
 	load1 := loadavg()
 
-	timed := samples[c.warmup:]
+	timed := samples[warmupRounds*c.clients:]
 	var lat []float64
 	var errs []string
+	sumLat := 0.0
 	for _, sm := range timed {
 		if sm.err != nil {
 			errs = append(errs, sm.err.Error())
 			continue
 		}
-		lat = append(lat, float64(sm.elapsed.Microseconds())/1000)
+		ms := float64(sm.elapsed.Microseconds()) / 1000
+		lat = append(lat, ms)
+		sumLat += ms
 	}
 	slices.Sort(lat)
 	q := func(p float64) float64 {
@@ -282,44 +337,52 @@ func run(c config) error {
 		}
 		return lat[min(len(lat)-1, int(math.Ceil(p*float64(len(lat))))-1)]
 	}
-	sum := 0.0
-	for _, v := range lat {
-		sum += v
-	}
+	avgInflight := sumLat / math.Max(1e-9, float64(getPhases.Microseconds())/1000)
 	summary := map[string]any{
 		"label": c.label, "model": c.model, "k": c.k, "clients": c.clients, "users": len(users),
-		"ratings_per_user": c.ratings, "requests_total": total, "warmup_discarded": c.warmup,
-		"timed_requests": len(timed), "errors": len(errs), "wall_seconds": wall.Seconds(),
-		"throughput_rps":   float64(total) / wall.Seconds(),
-		"latency_ms":       map[string]float64{"p50": q(0.50), "p90": q(0.90), "p95": q(0.95), "p99": q(0.99), "max": q(1), "mean": sum / float64(max(1, len(lat)))},
+		"ratings_per_user": c.ratings, "rounds": rounds, "requests_total": len(samples),
+		"warmup_discarded": warmupRounds * c.clients, "timed_requests": len(timed), "errors": len(errs),
+		"wall_seconds": wall.Seconds(), "get_phase_seconds": getPhases.Seconds(),
+		"inflight_gets":    map[string]float64{"peak": float64(peak.Load()), "avg_time_weighted": avgInflight},
+		"latency_ms":       map[string]float64{"p50": q(0.50), "p90": q(0.90), "p95": q(0.95), "p99": q(0.99), "max": q(1), "mean": sumLat / float64(max(1, len(lat)))},
 		"p99_threshold_ms": c.thresholdMS, "loadavg_before": load0, "loadavg_after": load1,
 		"measured_at": time.Now().UTC().Format(time.RFC3339),
 	}
 	out, _ := json.MarshalIndent(summary, "", "  ")
 	fmt.Println(string(out))
 	if c.out != "" {
-		_ = os.WriteFile(c.out, append(out, '\n'), 0o644)
+		if err := os.WriteFile(c.out, append(out, '\n'), 0o644); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "summary written to %s\n", c.out)
 	}
 	if len(errs) > 0 {
 		show := errs[:min(5, len(errs))]
 		return fmt.Errorf("%d of %d timed requests failed, e.g. %s", len(errs), len(timed), strings.Join(show, " | "))
 	}
+	if peak.Load() < int64(c.clients) {
+		return fmt.Errorf("peak in-flight GETs %d is below %d clients: the load was not concurrent", peak.Load(), c.clients)
+	}
 	if p99 := q(0.99); !(p99 < c.thresholdMS) {
 		return fmt.Errorf("p99 %.1f ms is not under %.0f ms", p99, c.thresholdMS)
 	}
-	fmt.Fprintf(os.Stderr, "PASS: p99 %.1f ms < %.0f ms over %d requests at %d clients\n", q(0.99), c.thresholdMS, len(lat), c.clients)
+	fmt.Fprintf(os.Stderr, "PASS: p99 %.1f ms < %.0f ms over %d requests; %d clients, peak %d GETs in flight (time-weighted avg %.1f)\n",
+		q(0.99), c.thresholdMS, len(lat), c.clients, peak.Load(), avgInflight)
 	return nil
 }
 
-// once is one iteration: bump the user's ratings_version (untimed), then time the request.
-func once(s *site, c config, u *user, rng *rand.Rand) sample {
-	u.mu.Lock()
-	defer u.mu.Unlock()
+// bump changes one of the user's ratings (untimed), so the next recommendation misses the cache.
+func bump(s *site, u *user, rng *rand.Rand) error {
 	movie := u.movies[rng.IntN(len(u.movies))]
 	v := halfSteps[2+rng.IntN(8)]
 	if resp, data, err := s.do("PUT", fmt.Sprintf("/api/ratings/%d", movie), u.session, map[string]float64{"rating": v}); err != nil || resp.StatusCode != 200 {
-		return sample{err: fmt.Errorf("rating PUT: %v %s", err, truncate(data))}
+		return fmt.Errorf("rating PUT: %v %s", err, truncate(data))
 	}
+	return nil
+}
+
+// recommend times one GET /api/recommend and checks the answer.
+func recommend(s *site, c config, u *user) sample {
 	t0 := time.Now()
 	resp, data, err := s.do("GET", fmt.Sprintf("/api/recommend?model=%s&k=%d", c.model, c.k), u.session, nil)
 	elapsed := time.Since(t0)

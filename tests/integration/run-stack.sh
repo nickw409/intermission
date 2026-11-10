@@ -15,18 +15,20 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$here/stack-lib.sh"
 
 STACK_TAG="${1:?usage: run-stack.sh <tag>}"
-STACK_PROJECT="${STACK_PROJECT:-intermission-it}"
+STACK_PROJECT=intermission-it # fixed: never inherited (stack_check_project refuses real stacks)
+stack_check_project
 STACK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/intermission-it.XXXXXX")"
 if [[ -z "${KEEP_STACK:-}" ]]; then
   trap stack_down EXIT
 else
-  trap 'slog "kept: STACK_PROJECT=$STACK_PROJECT STACK_DIR=$STACK_DIR (source stack-lib.sh; stack_down)"' EXIT
+  trap 'slog "kept; tear down with: STACK_PROJECT=$STACK_PROJECT STACK_DIR=$STACK_DIR bash -c \"source $here/stack-lib.sh; stack_down\""' EXIT
 fi
 
-echo "== compose config: published ports (production project)"
-python3 "$STACK_REPO/deploy/tests/check_compose.py"
+stack_init # scrubs the environment and exports the scratch values
 
-stack_init
+echo "== compose config: published ports (production project, clean environment)"
+(unset RECS_DATA_DIR RECS_HTTP_PORT TAG; python3 "$STACK_REPO/deploy/tests/check_compose.py")
+
 stack_train ml-latest-small pop,pop_count,knn,content,mf,als knn
 stack_up
 code="$(stack_invite 50)"

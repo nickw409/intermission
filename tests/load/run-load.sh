@@ -7,7 +7,12 @@
 #   KNN_CONFIG=path   KNN config for the artifact (default: configs/knn.<dataset>.tuned.json if
 #                     it exists, else configs/knn.json)
 #   LOAD_USERS=70 LOAD_CLIENTS=20 LOAD_ARGS="..."   passed to the load generator
-#   KEEP_STACK=1      leave the stack running
+#   LOAD_OUT=path     JSON summary (default data/load-results/<UTC time>-<dataset>.json; data/ is
+#                     gitignored)
+#   KEEP_STACK=1      leave the stack running (prints the teardown command)
+#
+# The sign-off measurement is ml-32m with the tuned KNN config (configs/knn.ml-32m.tuned.json);
+# ml-latest-small is a quick check.
 #
 # Trains pop + knn (default knn) on the dataset with the train image into a scratch data dir,
 # starts a scratch compose project (intermission-load, 127.0.0.1:${STACK_PORT:-18091}), runs
@@ -22,9 +27,16 @@ source "$here/../integration/stack-lib.sh"
 
 STACK_TAG="${1:?usage: run-load.sh <tag> [dataset]}"
 dataset="${2:-ml-latest-small}"
-STACK_PROJECT="${STACK_PROJECT:-intermission-load}"
+STACK_PROJECT=intermission-load # fixed: never inherited (stack_check_project refuses real stacks)
+stack_check_project
 STACK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/intermission-load.XXXXXX")"
-if [[ -z "${KEEP_STACK:-}" ]]; then trap stack_down EXIT; fi
+if [[ -z "${KEEP_STACK:-}" ]]; then
+  trap stack_down EXIT
+else
+  trap 'slog "kept; tear down with: STACK_PROJECT=$STACK_PROJECT STACK_DIR=$STACK_DIR bash -c \"source $here/../integration/stack-lib.sh; stack_down\""' EXIT
+fi
+out="${LOAD_OUT:-$STACK_REPO/data/load-results/$(date -u +%Y%m%dT%H%M%SZ)-$dataset.json}"
+mkdir -p "$(dirname "$out")"
 
 knn_config="${KNN_CONFIG:-}"
 if [[ -z "$knn_config" ]]; then
@@ -54,6 +66,6 @@ if pgrep -f '$fuzz_re' >/dev/null; then echo "WARNING: fuzzers are running; late
 EOF
 )"
 # shellcheck disable=SC2086
-"$STACK_DIR/recs-load" -before-measure "$quiet" -base "http://127.0.0.1:$STACK_PORT" -origin "$STACK_ORIGIN" -invite "$code" \
-  -users "${LOAD_USERS:-70}" -clients "${LOAD_CLIENTS:-20}" -label "$dataset, knn $(tr -d '\n ' < "$knn_config")" \
+LOAD_INVITE="$code" "$STACK_DIR/recs-load" -before-measure "$quiet" -base "http://127.0.0.1:$STACK_PORT" -origin "$STACK_ORIGIN" \
+  -out "$out" -users "${LOAD_USERS:-70}" -clients "${LOAD_CLIENTS:-20}" -label "$dataset, knn $(tr -d '\n ' < "$knn_config")" \
   ${LOAD_ARGS:-}
