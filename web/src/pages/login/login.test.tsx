@@ -25,7 +25,10 @@ function captureLogins() {
 }
 
 async function fill(username: string, password: string) {
+  // Each call sets both fields from scratch.
   const user = userEvent.setup();
+  await user.clear(screen.getByLabelText('Username'));
+  await user.clear(screen.getByLabelText('Password'));
   if (username) await user.type(screen.getByLabelText('Username'), username);
   if (password) await user.type(screen.getByLabelText('Password'), password);
   await user.click(screen.getByRole('button', { name: 'Log in' }));
@@ -104,10 +107,23 @@ describe('login page', () => {
   it('has no axe violations, including with errors shown', async () => {
     await openLoggedOut();
     expect(await axeViolations()).toEqual([]);
+    await fill('', '');
+    expect(screen.getByLabelText('Username')).toHaveAttribute('aria-invalid', 'true');
+    expect(await axeViolations()).toEqual([]);
+
     server.use(handlerFor('login', 'invalid_credentials'));
-    await fill('', 'x');
-    await fill('alice', '');
+    await fill('alice', 'wrong password!');
     await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
     expect(await axeViolations()).toEqual([]);
+  });
+
+  it.each([
+    ['/login', 'Log in'],
+    ['/signup', 'Sign up'],
+  ])('sends a signed-in user from %s to where they belong', async (path, heading) => {
+    const { router } = renderApp(path); // getMe fixture: alice, 5 ratings
+    expect(await screen.findByRole('heading', { level: 1, name: 'Rate some movies' })).toBeInTheDocument();
+    expect(router.state.location.pathname).toBe('/onboarding');
+    expect(screen.queryByRole('heading', { level: 1, name: heading })).not.toBeInTheDocument();
   });
 });

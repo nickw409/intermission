@@ -54,6 +54,22 @@ describe('api client', () => {
     expect(seen[0]).toMatchObject({ status: 503, code: 'model_unavailable' });
   });
 
+  it('still rejects with the original ApiError when a listener throws', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const later: ApiError[] = [];
+    const unsubscribeBad = onApiError(() => {
+      throw new Error('listener bug');
+    });
+    const unsubscribeGood = onApiError((e) => later.push(e));
+    server.use(handlerFor('recommend', 'model_unavailable'));
+    const error = await api.get('/api/recommend').catch((e: unknown) => e);
+    unsubscribeBad();
+    unsubscribeGood();
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error).toMatchObject({ status: 503, code: 'model_unavailable' });
+    expect(later).toHaveLength(1); // a failing listener doesn't stop the others
+  });
+
   it('serialises query parameters and returns the typed body', async () => {
     const result = await api.get('/api/recommend', { query: { model: 'als', k: 3 } });
     expect(result.model).toBe('als');
