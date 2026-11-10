@@ -54,8 +54,9 @@ evaluated on test once.
    Removing the denominator and negative neighbours fixes most of it.
 2. **Very large shrinkage wins.** With λ = 30,000 the similarity is dominated by co-rating counts, so the tuned
    model is close to a "people who rated X also rated Y" co-occurrence ranker. It is far more accurate than
-   popularity but recommends a narrower, more mainstream set (coverage 4% vs 21% for the spec default; mean
-   popularity rank 116 places more popular than pop_count's picks). Phase 6's MMR re-ranker targets exactly this.
+   popularity but recommends a narrower set than the spec default (coverage 4% vs 21%). Its picks are still
+   less popular than pop_count's (mean popularity rank 116 places lower), but it covers far less of the catalog
+   than the spec formula did. Phase 6's MMR re-ranker targets exactly this.
 3. **Content-based conflicts with its own gate.** Centering the profile on the user's mean cancels any feature
    shared by everything the user rated, so "rated only comedies" carries no comedy signal. Content NDCG@10 on
    ml-latest-small is 0.0025 (vs 0.0457 for pop_count); an ml-32m evaluation is pending the owner's decision.
