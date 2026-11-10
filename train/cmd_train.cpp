@@ -5,10 +5,12 @@
 //
 // Each model's config is <config-dir>/<model>.<dataset>.tuned.json if present (hyperparameters
 // chosen on that dataset's validation split), else <config-dir>/<model>.json, else the model
-// defaults. The
+// defaults; the log names the file each model used. `recs-train eval` instead takes an explicit
+// --config (tuning and the one-off test evaluation should name their config). The
 // artifact version is the UTC time, e.g. 2026-11-09T21-14-03Z. With --set-current, CURRENT is
 // pointed at the new version. Afterwards the 3 most recent versions and whatever CURRENT points
 // to are kept; older versions are deleted (contracts/artifact.md rule 6).
+#include "dataset_name.hpp"
 #include <algorithm>
 #include <chrono>
 #include <ctime>
@@ -62,7 +64,11 @@ std::vector<std::string> split_list(const std::string& s) {
 Config model_config(const fs::path& dir, const std::string& name, const std::string& dataset) {
   fs::path p = dir / (name + "." + dataset + ".tuned.json");
   if (!fs::exists(p)) p = dir / (name + ".json");
-  if (!fs::exists(p)) return Config::object();
+  if (!fs::exists(p)) {
+    std::cout << "config " << name << ": model defaults (no " << name << "." << dataset << ".tuned.json or "
+              << name << ".json in " << dir.string() << ")\n";
+    return Config::object();
+  }
   std::cout << "config " << name << ": " << p.string() << "\n";
   std::ifstream in(p);
   if (!in) throw std::runtime_error("cannot read " + p.string());
@@ -98,6 +104,7 @@ void prune(const fs::path& root) {
 }
 
 void run_train(const TrainArgs& a) {
+  check_dataset_name(a.dataset);
   const auto names = split_list(a.models);
   if (names.empty()) throw std::invalid_argument("--models is empty");
   if (std::find(names.begin(), names.end(), a.default_model) == names.end()) {

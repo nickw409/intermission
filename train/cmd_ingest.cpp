@@ -5,6 +5,7 @@
 //
 // Always parses the CSV files (it deletes any existing cache first) and then writes the cache,
 // so running ingest is the way to refresh a cache after the raw files change.
+#include "dataset_name.hpp"
 #include <chrono>
 #include <iostream>
 #include <memory>
@@ -23,14 +24,6 @@ struct IngestOptions {
   std::string raw;
   std::string cache;
 };
-
-// Dataset names become path components, so keep them to a safe character set.
-void check_dataset_name(const std::string& name) {
-  const bool ok = !name.empty() && name != "." && name != ".." &&
-                  name.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-") ==
-                      std::string::npos;
-  if (!ok) throw std::runtime_error("invalid dataset name '" + name + "' (use letters, digits, '.', '_', '-')");
-}
 
 void run_ingest(const IngestOptions& opt) {
   check_dataset_name(opt.dataset);
