@@ -24,9 +24,9 @@ require_env_file
 command -v curl >/dev/null || die "curl is required"
 require_data_dirs db exports posters reports artifacts
 
-# One deploy at a time.
-exec 9>"$DEPLOY_DIR/history.lock"
-flock -n 9 || die "another release is in progress"
+# One operation at a time (shared with backup, nightly and restore-drill). A deploy waits at
+# most 2 minutes rather than queueing behind a long retrain.
+acquire_lock release "${RELEASE_LOCK_WAIT:-120}"
 
 tag="$(short_sha "$1")"
 previous="$(env_get TAG)"

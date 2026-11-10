@@ -1,14 +1,26 @@
 # Development overrides: the same images and hardening as production, plus
+#   - its own compose project (intermission-dev), so `up`/`down -v` never touch production
+#     containers, networks or volumes,
+#   - its own loopback ports (site 127.0.0.1:8088, Prometheus 9091, Grafana 3001),
+#   - its own data directory (RECS_DEV_DATA_DIR, default data/dev/; create it with
+#     `sudo RECS_DATA_DIR=$PWD/data/dev deploy/init-data.sh`),
 #   - debug logging,
-#   - the local Caddyfile and the local web build (web/dist) mounted read-only, so
-#     `npm --prefix web run build` and Caddyfile edits apply after `docker compose restart caddy`
-#     without rebuilding the image.
-# Plain HTTP on 127.0.0.1:8080 (no Funnel); set RECS_SITE_ORIGIN=http://localhost:8080 in .env
-# and browse to http://localhost:8080.
+#   - the local Caddyfile and web build (web/dist) mounted read-only, so
+#     `npm --prefix web run build` and Caddyfile edits apply after
+#     `docker compose ... restart caddy` without rebuilding the image.
+# Plain HTTP, no Funnel. Set RECS_SITE_ORIGIN=http://localhost:8088 in the env file and browse to
+# http://localhost:8088.
 #
 #   docker compose -f deploy/compose.yaml -f deploy/compose.dev.yaml up
+#
+# deploy/tests/check_compose.py fails if dev shares a project name, a published port or a
+# writable data path with production.
+name: intermission-dev
+
 services:
   caddy:
+    ports: !override
+      - "127.0.0.1:${RECS_DEV_HTTP_PORT:-8088}:8080"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ../web/dist:/srv/www:ro
@@ -16,4 +28,40 @@ services:
   api:
     environment:
       RECS_LOG_LEVEL: debug
-      RECS_SITE_ORIGIN: ${RECS_SITE_ORIGIN:-http://localhost:8080}
+      RECS_SITE_ORIGIN: ${RECS_SITE_ORIGIN:-http://localhost:8088}
+    volumes:
+      - ${RECS_DEV_DATA_DIR:-../data/dev}/db:/srv/data/db
+      - ${RECS_DEV_DATA_DIR:-../data/dev}/exports:/srv/data/exports
+      - ${RECS_DEV_DATA_DIR:-../data/dev}/posters:/srv/data/posters
+      - ${RECS_DEV_DATA_DIR:-../data/dev}/reports:/srv/data/reports:ro
+
+  model:
+    volumes:
+      - ${RECS_DEV_DATA_DIR:-../data/dev}/artifacts:/srv/data/artifacts:ro
+
+  train:
+    volumes:
+      - ${RECS_DEV_DATA_DIR:-../data/dev}/artifacts:/srv/data/artifacts
+      - ${RECS_DEV_DATA_DIR:-../data/dev}/reports:/srv/data/reports
+      - ${RECS_DEV_DATA_DIR:-../data/dev}/reports-private:/srv/data/reports-private
+      - ${RECS_DEV_DATA_DIR:-../data/dev}/cache:/srv/data/cache
+      - ${RECS_DEV_DATA_DIR:-../data/dev}/raw:/srv/data/raw:ro
+      - ${RECS_DEV_DATA_DIR:-../data/dev}/exports:/srv/data/exports:ro
+
+  backup:
+    volumes:
+      - ${RECS_DEV_DATA_DIR:-../data/dev}/db:/srv/data/db
+      - ${RECS_DEV_DATA_DIR:-../data/dev}/backups:/srv/data/backups
+
+  prometheus:
+    ports: !override
+      - "127.0.0.1:9091:9090"
+
+  grafana:
+    ports: !override
+      - "127.0.0.1:3001:3000"
+
+  node-exporter:
+    volumes:
+      - ${RECS_DEV_DATA_DIR:-../data/dev}:/host/data:ro${NODE_EXPORTER_DATA_PROPAGATION-,rslave}
+      - ${RECS_DEV_DATA_DIR:-../data/dev}/ops/textfile:/textfile:ro

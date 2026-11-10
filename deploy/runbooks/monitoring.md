@@ -9,15 +9,42 @@ starts Prometheus (127.0.0.1:9090), Grafana (127.0.0.1:3000, user `admin`, passw
 listen on loopback only. Reach them from another tailnet device through an SSH tunnel
 (`ssh -L 3000:127.0.0.1:3000 -L 9090:127.0.0.1:9090 <host>`), never through Funnel.
 
-What is scraped:
+The deploy scripts refuse to run while any `deploy/.env` value still starts with `change-me`
+(the `.env.example` placeholders), so Grafana never starts with the example password.
+
+## Rotate the Grafana admin password
+
+`GRAFANA_ADMIN_PASSWORD` only seeds the admin account on Grafana's **first** start (an empty
+`grafana-data` volume). Changing it in `deploy/.env` later does nothing by itself. To rotate:
+
+```bash
+read -rs -p "new Grafana admin password: " pw; echo
+printf '%s' "$pw" | docker compose -f deploy/compose.yaml --profile monitoring exec -T grafana \
+  /usr/share/grafana/bin/grafana cli --homepath /usr/share/grafana \
+  admin reset-admin-password --password-from-stdin
+unset pw
+```
+
+The password goes over stdin, so it never appears in a process list or shell history. Then
+put the same value in `deploy/.env` (`GRAFANA_ADMIN_PASSWORD=`), so a rebuilt volume gets it
+too, and log in again to confirm. Rotate after anyone else has seen it, and whenever the
+monitoring volume is restored from somewhere else.
+
+## What is scraped
 
 | Target | What | Alerts |
 | --- | --- | --- |
 | `api:8081/metrics` (internal network) | request rate/errors/latency per route, login failures, model-client errors | `SiteDown`, `High5xxRate`, `RecommendP99High` |
-| `node-exporter:9100` | host filesystems; `data/ops/textfile/*.prom` from the nightly jobs | `DiskAbove85Percent`, `NightlyJobFailed`, `NightlyJobStale` |
+| `node-exporter:9100` (internal `metrics` network) | the data filesystem (only `data/` is mounted); `data/ops/textfile/*.prom` from the nightly jobs and the drill | `DiskAbove85Percent`, `JobFailed`, `NightlyJobStale`, `RestoreDrillStale` |
 
-Rules: `deploy/alerts/intermission.yml` (checked in CI with `promtool check rules`). Firing
-alerts show at http://127.0.0.1:9090/alerts.
+Rules: `deploy/alerts/intermission.yml`, checked in CI with `promtool check rules` and
+unit-tested with `promtool test rules deploy/tests/alerts.test.yml`. Firing alerts show at
+http://127.0.0.1:9090/alerts.
+
+node-exporter mounts only the data directory, read-only, with `rslave` propagation. Docker on
+WSL2 refuses `rslave` for that bind ("path ... is not a shared or slave mount"); on WSL2 put
+`NODE_EXPORTER_DATA_PROPAGATION=` (empty) in `deploy/.env`. The only effect is that mounts
+created under `data/` after node-exporter starts are not seen until it restarts.
 
 ## Known gaps (to reconcile)
 

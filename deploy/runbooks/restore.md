@@ -16,6 +16,17 @@ about to use is good.
 
 ## 2. Restore production
 
+First stop the timers, so the nightly backup or export can't run against a half-restored
+database, and wait for any job that is already running:
+
+```bash
+sudo systemctl stop intermission-nightly.timer intermission-restore-drill.timer
+systemctl is-active intermission-nightly.service intermission-restore-drill.service   # both "inactive"
+cat deploy/ops.lock 2>/dev/null; flock -n deploy/ops.lock true && echo "lock free"     # no script running
+```
+
+Then restore:
+
 ```bash
 c="docker compose -f deploy/compose.yaml"
 $c run --rm --no-deps backup latest --dir /srv/data/backups      # newest; or pick a file
@@ -26,6 +37,8 @@ $c run --rm --no-deps backup backup --db /srv/data/db/app.db --dir /srv/data/bac
 $c run --rm --no-deps backup restore --force \
     --from /srv/data/backups/daily/app-2026-11-09.db --db /srv/data/db/app.db
 deploy/release.sh "$(sed -n 's/^TAG=//p' deploy/.env)"            # start api again + smoke test
+deploy/backup.sh                                                  # first backup of the restored db
+sudo systemctl start intermission-nightly.timer intermission-restore-drill.timer
 ```
 
 - `restore` re-checks the backup's integrity, copies it into place atomically, removes the old

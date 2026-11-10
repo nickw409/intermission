@@ -156,7 +156,9 @@ services:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./alerts:/etc/prometheus/alerts:ro
       - prometheus-data:/prometheus
-    networks: [backend, monitoring]
+    # backend: scrape recs-api. metrics (internal): node-exporter and Grafana.
+    # monitoring: plain bridge, only so the loopback port can be published.
+    networks: [backend, metrics, monitoring]
     mem_limit: 1g
     pids_limit: 256
 
@@ -178,11 +180,14 @@ services:
       - grafana-data:/var/lib/grafana
     tmpfs:
       - /tmp:size=32m,mode=1777
-    networks: [monitoring]
+    networks: [metrics, monitoring]
     mem_limit: 512m
     pids_limit: 256
 
-  # Host disk usage and the nightly jobs' status file (textfile collector).
+  # Disk usage of the data filesystem and the nightly jobs' status files (textfile collector).
+  # Only the data directory is mounted (never the host root), read-only, with rslave
+  # propagation so mounts created under it later stay visible. Docker on WSL2 rejects rslave
+  # here ("not a shared or slave mount"): set NODE_EXPORTER_DATA_PROPAGATION= (empty) in .env.
   node-exporter:
     <<: *hardening
     profiles: [monitoring]
@@ -197,9 +202,9 @@ services:
       - --collector.meminfo
       - --collector.loadavg
     volumes:
-      - /:/host:ro
+      - ${RECS_DATA_DIR:-../data}:/host/data:ro${NODE_EXPORTER_DATA_PROPAGATION-,rslave}
       - ${RECS_DATA_DIR:-../data}/ops/textfile:/textfile:ro
-    networks: [monitoring]
+    networks: [metrics] # internal only: reachable by Prometheus alone, no egress
     mem_limit: 128m
     pids_limit: 64
 
@@ -214,6 +219,9 @@ networks:
   backend:
     internal: true
   egress: {}
-  # Plain bridge: Prometheus and Grafana publish loopback-only ports, which Docker cannot do
-  # from internal-only networks.
+  # Monitoring traffic (Prometheus <-> node-exporter, Grafana -> Prometheus).
+  metrics:
+    internal: true
+  # Plain bridge used only to publish Prometheus' and Grafana's loopback ports, which Docker
+  # cannot do from internal-only networks.
   monitoring: {}

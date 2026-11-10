@@ -1,6 +1,6 @@
 # Alert rules for the spec's alerts ("Operations: deploy, observe, recover"):
 #   site down 5 min; 5xx > 1% over 10 min; /api/recommend p99 > 250 ms over 10 min;
-#   nightly export, retrain or backup failed; disk > 85%.
+#   nightly export, retrain or backup failed (plus: restore drill failed or >35 days old); disk > 85%.
 #
 # Metric names this file expects (reconcile with recs-api when its /metrics lands):
 #   recs_api_http_requests_total{route, code}             counter, route = ServeMux pattern
@@ -42,19 +42,28 @@ groups:
         annotations:
           summary: /api/recommend p99 latency above 250 ms (10-minute window)
 
-      - alert: NightlyJobFailed
-        expr: intermission_job_last_status{task=~"export|retrain|backup"} != 0
+      # Any scheduled job whose last run failed: the nightly steps and the monthly restore drill.
+      - alert: JobFailed
+        expr: max by (task) (intermission_job_last_status{task=~"export|retrain|backup|restore_drill"}) != 0
         labels: { severity: warn }
         annotations:
-          summary: 'Nightly {{ $labels.task }} failed'
+          summary: '{{ $labels.task }} failed on its last run'
           runbook: deploy/runbooks/nightly-jobs.md
 
       - alert: NightlyJobStale
-        expr: time() - intermission_job_last_success_timestamp_seconds{task=~"export|retrain|backup"} > 36 * 3600
+        expr: time() - max by (task) (intermission_job_last_success_timestamp_seconds{task=~"export|retrain|backup"}) > 36 * 3600
         labels: { severity: warn }
         annotations:
           summary: 'Nightly {{ $labels.task }} has not succeeded for 36 hours'
           runbook: deploy/runbooks/nightly-jobs.md
+
+      # The drill runs monthly; 35 days allows one late run before alerting.
+      - alert: RestoreDrillStale
+        expr: time() - max by (task) (intermission_job_last_success_timestamp_seconds{task="restore_drill"}) > 35 * 86400
+        labels: { severity: warn }
+        annotations:
+          summary: 'The restore drill has not passed for 35 days'
+          runbook: deploy/runbooks/restore.md
 
       - alert: DiskAbove85Percent
         expr: |

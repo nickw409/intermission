@@ -37,6 +37,8 @@ jobs:
         run: python3 deploy/tests/check_compose.py
       - name: shellcheck
         run: shellcheck -x deploy/*.sh deploy/tests/*.sh
+      - name: lib.sh guards (placeholder secrets, env mode, SHA check, shared lock)
+        run: deploy/tests/test_lib.sh
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with: { go-version: '1.27.3', cache-dependency-path: deploy/tools/recs-backup/go.sum }
       - name: recs-backup vet, staticcheck, govulncheck, tests
@@ -46,12 +48,16 @@ jobs:
           go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
           go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
           go test -race -count=1 ./...
-      - name: Alert rules and Prometheus config are valid
+      - name: Alert rules are valid and pass their unit tests
         run: |
-          docker run --rm --network none --entrypoint /bin/promtool \
-            -v "$PWD/deploy:/deploy:ro" \
-            prom/prometheus:v3.16.0-distroless@sha256:e8b8fb0e336fe0affce6f9ea347b11d24975465fd3ba8119420186679c3efd5f \
-            check rules /deploy/alerts/intermission.yml
+          promtool() {
+            docker run --rm --network none --entrypoint /bin/promtool -v "$PWD/deploy:/deploy:ro" \
+              -v "$PWD/deploy/alerts:/etc/prometheus/alerts:ro" \
+              prom/prometheus:v3.16.0-distroless@sha256:e8b8fb0e336fe0affce6f9ea347b11d24975465fd3ba8119420186679c3efd5f "$@"
+          }
+          promtool check rules /deploy/alerts/intermission.yml
+          promtool check config /deploy/monitoring/prometheus.yml
+          promtool test rules /deploy/tests/alerts.test.yml
 
   images:
     name: images (build, non-root/no-shell, edge)

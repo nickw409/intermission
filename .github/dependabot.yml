@@ -12,3 +12,15 @@ updates:
   - package-ecosystem: npm
     directory: /tools/contracts
     schedule: { interval: weekly }
+  # Deploy images: base images in deploy/docker/*.Dockerfile (tag@digest pins), the
+  # monitoring images in deploy/compose.yaml, and the recs-backup tool's Go modules.
+  # Ubuntu APT_SNAPSHOT dates are bumped by hand: deploy/runbooks/dependency-updates.md.
+  - package-ecosystem: docker
+    directory: /deploy/docker
+    schedule: { interval: weekly }
+  - package-ecosystem: docker-compose
+    directory: /deploy
+    schedule: { interval: weekly }
+  - package-ecosystem: gomod
+    directory: /deploy/tools/recs-backup
+    schedule: { interval: weekly }

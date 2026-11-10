@@ -11,7 +11,8 @@ FROM node:24.22.2-trixie-slim@sha256:0820eaa85e07d0490446dd01d14707e17e6108a3698
 ENV NPM_CONFIG_UPDATE_NOTIFIER=false NPM_CONFIG_FUND=false NPM_CONFIG_AUDIT=false
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
-RUN npm ci --no-audit --no-fund
+# --ignore-scripts: no dependency install hooks run in the build (supply-chain hardening).
+RUN npm ci --no-audit --no-fund --ignore-scripts
 # The SPA imports a few shared definitions from ../contracts.
 COPY contracts/ /src/contracts/
 COPY web/ ./

@@ -8,6 +8,13 @@
 !**/.env.example
 **/*.pem
 **/*.key
+**/*.p12
+**/*.pfx
+**/id_rsa*
+**/id_ed25519*
+**/id_ecdsa*
+**/.npmrc
+**/.netrc
 
 # Data (MovieLens licence, user data) and local state: never in an image.
 data
@@ -16,7 +23,7 @@ data
 **/*.db-shm
 **/*.sqlite*
 deploy/history
-deploy/history.lock
+deploy/ops.lock
 
 # Build outputs and dependency caches (rebuilt inside the builder stages).
 build*

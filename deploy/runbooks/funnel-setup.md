@@ -61,13 +61,37 @@ docker compose -f deploy/compose.yaml logs --since 5m caddy \
   docker-proxy), so it never identifies the visitor.
 - If `X-Forwarded-For` holds your phone's public IP (compare with an IP-echo site on the
   phone), Funnel passes the client IP. Record that in `docs/phase-2.md`, then:
-  1. in `deploy/Caddyfile`, set `trusted_proxies static <docker bridge subnet>` in the
-     `servers :8080` block so Caddy takes the client IP from `X-Forwarded-For` (and overwrites
-     any value a visitor sends directly),
-  2. have recs-api read the client IP from the `X-Forwarded-For` value Caddy sets, and add
-     the per-IP limits. Both changes need a delta audit.
+  1. in `deploy/Caddyfile`, in the `servers :8080` block:
+
+     ```
+     trusted_proxies static <frontend bridge subnet>   # docker network inspect intermission_frontend
+     client_ip_headers X-Forwarded-For
+     trusted_proxies_strict
+     ```
+
+     `trusted_proxies_strict` makes Caddy read `X-Forwarded-For` **right to left** and take the
+     first address that is not a trusted proxy. Funnel appends the real client address to
+     whatever the visitor sent, so the rightmost entry is the one to believe. Without strict
+     mode Caddy takes the leftmost entry, which the visitor controls.
+  2. In the `/api/*` `reverse_proxy` block, add `header_up X-Real-IP {client_ip}` (Caddy always
+     overwrites it), and have recs-api read the client IP from `X-Real-IP` only, never from
+     `X-Forwarded-For`. Then add the per-IP limits. Both changes need a delta audit.
+  3. **Spoofing test** (from the phone or any machine off the tailnet):
+
+     ```bash
+     curl -s -o /dev/null -H 'X-Forwarded-For: 203.0.113.7' -H 'X-Real-IP: 203.0.113.8' \
+       https://intermission.<tailnet>.ts.net/healthz
+     docker compose -f deploy/compose.yaml logs --since 2m caddy | grep healthz | tail -n 1
+     ```
+
+     The log line's `client_ip` must be the caller's real public address, never `203.0.113.7`
+     or `203.0.113.8` (documentation-range addresses). Then repeat the login-rate-limit test
+     sending a different spoofed `X-Forwarded-For` on every attempt: the limit must still trip,
+     proving recs-api keys on the real address. If either check fails, revert step 1 and rely
+     on the per-account and global caps.
 - If there is no `X-Forwarded-For` (or it is a Tailscale address), Funnel does not pass the
-  client IP: rely on the per-account and global caps and record that decision.
+  client IP: rely on the per-account and global caps and record that decision. Leave
+  `trusted_proxies` unset so a visitor-sent `X-Forwarded-For` is never believed.
 
 ### Host header
 

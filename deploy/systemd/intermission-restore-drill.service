@@ -3,7 +3,11 @@
 [Unit]
 Description=Intermission monthly restore drill
 Wants=docker.service
-After=docker.service
+# Ordered after the nightly job if both are queued together. The scripts also share one lock
+# (deploy/lib.sh acquire_lock): if the nightly job is still running, the drill waits for it
+# (up to 4 hours) instead of overlapping. Conflicts= is deliberately not used: it would make
+# systemd stop a running nightly job (mid-backup or mid-retrain) when the drill starts.
+After=docker.service intermission-nightly.service
 
 [Service]
 Type=oneshot
@@ -11,7 +15,8 @@ User=@USER@
 WorkingDirectory=@REPO@
 ExecStart=@REPO@/deploy/restore-drill.sh
 Nice=10
-TimeoutStartSec=30min
+# Up to 4 h waiting for the lock plus the drill itself.
+TimeoutStartSec=5h
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=full

@@ -10,7 +10,10 @@ Runs `docker compose config --format json` for each stack variant and checks:
     127.0.0.1; every service is read_only, drops ALL capabilities, adds none, sets
     no-new-privileges, runs as a numeric non-root user, has a memory limit and rotated logs;
     nothing is privileged or shares host namespaces; the Docker socket is never mounted;
-    recs-model has no network; read-only mounts stay read-only.
+    recs-model has no network; read-only mounts stay read-only; node-exporter is on internal
+    networks only and never mounts the host root.
+  * dev overlay: its own project name (intermission-dev), no published port and no writable
+    data path shared with production.
 
 Usage: deploy/tests/check_compose.py   (uses deploy/.env.example; needs docker compose)
 """
@@ -25,7 +28,7 @@ ENV_EXAMPLE = os.path.join(DEPLOY, ".env.example")
 VARIANTS = {
     "default": ([], []),
     "all-profiles": ([], ["jobs", "monitoring"]),
-    "dev": (["compose.dev.yaml"], []),
+    "dev": (["compose.dev.yaml"], ["jobs", "monitoring"]),
     "drill": (["compose.drill.yaml"], ["jobs"]),
 }
 
@@ -38,6 +41,7 @@ READ_ONLY_MOUNTS = {
     ("prometheus", "/etc/prometheus/prometheus.yml"),
     ("prometheus", "/etc/prometheus/alerts"),
     ("node-exporter", "/host"),
+    ("node-exporter", "/host/data"),
     ("node-exporter", "/textfile"),
 }
 
@@ -113,7 +117,60 @@ def check_service(variant, name, svc, networks):
             fail(variant, f"{name}: model socket volume not mounted at /run/recs")
 
 
+def bind_sources(cfg):
+    """Host paths bind-mounted by any service: {source: [(service, target, read_only)]}."""
+    out = {}
+    for name, svc in cfg["services"].items():
+        for v in svc.get("volumes") or []:
+            if v.get("type") == "bind":
+                out.setdefault(v["source"], []).append((name, v["target"], bool(v.get("read_only"))))
+    return out
+
+
+def check_dev_isolated(prod, dev):
+    """Dev must never touch production: own project name, own ports, own data directories."""
+    variant = "dev"
+    if dev.get("name") != "intermission-dev" or dev.get("name") == prod.get("name"):
+        fail(variant, f"project name is {dev.get('name')!r} (prod {prod.get('name')!r}); want intermission-dev")
+    prod_ports = {(p.get("host_ip"), str(p.get("published"))) for _, p in published(prod)}
+    dev_ports = {(p.get("host_ip"), str(p.get("published"))) for _, p in published(dev)}
+    if prod_ports & dev_ports:
+        fail(variant, f"dev publishes production ports {sorted(prod_ports & dev_ports)}")
+    if not any(n == "caddy" for n, _ in published(dev)):
+        fail(variant, "dev caddy publishes no port")
+    prod_src, dev_src = bind_sources(prod), bind_sources(dev)
+    for src, uses in dev_src.items():
+        if src not in prod_src:
+            continue
+        # Shared host paths are allowed only for read-only config (Caddyfile, rules, ...).
+        if any(not ro for _, _, ro in uses) or any(not ro for _, _, ro in prod_src[src]) \
+                or "/data" in src:
+            fail(variant, f"dev mounts production path {src} ({uses})")
+    for vol in dev.get("volumes") or {}:
+        name = (dev["volumes"][vol] or {}).get("name", "")
+        if name and not name.startswith("intermission-dev"):
+            fail(variant, f"dev volume {vol} resolves to {name}")
+
+
+def check_monitoring_networks(variant, cfg):
+    """node-exporter sits only on internal networks; it never mounts the host root."""
+    services, networks = cfg["services"], cfg.get("networks") or {}
+    ne = services.get("node-exporter")
+    if not ne:
+        return
+    for net in ne.get("networks") or {}:
+        if (networks.get(net) or {}).get("internal") is not True:
+            fail(variant, f"node-exporter joins non-internal network {net}")
+    for v in ne.get("volumes") or []:
+        if v.get("source") == "/":
+            fail(variant, "node-exporter mounts the host root filesystem")
+    prom = services.get("prometheus") or {}
+    if not set(prom.get("networks") or {}) & set(ne.get("networks") or {}):
+        fail(variant, "prometheus shares no network with node-exporter")
+
+
 def main():
+    configs = {}
     for variant, (overlays, profiles) in VARIANTS.items():
         cfg = compose_config(overlays, profiles)
         services = cfg["services"]
@@ -131,7 +188,11 @@ def main():
                 fail(variant, f"published ports are {ports}, want only caddy 127.0.0.1:8080->8080")
             if set(services) != {"caddy", "api", "model"}:
                 fail(variant, f"default services are {sorted(services)}, want caddy, api, model")
+        check_monitoring_networks(variant, cfg)
+        configs[variant] = cfg
         print(f"checked {variant}: {len(services)} services: {', '.join(sorted(services))}")
+
+    check_dev_isolated(configs["all-profiles"], configs["dev"])
 
     if errors:
         print("\nFAIL", file=sys.stderr)

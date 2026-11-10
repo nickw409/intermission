@@ -8,6 +8,7 @@
 # shellcheck source=lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 require_env_file
+acquire_lock backup
 require_data_dirs db backups
 
 status=0

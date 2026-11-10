@@ -6,7 +6,7 @@
 #   3. backup                    deploy/backup.sh
 #
 # Retrain only runs after a successful export (it would otherwise train on a stale export).
-# The backup always runs. Each step's result is written for the NightlyJobFailed /
+# The backup always runs. Each step's result is written for the JobFailed /
 # NightlyJobStale alerts. Exits non-zero if any step failed.
 #
 # Priority: the train container has a low CPU weight (cpu_shares) and a raised OOM score in
@@ -14,6 +14,7 @@
 # shellcheck source=lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 require_env_file
+acquire_lock nightly
 require_data_dirs exports artifacts reports reports-private cache raw db backups
 
 failed=()

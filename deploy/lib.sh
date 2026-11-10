@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 umask 077
 # Fail loudly: name the script and line of any command that fails.
-trap 'printf "%s ERROR: %s:%s: command failed (exit %s): %s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${BASH_SOURCE[0]##*/}" "$LINENO" "$?" "$BASH_COMMAND" >&2' ERR
+trap 'printf "%s ERROR: %s:%s: command failed (exit %s): %s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${BASH_SOURCE[0]:-$0}" "$LINENO" "$?" "$BASH_COMMAND" >&2' ERR
 
 DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$DEPLOY_DIR/.." && pwd)"
@@ -15,11 +15,35 @@ IMAGES=(api model train web backup)
 log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
 
+# require_env_file: the env file exists, is private (forced to 0600) and holds no placeholder
+# secrets from .env.example. Every script calls it before starting or running any container.
 require_env_file() {
   [[ -f "$ENV_FILE" ]] || die "$ENV_FILE not found: copy deploy/.env.example to deploy/.env and fill it in"
   local mode
   mode="$(stat -c %a "$ENV_FILE")"
-  [[ "$mode" == 600 || "$mode" == 400 ]] || log "WARNING: $ENV_FILE is mode $mode; it holds secrets, use chmod 600"
+  if [[ "$mode" != 600 && "$mode" != 400 ]]; then
+    chmod 600 "$ENV_FILE" || die "$ENV_FILE is mode $mode and could not be made 0600"
+    log "WARNING: $ENV_FILE was mode $mode; set to 0600 (it holds secrets)"
+  fi
+  # Placeholders: any value starting with change-me (the .env.example convention). Only the
+  # key names are printed, never values.
+  local placeholders
+  placeholders="$(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=["'\'']\{0,1\}change-me.*/\1/p' "$ENV_FILE" | sort -u | tr '\n' ' ')"
+  [[ -z "$placeholders" ]] || die "placeholder values in $ENV_FILE for: ${placeholders% }; set real secrets first"
+}
+
+# acquire_lock NAME [WAIT_SECONDS]: take the one lock shared by release, backup, nightly and
+# restore-drill, so they never run over each other. Waits up to WAIT_SECONDS (default 3600),
+# then fails naming the holder. Scripts started by a holder (nightly -> backup.sh) inherit it.
+acquire_lock() {
+  local name="$1" wait="${2:-3600}" lock="${RECS_LOCK_FILE:-$DEPLOY_DIR/ops.lock}"
+  [[ -n "${INTERMISSION_LOCK_HELD:-}" ]] && return 0
+  exec 9<>"$lock"
+  if ! flock -w "$wait" 9; then
+    die "$name: another deploy operation is running ($(cat "$lock" 2>/dev/null || echo unknown)); waited ${wait}s"
+  fi
+  printf '%s pid %s since %s\n' "$name" "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$lock"
+  export INTERMISSION_LOCK_HELD="$name"
 }
 
 # env_get KEY: value of KEY in the env file (last assignment wins), empty if unset.
@@ -48,17 +72,14 @@ compose() {
   docker compose --project-directory "$DEPLOY_DIR" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
 }
 
-# short_sha REF: 7-character commit SHA for REF. Accepts a SHA that is not in the local repo
-# only if its images already exist (e.g. loaded from a CI artifact).
+# short_sha REF: 7-character SHA of a commit that exists in this repository. Images loaded
+# from a CI artifact still need their commit fetched first (git fetch), so a tag always maps
+# to source that can be inspected and rebuilt.
 short_sha() {
   local ref="$1" sha
-  if sha="$(git -C "$REPO_DIR" rev-parse --verify --quiet "${ref}^{commit}")"; then
-    printf '%s\n' "${sha:0:7}"
-  elif [[ "$ref" =~ ^[0-9a-f]{7,40}$ ]]; then
-    printf '%s\n' "${ref:0:7}"
-  else
-    die "unknown commit '$ref'"
-  fi
+  sha="$(git -C "$REPO_DIR" rev-parse --verify --quiet --end-of-options "${ref}^{commit}")" \
+    || die "unknown commit '$ref' (git fetch first?)"
+  printf '%s\n' "${sha:0:7}"
 }
 
 images_present() {
@@ -99,7 +120,7 @@ require_data_dirs() {
 origin_host() { local o="${1#*://}"; printf '%s\n' "${o%%/*}"; }
 
 # job_status JOB CODE: record a job result for node-exporter's textfile collector
-# (alerts: NightlyJobFailed, NightlyJobStale). Never fails the caller.
+# (alerts: JobFailed, NightlyJobStale, RestoreDrillStale). Never fails the caller.
 job_status() {
   local job="$1" code="$2" dir now
   dir="$(data_dir)/ops/textfile"

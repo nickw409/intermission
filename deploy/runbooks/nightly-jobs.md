@@ -8,8 +8,9 @@
 3. `deploy/backup.sh`: `VACUUM INTO` + integrity check; 7 daily + 4 weekly copies.
 
 Each step writes `data/ops/textfile/intermission_job_<step>.prom`, which node-exporter exposes
-for the `NightlyJobFailed` and `NightlyJobStale` alerts. A monthly timer runs
-`deploy/restore-drill.sh` (status file `intermission_job_restore_drill.prom`).
+for the `JobFailed` and `NightlyJobStale` alerts. A monthly timer runs
+`deploy/restore-drill.sh` (status file `intermission_job_restore_drill.prom`; alerts `JobFailed` and
+`RestoreDrillStale` after 35 days without a pass).
 
 ## Install the timers (once)
 

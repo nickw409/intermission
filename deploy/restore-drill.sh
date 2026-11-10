@@ -13,6 +13,8 @@
 # shellcheck source=lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 require_env_file
+# Wait up to 4 h: the drill timer can fire while a long nightly retrain is still running.
+acquire_lock restore-drill 14400
 require_data_dirs backups reports artifacts
 
 tag="${1:-$(env_get TAG)}"

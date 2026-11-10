@@ -30,8 +30,17 @@ and new recs-api (add columns, never rename or drop in the same release; spec "B
 deploy"). recs-api takes its own backup before migrating.
 
 Using CI-built images instead of building locally: download the `images-<sha>` artifact from
-the `release` workflow run, then `zstd -dc images-<sha>.tar.zst | docker load` and run
+the `release` workflow run, then `zstd -dc images-<sha>.tar.zst | docker load`, `git fetch`
+(release.sh only accepts SHAs that exist in the local repository) and run
 `deploy/release.sh <sha>`.
+
+Before any of this, the scripts check `deploy/.env`: it is forced to mode 0600, and they stop if
+any value still starts with `change-me` (the `.env.example` placeholders). Release, backup,
+nightly and restore-drill also share one lock (`deploy/ops.lock`), so they never overlap; a
+release waits at most 2 minutes for it (`RELEASE_LOCK_WAIT`), then stops and names the holder.
+
+Development uses a separate compose project (`intermission-dev`), port 127.0.0.1:8088 and data
+directory `data/dev/` (see `deploy/compose.dev.yaml`), so it never touches production.
 
 ## First-time setup (once per machine)
 
@@ -69,3 +78,21 @@ the `release` workflow run, then `zstd -dc images-<sha>.tar.zst | docker load` a
 - `deploy/release.sh --list` shows the new SHA at the bottom.
 - `docker compose -f deploy/compose.yaml ps`: caddy, api, model are `running`.
 - `docker compose -f deploy/compose.yaml logs --since 10m api | grep -c '"level":"ERROR"'` is 0.
+
+## Accepted risk: recs-api is reachable from the host itself
+
+Only Caddy publishes a port, and only on 127.0.0.1. But Docker routes every bridge network to
+the host, **including networks marked `internal`** (verified on the build host: a container
+on an internal network answered a TCP connection from the host). So any process
+running on the host can connect to recs-api's container address (on `backend` or `egress`,
+port 8081) and skip Caddy: no security headers, no 64 KB body cap, no access log line.
+recs-api's own checks (auth, CSRF, body limits, rate limits) still apply, and nothing on the
+internet or the tailnet can reach those addresses (Funnel forwards only to 127.0.0.1:8080).
+
+Decision: **accepted as a local-only risk.** Anyone who can run processes on the host can
+already reach the Docker socket or the data directory, which is strictly more access. An egress
+proxy for the TMDB fetch was considered and rejected: it would take api off the `egress`
+bridge, but the host could still reach it on the internal `backend` bridge, so it would add an
+image and its config without closing the path. Revisit this if the host ever runs untrusted
+local users or workloads; the fix then is host firewall rules (the `DOCKER-USER` chain)
+dropping host-originated traffic to the bridge subnets.
