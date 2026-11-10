@@ -52,6 +52,7 @@ Stop conditions (only the affected task stops; the others keep going):
 
 ## Open questions for the owner
 
+2. **Item-KNN scoring formula (blocks Phase 1 sign-off).** The spec's score Σ s'(r−μ)/Σ|s'| is a rating-prediction formula; used for top-N ranking it promotes obscure items with a single highly rated neighbour. On ml-latest-small: spec formula NDCG@10 = 0.0041; without the Σ|s'| denominator 0.0560; positive neighbours only, unnormalized 0.0579; rating-count popularity 0.0427 (Cremonesi et al. 2010 describe this effect). I kept the spec formula as the default and added `normalize` / `positive_only` as config hyperparameters, selectable on the validation set only. **Your call:** (a) keep the spec formula as "knn" and report it as failing popularity if it does, or (b) amend the spec so "knn" uses the unnormalized top-N score (tuned on validation), or (c) report both as separate models. I'll run the ml-32m numbers for all variants so you can decide with data.
 1. **gitleaks locally.** I wasn't allowed to install the gitleaks binary on your machine without asking (it's external code). CI scans every push regardless. To also scan before each commit, install it yourself (e.g. `go install github.com/zricethezav/gitleaks/v8@v8.30.1`); the pre-commit hook (`tools/hooks/pre-commit`, already enabled) uses it automatically.
 
 ## Carry-forward for the Wave 3b security audit (from I1)
