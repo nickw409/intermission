@@ -11,31 +11,95 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net/url"
+	"runtime"
+	"strings"
+
+	_ "modernc.org/sqlite" // registers the "sqlite" database/sql driver (pure Go)
 )
 
-// ErrNotImplemented marks stubs workstream I1 has not filled in yet.
+// ErrNotImplemented marks stubs workstream I1 has not filled in yet. Nothing
+// returns it any more; it stays because main.go refers to it.
 var ErrNotImplemented = errors.New("not implemented yet")
 
 // DB is the pair of pools on app.db.
 type DB struct {
 	Writer *sql.DB // SetMaxOpenConns(1)
 	Reader *sql.DB
+	path   string
 }
 
-// Open opens app.db at path.
+// BusyTimeoutMS is how long a connection waits on a lock before SQLITE_BUSY.
+const BusyTimeoutMS = 5000
+
+// Open opens app.db at path: a writer pool limited to one connection (so
+// writes queue in Go instead of fighting over SQLite's lock) and a read-only
+// reader pool. Both use WAL, foreign_keys=ON and busy_timeout=5000. Writer
+// transactions start with BEGIN IMMEDIATE so a transaction that reads and
+// then writes can never fail half-way on a lock upgrade.
 //
-// TODO(workstream I1): open both pools. The stub returns a DB with nil pools
-// so the skeleton server can start.
+// The parent directory must already exist.
 func Open(ctx context.Context, path string) (*DB, error) {
-	return &DB{}, nil
+	if path == "" || strings.ContainsAny(path, "?#") || strings.HasPrefix(path, "file:") || path == ":memory:" {
+		return nil, fmt.Errorf("db: unsupported database path %q", path)
+	}
+	common := []string{
+		"busy_timeout(5000)",
+		"foreign_keys(1)",
+		"journal_mode(WAL)",
+		"synchronous(NORMAL)",
+	}
+	writer, err := openPool(ctx, path, common, "immediate")
+	if err != nil {
+		return nil, fmt.Errorf("db: open writer: %w", err)
+	}
+	writer.SetMaxOpenConns(1)
+	writer.SetMaxIdleConns(1)
+	writer.SetConnMaxLifetime(0)
+
+	reader, err := openPool(ctx, path, append(common, "query_only(1)"), "deferred")
+	if err != nil {
+		_ = writer.Close()
+		return nil, fmt.Errorf("db: open reader: %w", err)
+	}
+	n := max(4, runtime.NumCPU())
+	reader.SetMaxOpenConns(n)
+	reader.SetMaxIdleConns(n)
+	return &DB{Writer: writer, Reader: reader, path: path}, nil
 }
 
-// Migrate backs up the database and applies pending migrations.
-//
-// TODO(workstream I1): implement. The stub returns ErrNotImplemented.
+func openPool(ctx context.Context, path string, pragmas []string, txlock string) (*sql.DB, error) {
+	q := url.Values{}
+	for _, p := range pragmas {
+		q.Add("_pragma", p)
+	}
+	q.Set("_txlock", txlock)
+	pool, err := sql.Open("sqlite", "file:"+path+"?"+q.Encode())
+	if err != nil {
+		return nil, err
+	}
+	if err := pool.PingContext(ctx); err != nil {
+		_ = pool.Close()
+		return nil, err
+	}
+	return pool, nil
+}
+
+// Path returns the database file path.
+func (d *DB) Path() string { return d.path }
+
+// Version returns PRAGMA user_version, the number of the last applied migration.
+func (d *DB) Version(ctx context.Context) (int, error) {
+	var v int
+	err := d.Writer.QueryRowContext(ctx, "PRAGMA user_version").Scan(&v)
+	return v, err
+}
+
+// Migrate backs up the database and applies pending migrations; see migrate.go.
 func (d *DB) Migrate(ctx context.Context, logger *slog.Logger) error {
-	return ErrNotImplemented
+	return d.migrate(ctx, logger, embedded())
 }
 
 // Close closes both pools.
