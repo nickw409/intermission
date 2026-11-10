@@ -20,14 +20,18 @@ namespace fs = std::filesystem;
 
 namespace {
 
-// build/<preset>/ when running under ctest (the nearest ancestor with a CMakeCache.txt),
-// otherwise the working directory.
+// build/<preset>/test-reports: the nearest ancestor of the test binary holding a CMakeCache.txt
+// (independent of the working directory), else a directory under the system temp dir.
 fs::path test_reports_dir() {
-  for (fs::path p = fs::current_path(); !p.empty(); p = p.parent_path()) {
-    if (fs::exists(p / "CMakeCache.txt")) return p / "test-reports";
-    if (p == p.parent_path()) break;
+  std::error_code ec;
+  const fs::path exe = fs::read_symlink("/proc/self/exe", ec);
+  if (!ec) {
+    for (fs::path p = exe.parent_path(); !p.empty(); p = p.parent_path()) {
+      if (fs::exists(p / "CMakeCache.txt")) return p / "test-reports";
+      if (p == p.parent_path()) break;
+    }
   }
-  return fs::current_path() / "test-reports";
+  return fs::temp_directory_path() / "recs-test-reports";
 }
 
 struct Run {
