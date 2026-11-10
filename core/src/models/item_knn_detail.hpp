@@ -15,10 +15,13 @@ struct Params {
   std::uint32_t neighbors = 100;   // M: neighbours kept per item
   double shrinkage = 100.0;        // lambda in s * n / (n + lambda)
   std::uint32_t min_support = 20;  // minimum training ratings for an item to take part at all
+  bool normalize = true;           // divide the score by sum |s'| (spec); false = plain weighted sum
+  bool positive_only = false;      // keep only s' > 0 neighbours (false = spec: rank by |s'|)
 };
 
 /// Reads a knn config, filling defaults for missing keys. Throws std::invalid_argument on an
-/// unknown key, a wrong type, neighbors == 0, min_support == 0, or a negative/non-finite shrinkage.
+/// unknown key, a wrong type (including a non-bool normalize/positive_only), neighbors == 0,
+/// min_support == 0, or a negative/non-finite shrinkage.
 Params parse_config(const Config& cfg);
 Config to_config(const Params& p);
 
@@ -34,7 +37,8 @@ struct PairSimilarity {
 /// Every item's full similarity row before top-M truncation, computed by exactly the code fit()
 /// uses. Indexed by ItemIdx; items below min_support get an empty row and never appear in another
 /// item's row. Each row holds every eligible j != i with n_ij >= 1 (zero similarities included),
-/// sorted by ItemIdx. O(sum over users of n_u^2) time and O(n_items^2) output: tests only.
+/// sorted by ItemIdx. `positive_only` does not filter here (it only affects the stored lists).
+/// O(sum over users of n_u^2) time and O(n_items^2) output: tests only.
 std::vector<std::vector<PairSimilarity>> full_similarity(const Dataset& train, const Config& cfg);
 
 /// The stored (truncated) neighbour list of `item` in a fitted or loaded "knn" model, in stored

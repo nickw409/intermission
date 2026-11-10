@@ -74,7 +74,9 @@ RandomCase random_case(recs::Rng& rng) {
   const double shrink_choices[] = {0.0, 0.5, 3.0, 100.0};
   c.cfg = Config{{"neighbors", 1 + rng.uniform(n_items)},
                  {"shrinkage", shrink_choices[rng.uniform(4)]},
-                 {"min_support", 1 + rng.uniform(5)}};
+                 {"min_support", 1 + rng.uniform(5)},
+                 {"normalize", rng.uniform(2) == 1},
+                 {"positive_only", rng.uniform(2) == 1}};
   return c;
 }
 
@@ -143,6 +145,17 @@ bool bitwise_equal(const std::vector<float>& a, const std::vector<float>& b) {
 //   score(D) = -inf (no neighbour list)
 //   explain(C): contributions s' * c / den: A = 1.158899800341064, B = 0.420550099829468 -> [A, B]
 //   explain(B): A = 2 -> [A];  explain(A): B = -1 is negative -> []
+//
+// normalize = false (no division by sum |s'|):
+//   score(C) = 1.2990381056766580 + 0.4714045207910316 = 1.7704426264676896
+//   score(A) = s'_AB * 1  = -0.7071067811865477
+//   score(B) = s'_BA * -2 =  1.4142135623730954
+//   score(D) = -inf
+//   explain(C): A = 1.299038105676658, B = 0.4714045207910316;  explain(B): A = 1.4142135623730954
+//
+// positive_only = true (normalize = true): only s'_BC > 0 survives.
+//   lists A: []  B: [C]  C: [B]
+//   score(A) = -inf (no list), score(B) = -inf (C unrated), score(C) = s'_CB * 1 / |s'_CB| = 1
 Dataset hand_dataset() {
   std::vector<Triplet> t = {
       {0, 0, 5.0f, 1}, {0, 1, 3.0f, 2}, {0, 2, 4.0f, 3},  // u0
@@ -153,7 +166,17 @@ Dataset hand_dataset() {
   return recs::make_dataset("hand", 4, 4, std::move(t));
 }
 
-const Config kHandCfg = Config{{"neighbors", 2}, {"shrinkage", 1.0}, {"min_support", 2}};
+const Config kHandCfg = Config{{"neighbors", 2},     {"shrinkage", 1.0},       {"min_support", 2},
+                               {"normalize", true}, {"positive_only", false}};
+
+// The four scoring modes: (normalize, positive_only).
+const std::pair<bool, bool> kModes[] = {{true, false}, {true, true}, {false, false}, {false, true}};
+
+Config with_mode(Config c, std::pair<bool, bool> mode) {
+  c["normalize"] = mode.first;
+  c["positive_only"] = mode.second;
+  return c;
+}
 
 }  // namespace
 
@@ -288,12 +311,48 @@ TEST_CASE("knn gate 2: hand fixture similarities, scores and explanations", "[kn
   CHECK(items_of(neighbour_list(*m1, 0)) == std::vector<ItemIdx>{1});
   CHECK(items_of(neighbour_list(*m1, 1)) == std::vector<ItemIdx>{0});
   CHECK(items_of(neighbour_list(*m1, 2)) == std::vector<ItemIdx>{0});
+
+  // normalize = false: the plain weighted sum.
+  Config raw = kHandCfg;
+  raw["normalize"] = false;
+  const auto mr = fit_knn(ds, raw);
+  CHECK(mr->config() == raw);
+  const auto str = mr->fold_in(user);
+  const auto sr = score_of(*mr, str);
+  CHECK_THAT(sr[0], WithinAbs(-0.7071067811865477, 1e-6));
+  CHECK_THAT(sr[1], WithinAbs(1.4142135623730954, 1e-6));
+  CHECK_THAT(sr[2], WithinAbs(1.7704426264676896, 1e-6));
+  CHECK(sr[3] == kNegInf);
+  const auto erc = mr->explain(str, 2);
+  REQUIRE(erc.because.size() == 2);
+  CHECK(erc.because[0].item == 0);
+  CHECK_THAT(erc.because[0].weight, WithinAbs(1.299038105676658, 1e-6));
+  CHECK(erc.because[1].item == 1);
+  CHECK_THAT(erc.because[1].weight, WithinAbs(0.4714045207910316, 1e-6));
+  const auto erb = mr->explain(str, 1);
+  REQUIRE(erb.because.size() == 1);
+  CHECK_THAT(erb.because[0].weight, WithinAbs(1.4142135623730954, 1e-6));
+  CHECK(mr->explain(str, 0).because.empty());
+
+  // positive_only = true: negative neighbours are dropped before truncation.
+  Config pos = kHandCfg;
+  pos["positive_only"] = true;
+  const auto mp = fit_knn(ds, pos);
+  CHECK(neighbour_list(*mp, 0).empty());
+  CHECK(items_of(neighbour_list(*mp, 1)) == std::vector<ItemIdx>{2});
+  CHECK(items_of(neighbour_list(*mp, 2)) == std::vector<ItemIdx>{1});
+  const auto sp = score_of(*mp, mp->fold_in(user));
+  CHECK(sp[0] == kNegInf);
+  CHECK(sp[1] == kNegInf);
+  CHECK_THAT(sp[2], WithinAbs(1.0, 1e-6));
+  CHECK(sp[3] == kNegInf);
 }
 
 TEST_CASE("knn: config defaults and validation", "[knn]") {
   const auto ds = hand_dataset();
   const auto m = fit_knn(ds, Config::object());
-  CHECK(m->config() == Config{{"neighbors", 100}, {"shrinkage", 100.0}, {"min_support", 20}});
+  CHECK(m->config() == Config{{"neighbors", 100}, {"shrinkage", 100.0}, {"min_support", 20},
+                              {"normalize", true}, {"positive_only", false}});
   // Every item is below the default min_support 20: nothing can be scored.
   const auto s = score_of(*m, m->fold_in(training_ratings(ds, 0)));
   for (float v : s) CHECK(v == kNegInf);
@@ -304,13 +363,22 @@ TEST_CASE("knn: config defaults and validation", "[knn]") {
   bad(Config{{"shrinkage", -1.0}});
   bad(Config{{"neighbours", 10}});  // typo: unknown key
   bad(Config{{"neighbors", "ten"}});
+  bad(Config{{"normalize", 1}});
+  bad(Config{{"normalize", "false"}});
+  bad(Config{{"positive_only", 0}});
+  bad(Config{{"positive_only", nullptr}});
 }
 
 // ---- gate 3 ---------------------------------------------------------------------------------------
 TEST_CASE("knn gate 3: fold_in + score equals the batch path bit for bit (tiny fixture)", "[knn][gate]") {
   const auto ds = recs::load_movielens(recs::testing::tiny_dir(), "tiny");
-  for (const auto& cfg : {Config{{"neighbors", 5}, {"shrinkage", 2.0}, {"min_support", 2}},
-                          Config{{"neighbors", 100}, {"shrinkage", 100.0}, {"min_support", 1}}}) {
+  std::vector<Config> configs;  // two neighbourhood settings x the four scoring modes
+  for (const auto& base : {Config{{"neighbors", 5}, {"shrinkage", 2.0}, {"min_support", 2}},
+                           Config{{"neighbors", 100}, {"shrinkage", 100.0}, {"min_support", 1}}}) {
+    for (const auto& mode : kModes) configs.push_back(with_mode(base, mode));
+  }
+  for (const auto& cfg : configs) {
+    INFO("config " << cfg.dump());
     const auto m = fit_knn(ds, cfg);
     REQUIRE(m->supports_trained_scoring());
     std::size_t finite = 0;
@@ -335,16 +403,20 @@ TEST_CASE("knn gate 3: fold_in + score equals the batch path bit for bit (random
           "[knn][gate]") {
   recs::testing::for_seeds(120, 0xD003, [](recs::Rng& rng, std::uint64_t) {
     const auto c = random_case(rng);
-    const auto m = fit_knn(c.ds, c.cfg);
-    for (UserIdx u = 0; u < c.ds.n_users(); ++u) {
-      INFO("user " << u);
-      auto ratings = training_ratings(c.ds, u);
-      rng.shuffle(ratings.begin(), ratings.end());
-      const auto via_fold_in = score_of(*m, m->fold_in(ratings));
-      std::vector<float> batch(m->n_items(), 7.0f);
-      m->score_trained_user(u, batch);
-      REQUIRE(bitwise_equal(via_fold_in, batch));
-      for (float v : batch) REQUIRE(!std::isnan(v));
+    for (const auto& mode : kModes) {
+      const auto cfg = with_mode(c.cfg, mode);
+      INFO("config " << cfg.dump());
+      const auto m = fit_knn(c.ds, cfg);
+      for (UserIdx u = 0; u < c.ds.n_users(); ++u) {
+        INFO("user " << u);
+        auto ratings = training_ratings(c.ds, u);
+        rng.shuffle(ratings.begin(), ratings.end());
+        const auto via_fold_in = score_of(*m, m->fold_in(ratings));
+        std::vector<float> batch(m->n_items(), 7.0f);
+        m->score_trained_user(u, batch);
+        REQUIRE(bitwise_equal(via_fold_in, batch));
+        for (float v : batch) REQUIRE(!std::isnan(v));
+      }
     }
   });
 }
@@ -370,6 +442,7 @@ TEST_CASE("knn gate 4: explanations only cite items the user rated", "[knn][gate
   recs::testing::for_seeds(120, 0xD004, [](recs::Rng& rng, std::uint64_t) {
     const auto c = random_case(rng);
     const auto m = fit_knn(c.ds, c.cfg);
+    INFO("config " << c.cfg.dump());
     for (int trial = 0; trial < 5; ++trial) {
       const auto ratings = random_user(rng, c.ds.n_items());
       std::set<ItemIdx> rated;
@@ -404,6 +477,8 @@ TEST_CASE("knn gate 5: min_support respected and lists truncated to the top M", 
     const auto rows = full_similarity(c.ds, c.cfg);
     const auto M = c.cfg["neighbors"].get<std::size_t>();
     const auto min_support = c.cfg["min_support"].get<std::uint32_t>();
+    const bool positive_only = c.cfg["positive_only"].get<bool>();
+    INFO("config " << c.cfg.dump());
     auto eligible = [&](ItemIdx i) { return c.ds.by_item.row_size(i) >= min_support; };
     for (ItemIdx i = 0; i < c.ds.n_items(); ++i) {
       INFO("item " << i);
@@ -414,7 +489,9 @@ TEST_CASE("knn gate 5: min_support respected and lists truncated to the top M", 
       for (const auto& p : rows[i]) CHECK(eligible(p.item));
 
       std::vector<recs::item_knn_detail::PairSimilarity> expected;
-      for (const auto& p : rows[i]) if (p.shrunk != 0.0) expected.push_back(p);
+      for (const auto& p : rows[i]) {
+        if (positive_only ? p.shrunk > 0.0 : p.shrunk != 0.0) expected.push_back(p);
+      }
       std::sort(expected.begin(), expected.end(), [](const auto& a, const auto& b) {
         if (std::abs(a.shrunk) != std::abs(b.shrunk)) return std::abs(a.shrunk) > std::abs(b.shrunk);
         return a.item < b.item;

@@ -29,9 +29,12 @@
 // NEIGHBOURHOODS
 //   Only items with at least `min_support` training ratings take part: they get neighbour lists
 //   and only they may appear in someone's list. Each item keeps its top M = `neighbors` partners
-//   by |s'| (ties broken by ItemIdx ascending); zero similarities are dropped. We keep strongly
-//   NEGATIVE neighbours too, because the scoring formula below uses them correctly: a user who
-//   disliked a movie that is anti-correlated with i is evidence FOR i.
+//   by |s'| (ties broken by ItemIdx ascending); zero similarities are dropped. By default we keep
+//   strongly NEGATIVE neighbours too, because the scoring formula below uses them correctly: a
+//   user who disliked a movie that is anti-correlated with i is evidence FOR i.
+//   Option `positive_only` (default false): drop every s' <= 0 first, then keep the top M of the
+//   rest (equivalently the top M by s'). Many top-N implementations do this, since "users who
+//   hated X tend to like i" is weak evidence compared with "users who liked X liked i".
 //
 // SCORE (Sarwar et al. 2001, section 3.2.1, in mean-centred form; Desrosiers & Karypis 2011)
 //   With N(i) the neighbour list of i and R(u) the items u rated,
@@ -44,6 +47,24 @@
 //   not, since a per-user constant changes nothing in the ranking). If none of i's neighbours was
 //   rated, score_ui = -infinity: the item cannot be recommended. Sums run in double precision in
 //   the stored neighbour order, so the result is fully deterministic.
+//
+//   Option `normalize` (default true = the formula above, as in the spec). With normalize = false
+//   the denominator is dropped:  score_ui = sum_{j in N(i) and R(u)} s'_ij (r_uj - mu_u).
+//   Why offer it: the normalised score is a predicted RATING, and as a top-N RANKING it is known to
+//   favour obscure items. An item whose single rated neighbour the user loved gets the maximum
+//   possible score (r_uj - mu_u), however thin that evidence is. The unnormalised sum grows with
+//   the amount of agreeing evidence, which ranks much better: Cremonesi, Koren and Turrin (2010)
+//   found non-normalised neighbourhood scores far stronger for top-N, and Deshpande and Karypis
+//   (2004) rank by plain similarity sums. Items with no rated neighbour still score -infinity, so
+//   both modes recommend from the same candidate set. Which mode to use is a validation-set
+//   decision; the default stays the spec's formula.
+//
+// EXPLANATIONS
+//   explain(u, i) lists the rated neighbours j whose term in the score is positive, largest first
+//   (at most 3), with weight = that term, i.e. each one's actual share of score_ui:
+//     normalize = true:   weight_j = s'_ij (r_uj - mu_u) / sum |s'|
+//     normalize = false:  weight_j = s'_ij (r_uj - mu_u)            (the same term, no divisor)
+//   In both modes the score is the sum of all such terms, positive and negative (up to rounding).
 //
 // FOLD-IN AND THE BATCH PATH
 //   Everything item-side (the neighbour lists) is fixed after fit(). A user is just
@@ -68,6 +89,9 @@
 //   R. Bell, Y. Koren. "Improved neighborhood-based collaborative filtering." KDD Cup 2007.
 //   Y. Koren. "Factorization meets the neighborhood: a multifaceted collaborative filtering
 //     model." KDD 2008.
+//   P. Cremonesi, Y. Koren, R. Turrin. "Performance of recommender algorithms on top-N
+//     recommendation tasks." RecSys 2010.
+//   M. Deshpande, G. Karypis. "Item-based top-N recommendation algorithms." ACM TOIS 22(1), 2004.
 //   C. Desrosiers, G. Karypis. "A comprehensive survey of neighborhood-based recommendation
 //     methods." Recommender Systems Handbook, 2011.
 //
@@ -132,6 +156,9 @@ Params parse_config(const Config& cfg) {
       if (!std::isfinite(p.shrinkage) || p.shrinkage < 0.0) {
         throw std::invalid_argument("knn: 'shrinkage' must be finite and >= 0");
       }
+    } else if (key == "normalize" || key == "positive_only") {
+      if (!value.is_boolean()) throw std::invalid_argument("knn: '" + key + "' must be true or false");
+      (key == "normalize" ? p.normalize : p.positive_only) = value.get<bool>();
     } else {
       throw std::invalid_argument("knn: unknown config key '" + key + "'");
     }
@@ -140,7 +167,11 @@ Params parse_config(const Config& cfg) {
 }
 
 Config to_config(const Params& p) {
-  return Config{{"neighbors", p.neighbors}, {"shrinkage", p.shrinkage}, {"min_support", p.min_support}};
+  return Config{{"neighbors", p.neighbors},
+                {"shrinkage", p.shrinkage},
+                {"min_support", p.min_support},
+                {"normalize", p.normalize},
+                {"positive_only", p.positive_only}};
 }
 
 }  // namespace item_knn_detail
@@ -288,12 +319,13 @@ bool stronger(const PairSimilarity& a, const PairSimilarity& b) {
 // Little-endian binary I/O
 // ---------------------------------------------------------------------------------------------
 constexpr char kMagic[8] = {'R', 'E', 'C', 'S', 'K', 'N', 'N', '1'};
-constexpr std::uint32_t kFormatVersion = 1;
+constexpr std::uint32_t kFormatVersion = 2;  // 2 added normalize and positive_only
 constexpr const char* kFileName = "item_knn.bin";
 
 class Writer {
  public:
   void bytes(const void* p, std::size_t n) { buf_.append(static_cast<const char*>(p), n); }
+  void u8(std::uint8_t v) { buf_.push_back(static_cast<char>(v)); }
   void u32(std::uint32_t v) { for (int k = 0; k < 4; ++k) buf_.push_back(static_cast<char>((v >> (8 * k)) & 0xFF)); }
   void u64(std::uint64_t v) { for (int k = 0; k < 8; ++k) buf_.push_back(static_cast<char>((v >> (8 * k)) & 0xFF)); }
   void f32(float v) { u32(std::bit_cast<std::uint32_t>(v)); }
@@ -308,6 +340,10 @@ class Reader {
  public:
   explicit Reader(std::string data) : buf_(std::move(data)) {}
   void bytes(void* p, std::size_t n) { need(n); std::memcpy(p, buf_.data() + pos_, n); pos_ += n; }
+  std::uint8_t u8() {
+    need(1);
+    return static_cast<std::uint8_t>(buf_[pos_++]);
+  }
   std::uint32_t u32() {
     need(4);
     std::uint32_t v = 0;
@@ -358,7 +394,8 @@ class ItemKnn final : public Model {
       for (std::int64_t ii = 0; ii < n; ++ii) {
         const auto i = static_cast<ItemIdx>(ii);
         similarity_row(pr, params_, i, acc, row);
-        std::erase_if(row, [](const PairSimilarity& p) { return p.shrunk == 0.0; });
+        const bool positive_only = params_.positive_only;
+        std::erase_if(row, [&](const PairSimilarity& p) { return positive_only ? p.shrunk <= 0.0 : p.shrunk == 0.0; });
         const std::size_t keep = std::min<std::size_t>(row.size(), params_.neighbors);
         std::partial_sort(row.begin(), row.begin() + static_cast<std::ptrdiff_t>(keep), row.end(), stronger);
         row.resize(keep);
@@ -436,7 +473,8 @@ class ItemKnn final : public Model {
                                  [](const Rating& r, ItemIdx x) { return r.item < x; });
       return (it != sorted.end() && it->item == j) ? &*it : nullptr;
     };
-    // Same sums as score(): each rated neighbour contributes s' * (r - mu) / sum |s'|.
+    // Same sums as score(): each rated neighbour contributes s' * (r - mu), divided by sum |s'|
+    // when normalize is on.
     std::vector<std::pair<ItemIdx, double>> terms;
     double den = 0.0;
     for (std::uint64_t k = nbr_ptr_[item]; k < nbr_ptr_[item + 1]; ++k) {
@@ -449,7 +487,7 @@ class ItemKnn final : public Model {
     Explanation e;
     if (den <= 0.0) return e;
     for (const auto& [j, t] : terms) {
-      const auto w = static_cast<float>(t / den);
+      const auto w = static_cast<float>(params_.normalize ? t / den : t);
       if (w > 0.0f) e.because.push_back(Because{j, w});
     }
     std::sort(e.because.begin(), e.because.end(), [](const Because& a, const Because& b) {
@@ -484,6 +522,7 @@ class ItemKnn final : public Model {
   //   u32      format version (1)
   //   u32      n_items
   //   u32      neighbors      u32 min_support      f64 shrinkage
+  //   u8       normalize (0/1)  u8 positive_only (0/1)
   //   u64      nnz (total neighbour entries)
   //   u64[n_items + 1]  row offsets
   //   u32[nnz]          neighbour ItemIdx
@@ -496,6 +535,8 @@ class ItemKnn final : public Model {
     w.u32(params_.neighbors);
     w.u32(params_.min_support);
     w.f64(params_.shrinkage);
+    w.u8(params_.normalize ? 1 : 0);
+    w.u8(params_.positive_only ? 1 : 0);
     w.u64(nbr_item_.size());
     for (auto v : nbr_ptr_) w.u64(v);
     for (auto v : nbr_item_) w.u32(v);
@@ -523,6 +564,11 @@ class ItemKnn final : public Model {
     p.neighbors = r.u32();
     p.min_support = r.u32();
     p.shrinkage = r.f64();
+    const std::uint8_t normalize = r.u8();
+    const std::uint8_t positive_only = r.u8();
+    if (normalize > 1 || positive_only > 1) throw std::runtime_error("knn: bad flag byte");
+    p.normalize = normalize == 1;
+    p.positive_only = positive_only == 1;
     item_knn_detail::parse_config(item_knn_detail::to_config(p));  // same validation as fit()
     const std::uint64_t nnz = r.u64();
     // Size check before allocating, so a corrupt count cannot trigger a huge allocation.
@@ -541,7 +587,8 @@ class ItemKnn final : public Model {
       if (ptr[i] > ptr[i + 1] || ptr[i + 1] - ptr[i] > p.neighbors) throw std::runtime_error("knn: bad row offsets");
       for (std::uint64_t e = ptr[i]; e < ptr[i + 1]; ++e) {
         if (items[e] >= n_items || items[e] == i) throw std::runtime_error("knn: bad neighbour id");
-        if (!std::isfinite(sims[e]) || sims[e] == 0.0f || std::abs(sims[e]) > 1.0f) {
+        if (!std::isfinite(sims[e]) || sims[e] == 0.0f || std::abs(sims[e]) > 1.0f ||
+            (p.positive_only && sims[e] < 0.0f)) {
           throw std::runtime_error("knn: bad similarity value");
         }
         if (e > ptr[i] && std::abs(sims[e]) > std::abs(sims[e - 1])) throw std::runtime_error("knn: neighbour list out of order");
@@ -576,7 +623,11 @@ class ItemKnn final : public Model {
         num += s * dev[j];
         den += std::abs(s);
       }
-      out[i] = den > 0.0 ? static_cast<float>(num / den) : kCannotScore;
+      if (den <= 0.0) {
+        out[i] = kCannotScore;  // no rated neighbour (either mode)
+      } else {
+        out[i] = static_cast<float>(params_.normalize ? num / den : num);
+      }
     }
   }
 

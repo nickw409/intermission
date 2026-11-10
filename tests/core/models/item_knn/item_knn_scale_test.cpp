@@ -3,7 +3,8 @@
 //   build/debug/tests/recs_tests "[knn][slow]"
 //   OMP_NUM_THREADS=4 build/release/tests/recs_tests "[knn][ml32m]"
 // The official Phase 1 gate (KNN beats popularity on ml-32m, paired bootstrap) belongs to the
-// evaluator; the comparison here only prints numbers.
+// evaluator. The comparison here only PRINTS numbers for the four scoring modes; it deliberately
+// asserts nothing about relative quality.
 #include <omp.h>
 
 #include <algorithm>
@@ -53,13 +54,16 @@ struct Fitted {
   double peak_during = 0.0;
 };
 
-Fitted timed_fit(const recs::Dataset& ds) {
+Fitted timed_fit(const recs::Dataset& ds, bool normalize = true, bool positive_only = false) {
   Fitted f;
   f.rss_before = proc_status_mib("VmRSS");
   reset_peak_rss();
   f.model = recs::make_item_knn();
   const auto t0 = std::chrono::steady_clock::now();
-  f.model->fit(ds, recs::Config{{"neighbors", 100}, {"shrinkage", 100}, {"min_support", 20}}, {});
+  f.model->fit(ds,
+               recs::Config{{"neighbors", 100}, {"shrinkage", 100}, {"min_support", 20},
+                            {"normalize", normalize}, {"positive_only", positive_only}},
+               {});
   f.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   f.peak_during = proc_status_mib("VmHWM");
   return f;
@@ -100,26 +104,38 @@ TEST_CASE("knn on ml-latest-small: fit time, memory and a diagnostic NDCG@10", "
   report("ml-latest-small (full)", full, fitted_full);
 
   const auto split = recs::make_split(full, recs::SplitConfig{});
-  const auto f = timed_fit(split.train);
   const auto& tr = split.train;
   std::vector<float> pop(tr.n_items());
   for (ItemIdx i = 0; i < tr.n_items(); ++i) pop[i] = static_cast<float>(tr.by_item.row_size(i));
-  double knn_sum = 0.0, pop_sum = 0.0;
-  std::size_t n = 0, short_lists = 0;
-  std::vector<float> s(tr.n_items());
+  double pop_sum = 0.0;
   for (auto u : split.eval_users) {
     std::vector<char> seen(tr.n_items(), 0);
     for (auto i : tr.by_user.row_indices(u)) seen[i] = 1;
-    f.model->score_trained_user(u, s);
-    const auto rk = top10(s, seen);
-    short_lists += rk.size() < 10 ? 1 : 0;
-    knn_sum += recs::ndcg_at_k(rk, split.test[u], 10);
     pop_sum += recs::ndcg_at_k(top10(pop, seen), split.test[u], 10);
-    ++n;
   }
-  WARN("diagnostic NDCG@10 on ml-latest-small test split (" << n << " users): knn " << knn_sum / static_cast<double>(n)
-       << ", rating-count popularity " << pop_sum / static_cast<double>(n) << "; users with < 10 knn items: " << short_lists);
-  CHECK(n > 0);
+  const auto n = static_cast<double>(split.eval_users.size());
+  REQUIRE(n > 0);
+  WARN("diagnostic NDCG@10, ml-latest-small test split (" << n << " users): rating-count popularity "
+       << pop_sum / n);
+
+  for (const bool normalize : {true, false}) {
+    for (const bool positive_only : {false, true}) {
+      const auto f = timed_fit(tr, normalize, positive_only);
+      double knn_sum = 0.0;
+      std::size_t short_lists = 0;
+      std::vector<float> s(tr.n_items());
+      for (auto u : split.eval_users) {
+        std::vector<char> seen(tr.n_items(), 0);
+        for (auto i : tr.by_user.row_indices(u)) seen[i] = 1;
+        f.model->score_trained_user(u, s);
+        const auto rk = top10(s, seen);
+        short_lists += rk.size() < 10 ? 1 : 0;
+        knn_sum += recs::ndcg_at_k(rk, split.test[u], 10);
+      }
+      WARN("diagnostic NDCG@10, knn normalize=" << normalize << " positive_only=" << positive_only << ": "
+           << knn_sum / n << " (users with < 10 knn items: " << short_lists << ")");
+    }
+  }
 }
 
 TEST_CASE("knn on ml-32m: fit time and memory", "[knn][ml32m]") {
