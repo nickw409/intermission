@@ -110,6 +110,8 @@ type options struct {
 	cacheEntries int
 	cacheBytes   int64
 	cachePerUser int
+	// observe, if set, receives the cache and the per-user buckets (tests).
+	observe func(*lru, *ratelimit.Keyed)
 }
 
 func register(mux *http.ServeMux, d *app.Deps, o options) {
@@ -135,8 +137,20 @@ func register(mux *http.ServeMux, d *app.Deps, o options) {
 	}
 	session := auth.RequireSession(d)
 	perSession := ratelimit.Middleware(ratelimit.NewKeyed(ratelimit.RecommendPerSession), auth.SessionKey)
-	perUser := ratelimit.Middleware(ratelimit.NewKeyed(ratelimit.RecommendPerSession), userKey)
+	userBuckets := ratelimit.NewKeyed(ratelimit.RecommendPerSession)
+	perUser := ratelimit.Middleware(userBuckets, userKey)
+	if o.observe != nil {
+		o.observe(h.cache, userBuckets)
+	}
 	limit := func(next http.Handler) http.Handler { return perSession(perUser(next)) }
+	// A deleted account's cached answers and rate-limit bucket go with it
+	// and can't come back, even from a request already in flight (security
+	// audit SA1-1). Its sessions are deleted with the account, so the
+	// per-session buckets can never be used again and simply age out.
+	d.DB.OnUserDeleted(func(uid int64) {
+		h.cache.retireUser(uid)
+		userBuckets.Retire(userBucket(uid))
+	})
 	mux.Handle("GET /api/recommend", session(limit(http.HandlerFunc(h.recommend))))
 	mux.Handle("GET /api/recommend/compare", session(limit(http.HandlerFunc(h.compare))))
 }
@@ -147,8 +161,10 @@ func userKey(r *http.Request) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	return "user:" + strconv.FormatInt(uid, 10), true
+	return userBucket(uid), true
 }
+
+func userBucket(uid int64) string { return "user:" + strconv.FormatInt(uid, 10) }
 
 type handler struct {
 	db     *db.DB
@@ -165,6 +181,7 @@ type handler struct {
 // userRatings is what recs-model needs about the caller.
 type userRatings struct {
 	version int64                  // users.ratings_version
+	created int64                  // users.created_at, fixed for the account's life
 	ratings []modelclient.RatingIn // newest first
 	ids     []int64                // the rated movie IDs, same order (exclude list)
 }
@@ -302,7 +319,7 @@ func (h *handler) serve(w http.ResponseWriter, r *http.Request, op string, model
 	if op == "compare" {
 		keyModels = slices.Sorted(slices.Values(models))
 	}
-	key := cacheKey{userID: uid, ratingsVersion: user.version, modelVersion: version, op: op, models: joinModels(keyModels), k: k}
+	key := cacheKey{userID: uid, userCreated: user.created, ratingsVersion: user.version, modelVersion: version, op: op, models: joinModels(keyModels), k: k}
 	e, hit := h.cache.get(key)
 	if !hit {
 		e, err = h.compute(ctx, version, op, models, k, user)
@@ -442,7 +459,7 @@ func (h *handler) loadRatings(ctx context.Context, uid int64) (userRatings, erro
 		return u, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := tx.QueryRowContext(ctx, "SELECT ratings_version FROM users WHERE id = ?", uid).Scan(&u.version); err != nil {
+	if err := tx.QueryRowContext(ctx, "SELECT ratings_version, created_at FROM users WHERE id = ?", uid).Scan(&u.version, &u.created); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return u, errNoUser
 		}

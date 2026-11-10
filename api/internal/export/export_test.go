@@ -124,7 +124,7 @@ func TestKeepsSevenNewest(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for i := 0; i < 9; i++ {
+	for i := 8; i >= 0; i-- { // oldest first, as the nightly job runs
 		ts := t0.Add(-time.Duration(i+1) * 24 * time.Hour)
 		if _, err := Export(context.Background(), d, dir, ts); err != nil {
 			t.Fatal(err)

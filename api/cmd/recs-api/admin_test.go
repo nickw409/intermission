@@ -27,10 +27,21 @@ func adminDeps(t *testing.T) *app.Deps {
 	return &app.Deps{DB: database, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 }
 
+// migratedAdminDeps is adminDeps after `recs-api migrate` (admin refuses to
+// migrate by itself).
+func migratedAdminDeps(t *testing.T) *app.Deps {
+	t.Helper()
+	d := adminDeps(t)
+	if err := d.DB.Migrate(context.Background(), d.Logger); err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
 var codeLine = regexp.MustCompile(`^[A-Z2-7]{4}(-[A-Z2-7]{4}){5}-[A-Z2-7]{2}\n$`)
 
 func TestAdminInviteCreate(t *testing.T) {
-	d := adminDeps(t)
+	d := migratedAdminDeps(t)
 	ctx := context.Background()
 	var out bytes.Buffer
 	before := time.Now().Unix()
@@ -60,7 +71,7 @@ func TestAdminInviteCreate(t *testing.T) {
 }
 
 func TestAdminInviteDefaultsAndDurations(t *testing.T) {
-	d := adminDeps(t)
+	d := migratedAdminDeps(t)
 	ctx := context.Background()
 	for _, c := range []struct {
 		args    []string
@@ -96,7 +107,7 @@ func TestAdminInviteDefaultsAndDurations(t *testing.T) {
 }
 
 func TestAdminRejectsBadInput(t *testing.T) {
-	d := adminDeps(t)
+	d := migratedAdminDeps(t)
 	for _, args := range [][]string{
 		nil,
 		{"invite"},

@@ -10,12 +10,25 @@
 .env.*
 !.env.example
 *.pem
+# Private keys, anywhere (public repo).
 *.key
+
+# Logs, backups and archives (may hold personal data)
+*.log
+/logs/
+/deploy/logs/
+*.bak
+/backups/
+/deploy/backups/
+*.tar
+*.tar.*
+*.zst
 
 # Builds
 /build*/
 /out/
 /web/node_modules/
+**/node_modules/
 /web/dist/
 /api/bin/
 *.o
@@ -23,10 +36,14 @@
 compile_commands.json
 
 # Fuzzing and profiling output
-crash-*
-leak-*
-timeout-*
-oom-*
+/crash-*
+/tests/fuzz/**/crash-*
+/leak-*
+/tests/fuzz/**/leak-*
+/timeout-*
+/tests/fuzz/**/timeout-*
+/oom-*
+/tests/fuzz/**/oom-*
 *.profraw
 *.prof
 

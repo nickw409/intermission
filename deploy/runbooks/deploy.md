@@ -65,6 +65,8 @@ directory `data/dev/` (see `deploy/compose.dev.yaml`), so it never touches produ
 6. Create the smoke-test account (needs an invite; `create-invites.md`):
 
    ```bash
+   # admin never migrates; on a brand-new database apply the schema first:
+   docker compose -f deploy/compose.yaml run --rm --no-deps api migrate
    code=$(docker compose -f deploy/compose.yaml run --rm --no-deps api admin invite create --uses 1 --expires 1d --note smoke)
    # then sign up as SMOKE_USERNAME with that code through the site (or curl /api/auth/signup
    # with headers Origin: <RECS_SITE_ORIGIN> and X-Requested-With: recs)

@@ -10,8 +10,10 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nickw409/intermission/api/internal/app"
@@ -110,6 +112,7 @@ type handler struct {
 	timeout   time.Duration
 	cache     *diskCache
 	negative  *negCache
+	flights   flightGroup
 }
 
 func register(mux *http.ServeMux, d *app.Deps, o options) {
@@ -148,6 +151,7 @@ func register(mux *http.ServeMux, d *app.Deps, o options) {
 		timeout:   o.timeout,
 		cache:     newDiskCache(d.Config.PosterCacheDir, d.Config.PosterCacheMaxByte, logger),
 		negative:  newNegCache(negativeEntries, negativeTTL, o.now),
+		flights:   flightGroup{logger: logger},
 	}
 	// No proxy from the environment: requests go straight to the TMDB hosts.
 	transport := http.DefaultTransport.(*http.Transport).Clone()
@@ -174,26 +178,114 @@ func (h *handler) serve(w http.ResponseWriter, r *http.Request) {
 		writePlaceholder(w)
 		return
 	}
-	img, err := h.fetch(r.Context(), id)
+	// The fetch is shared by every request for this movie that arrives while
+	// it runs, and is detached from this request: a client that gives up
+	// doesn't cancel it (so its outcome, poster or not, is still recorded
+	// for the next client), and h.timeout still bounds it.
+	call := h.flights.do(id, func() ([]byte, error) {
+		return h.fetchAndRecord(context.WithoutCancel(r.Context()), id)
+	})
+	select {
+	case <-call.done:
+	case <-r.Context().Done():
+		// The client gave up: write no body, but record 499 ("client
+		// closed request", as Caddy does) so the access log doesn't show
+		// a 200 for a response that was never sent.
+		w.WriteHeader(499)
+		return
+	}
+	if call.err != nil {
+		writePlaceholder(w)
+		return
+	}
+	writeJPEG(w, call.img)
+}
+
+// fetchAndRecord fetches id's poster and records the outcome in the disk
+// cache or the negative cache. ctx is not cancelled by the client.
+func (h *handler) fetchAndRecord(ctx context.Context, id int64) ([]byte, error) {
+	img, err := h.fetch(ctx, id)
 	if err != nil {
 		var tr transient
 		switch {
 		case errors.Is(err, errNoPoster):
 			h.negative.add(id)
 		case errors.Is(err, errLimited):
+		case errors.Is(err, context.Canceled):
+			// Defensive: ctx is detached (WithoutCancel), but a cancellation
+			// must never be remembered as "no poster".
+		case errors.Is(err, context.DeadlineExceeded) || isTimeout(err):
+			// TMDB was slow: worth retrying soon, so logged but not
+			// negatively cached (the upstream limiter bounds retries).
+			h.logger.WarnContext(ctx, "posters: TMDB timed out", "request_id", reqid.FromContext(ctx),
+				"movie_id", id, "err", h.scrub(err))
 		case errors.As(err, &tr):
-			h.logger.WarnContext(r.Context(), "posters: movie lookup failed", "request_id", reqid.FromContext(r.Context()),
+			h.logger.WarnContext(ctx, "posters: movie lookup failed", "request_id", reqid.FromContext(ctx),
 				"movie_id", id, "err", h.scrub(err))
 		default:
 			h.negative.add(id)
-			h.logger.WarnContext(r.Context(), "posters: fetch failed", "request_id", reqid.FromContext(r.Context()),
+			h.logger.WarnContext(ctx, "posters: fetch failed", "request_id", reqid.FromContext(ctx),
 				"movie_id", id, "err", h.scrub(err))
 		}
-		writePlaceholder(w)
-		return
+		return nil, err
 	}
 	h.cache.put(id, img)
-	writeJPEG(w, img)
+	return img, nil
+}
+
+// flightGroup runs at most one fetch per movie ID at a time; callers that
+// arrive while one runs share its result (a minimal singleflight).
+type flightGroup struct {
+	mu     sync.Mutex
+	calls  map[int64]*flight
+	logger *slog.Logger // for recovered panics; nil means slog.Default()
+}
+
+type flight struct {
+	done chan struct{} // closed when img and err are set
+	img  []byte
+	err  error
+}
+
+// do starts fn for id unless a call for id is already running, and returns
+// the call to wait on.
+func (g *flightGroup) do(id int64, fn func() ([]byte, error)) *flight {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if c, ok := g.calls[id]; ok {
+		return c
+	}
+	if g.calls == nil {
+		g.calls = make(map[int64]*flight)
+	}
+	c := &flight{done: make(chan struct{})}
+	g.calls[id] = c
+	go func() {
+		func() {
+			// A panic in fn would otherwise kill the process (this goroutine
+			// has no http.Server recovery) and strand every waiter.
+			defer func() {
+				if v := recover(); v != nil {
+					c.img, c.err = nil, fmt.Errorf("poster fetch panicked: %v", v)
+					logger := g.logger
+					if logger == nil {
+						logger = slog.Default()
+					}
+					// The movie ID, the panic's type and the stack: no
+					// request data, and not the value (it could carry a URL
+					// with the TMDB key).
+					logger.Error("posters: fetch panicked", "movie_id", id,
+						"panic_type", fmt.Sprintf("%T", v), "stack", string(debug.Stack()))
+				}
+			}()
+			c.img, c.err = fn()
+		}()
+		g.mu.Lock()
+		delete(g.calls, id)
+		g.mu.Unlock()
+		close(c.done)
+	}()
+	return c
 }
 
 // Outcomes of fetch other than success. errNoPoster (no TMDB id, unknown
@@ -346,6 +438,13 @@ func (h *handler) scrub(err error) string {
 	return s
 }
 
+// isTimeout reports whether err is a network timeout (the http.Client's own
+// Timeout surfaces this way rather than as context.DeadlineExceeded).
+func isTimeout(err error) bool {
+	var ne interface{ Timeout() bool }
+	return errors.As(err, &ne) && ne.Timeout()
+}
+
 // isJPEG checks the JPEG start-of-image marker.
 func isJPEG(b []byte) bool {
 	return len(b) > 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF
@@ -366,7 +465,7 @@ func writePlaceholder(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "image/svg+xml")
 	w.Header().Set("Cache-Control", "public, max-age=300")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; sandbox")
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, placeholderSVG)
 }
