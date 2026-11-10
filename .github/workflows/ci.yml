@@ -49,13 +49,25 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
       - name: Install build tools
-        run: sudo apt-get update -q && sudo apt-get install -y -q ninja-build
+        run: sudo apt-get update -q && sudo apt-get install -y -q ninja-build ccache
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: build/${{ matrix.preset }}/_deps
           key: deps-${{ matrix.preset }}-${{ hashFiles('cmake/deps.cmake') }}
-      - run: cmake --preset ${{ matrix.preset }} -DRECS_GIT_SHA=${{ github.sha }}
+      # Compiler cache: a PR recompiles only the translation units it changed. PR runs
+      # restore the newest cache from main (caches are scoped per branch, main's are shared).
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .ccache
+          key: ccache-${{ matrix.preset }}-${{ github.sha }}
+          restore-keys: ccache-${{ matrix.preset }}-
+      - run: >-
+          cmake --preset ${{ matrix.preset }} -DRECS_GIT_SHA=${{ github.sha }}
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
       - run: cmake --build --preset ${{ matrix.preset }}
+        env: { CCACHE_DIR: '${{ github.workspace }}/.ccache', CCACHE_MAXSIZE: 400M, CCACHE_BASEDIR: '${{ github.workspace }}' }
+      - run: ccache --show-stats
+        env: { CCACHE_DIR: '${{ github.workspace }}/.ccache' }
       - run: ctest --preset ${{ matrix.preset }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with: { node-version: '24', cache: npm, cache-dependency-path: tools/contracts/package-lock.json }
@@ -74,8 +86,21 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
-      - run: sudo apt-get update -q && sudo apt-get install -y -q ninja-build clang libomp-dev
-      - run: cmake --preset fuzz && cmake --build --preset fuzz
+      - run: sudo apt-get update -q && sudo apt-get install -y -q ninja-build clang libomp-dev ccache
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build/fuzz/_deps
+          key: deps-fuzz-${{ hashFiles('cmake/deps.cmake') }}
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .ccache
+          key: ccache-fuzz-${{ github.sha }}
+          restore-keys: ccache-fuzz-
+      - run: >-
+          cmake --preset fuzz
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          && cmake --build --preset fuzz
+        env: { CCACHE_DIR: '${{ github.workspace }}/.ccache', CCACHE_MAXSIZE: 400M, CCACHE_BASEDIR: '${{ github.workspace }}' }
       # Replay every committed corpus (regression inputs must still pass), then fuzz each
       # harness briefly. Longer runs are logged in docs/plans/jobs.md with the commit SHA.
       - name: Fuzz replay and short run (20 s per harness)
