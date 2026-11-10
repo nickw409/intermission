@@ -1,8 +1,11 @@
 # Phase 1 — Item-KNN and content-based
 
-**Status: NOT signed off — awaiting owner decisions** (open questions 2 and 3 in
-`docs/plans/overnight-2026-11-10.md`). All code is merged and reviewed; the numbers below are final for the
-configurations shown.
+**Status: NOT signed off. Owner decisions made 2026-11-10; implementation in progress.**
+- **KNN: option (b).** The spec now defines `knn` as the top-N score: no Σ|sim| denominator, positive neighbours only, and M and λ chosen on validation. The rating-prediction form stays as a config option for comparison.
+- **Content: option (b).** Change the profile centering so that a feature shared by everything a user rated still counts. The exact centering is chosen on validation and must pass the honest one-genre gate. The spec text follows once it is chosen.
+- **MF (Phase 3, raised early):** make SGD training converge, so that trained user vectors match fold-in (parity > 0.9 on ml-32m). Do this with hyperparameters chosen on validation; no gate changes.
+
+The numbers below are the pre-decision results.
 
 ## What was built
 - Item-KNN (`core/src/models/item_knn.cpp`): adjusted cosine over co-raters with shrinkage, top-M neighbours,
