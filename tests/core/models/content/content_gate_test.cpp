@@ -1,6 +1,6 @@
 // Phase 1 gates for the content-based model (spec: Phase 1; brief E gates 1-3):
-//  1. a synthetic user who rated only movies of one genre gets >= 7 of 10 recommendations in it
-//     (hidden tag [.gate-open]: currently fails, see the comment on the test);
+//  1. a synthetic user who rated only movies of one genre, with mixed scores, gets >= 7 of 10
+//     recommendations in it;
 //  2. fold_in + score equals the batch path (score_trained_user) bit for bit;
 //  3. explanations only cite movies the user rated.
 #include <algorithm>
@@ -91,17 +91,17 @@ GenreCatalog genre_catalog(Rng& rng, std::uint32_t n_items, Primary primary) {
 
 }  // namespace
 
-// Spec Phase 1 gate. Currently FAILS with the spec's profile formula because mean-centering
-// cancels features shared by every rated movie; owner decision pending
-// (docs/plans/overnight-2026-11-10.md open question 3).
-// Hidden tag: run with  recs_tests "[.gate-open]"
-TEST_CASE("Content gate: a user who rated only one genre gets >= 7 of 10 recommendations in it",
-          "[content][gate][phase1][.gate-open]") {
-  recs::testing::for_seeds(20, 2026, [](Rng& rng, std::uint64_t) {
+namespace {
+
+// The one-genre gate scenario over 20 seeds, for the model config `cfg`. Returns how many of the
+// 10 recommendations are comedies, per seed; with `check` set, each seed must reach 7.
+std::vector<long> one_genre_user(const Config& cfg, bool check) {
+  std::vector<long> in_genre_per_seed;
+  recs::testing::for_seeds(20, 2026, [&](Rng& rng, std::uint64_t) {
     const auto cat = genre_catalog(rng, 120, Primary::kUniform);
     const auto& ds = cat.ds;
     auto model = make_content();
-    model->fit(ds, Config::object(), TrainContext{});
+    model->fit(ds, cfg, TrainContext{});
 
     // The synthetic user rates 8 comedies with a spread of ratings (a real user is never
     // uniformly enthusiastic): mean-centering then gives some of them negative weight.
@@ -132,11 +132,23 @@ TEST_CASE("Content gate: a user who rated only one genre gets >= 7 of 10 recomme
 
     const auto in_genre = std::count_if(top.begin(), top.end(),
                                         [&](ItemIdx i) { return has_genre(ds.movies[i], "Comedy"); });
-    CHECK(in_genre >= 7);
+    in_genre_per_seed.push_back(in_genre);
+    if (check) CHECK(in_genre >= 7);
   });
+  return in_genre_per_seed;
 }
 
-// NOT the spec gate (see the hidden test above). This documents a narrower behaviour: a user whose
+}  // namespace
+
+// Spec Phase 1 gate, with the default config. The user's ratings are mixed (5 down to 2.5), all
+// within one genre: a profile centered on the user's own mean cancels the genre every rated movie
+// shares and fails this (0-6 of 10 over these seeds); see USER PROFILE in content.cpp.
+TEST_CASE("Content gate: a user who rated only one genre gets >= 7 of 10 recommendations in it",
+          "[content][gate][phase1]") {
+  one_genre_user(Config::object(), true);
+}
+
+// NOT the spec gate (see the gate above). This documents a narrower behaviour: a user whose
 // ratings rise with how purely a movie belongs to one genre (straight comedies 4.5-5, comedy
 // hybrids 2-3) gets mostly that genre. It passes only because the ratings correlate with the
 // genre's weight in each vector; with the ratings swapped, or random, it does not.
