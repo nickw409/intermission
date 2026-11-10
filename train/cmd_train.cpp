@@ -3,7 +3,9 @@
 //   recs-train train --dataset ml-latest-small --models pop,pop_count --default-model pop
 //                    [--out data/artifacts] [--set-current] [--config-dir configs] [--seed 42]
 //
-// Each model's config is <config-dir>/<model>.json if present, else the model defaults. The
+// Each model's config is <config-dir>/<model>.<dataset>.tuned.json if present (hyperparameters
+// chosen on that dataset's validation split), else <config-dir>/<model>.json, else the model
+// defaults. The
 // artifact version is the UTC time, e.g. 2026-11-09T21-14-03Z. With --set-current, CURRENT is
 // pointed at the new version. Afterwards the 3 most recent versions and whatever CURRENT points
 // to are kept; older versions are deleted (contracts/artifact.md rule 6).
@@ -57,9 +59,11 @@ std::vector<std::string> split_list(const std::string& s) {
   return out;
 }
 
-Config model_config(const fs::path& dir, const std::string& name) {
-  const fs::path p = dir / (name + ".json");
+Config model_config(const fs::path& dir, const std::string& name, const std::string& dataset) {
+  fs::path p = dir / (name + "." + dataset + ".tuned.json");
+  if (!fs::exists(p)) p = dir / (name + ".json");
   if (!fs::exists(p)) return Config::object();
+  std::cout << "config " << name << ": " << p.string() << "\n";
   std::ifstream in(p);
   if (!in) throw std::runtime_error("cannot read " + p.string());
   return Config::parse(in);
@@ -113,7 +117,7 @@ void run_train(const TrainArgs& a) {
   std::vector<const Model*> ptrs;
   for (auto& m : models) {
     const auto t0 = std::chrono::steady_clock::now();
-    m->fit(ds, model_config(a.config_dir, std::string(m->name())), ctx);
+    m->fit(ds, model_config(a.config_dir, std::string(m->name()), a.dataset), ctx);
     const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     std::cout << "fit " << m->name() << " in " << secs << " s, config " << m->config().dump() << "\n";
     ptrs.push_back(m.get());

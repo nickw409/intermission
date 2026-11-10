@@ -16,3 +16,8 @@ recs_set_warnings(recs_tests)
 include(${catch2_SOURCE_DIR}/extras/Catch.cmake)
 # Tests tagged [slow] or [ml32m] are excluded from the default run.
 catch_discover_tests(recs_tests TEST_SPEC "~[ml32m]~[slow]" DISCOVERY_MODE PRE_TEST)
+
+# CLI test: which config file `recs-train train` picks for each model.
+add_test(NAME recs_train_config_lookup
+         COMMAND ${CMAKE_SOURCE_DIR}/tests/train/config_lookup.sh $<TARGET_FILE:recs-train>
+                 ${CMAKE_SOURCE_DIR}/tests/fixtures/tiny)

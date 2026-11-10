@@ -122,6 +122,8 @@ services:
       - ${RECS_DATA_DIR:-../data}/cache:/srv/data/cache
       - ${RECS_DATA_DIR:-../data}/raw:/srv/data/raw:ro
       - ${RECS_DATA_DIR:-../data}/exports:/srv/data/exports:ro
+      # Tuned per-model configs; recs-train's default --config-dir (configs, WORKDIR /srv).
+      - ${RECS_CONFIG_DIR:-../configs}:/srv/configs:ro
     tmpfs:
       - /tmp:size=256m,mode=1777
     cpu_shares: 128
