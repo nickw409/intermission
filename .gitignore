@@ -10,9 +10,8 @@
 .env.*
 !.env.example
 *.pem
-# Private keys: at the top level and under deploy/ (TLS is Funnel's, so none are expected).
-/*.key
-/deploy/**/*.key
+# Private keys, anywhere (public repo).
+*.key
 
 # Logs, backups and archives (may hold personal data)
 *.log
