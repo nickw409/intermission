@@ -76,6 +76,10 @@ jobs:
         with: { persist-credentials: false }
       - run: sudo apt-get update -q && sudo apt-get install -y -q ninja-build clang libomp-dev
       - run: cmake --preset fuzz && cmake --build --preset fuzz
+      # Replay every committed corpus (regression inputs must still pass), then fuzz each
+      # harness briefly. Longer runs are logged in docs/plans/jobs.md with the commit SHA.
+      - name: Fuzz replay and short run (20 s per harness)
+        run: tools/fuzz/replay.sh 20
 
   go:
     runs-on: ubuntu-24.04
