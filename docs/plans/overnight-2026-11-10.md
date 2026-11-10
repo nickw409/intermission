@@ -23,6 +23,10 @@ Stop conditions (only the affected task stops; the others keep going):
 - K1 review: browser security clean; accessibility blocker (unrated slider missing aria-valuenow) and a login race fixed.
 - Wave 2 started early (Pipelined): D (item-KNN).
 
+- Wave 2 complete and merged: D (item-KNN), E (content), F (MF-SGD), G (ALS), H (recs-model), J1/J2 (recs-api product endpoints), K2 (web pages), with M (deploy) merging. Every branch had an independent code review or security audit plus test validation (mutation testing); every finding was fixed before merge. A gitleaks false positive (fake test key) is allowlisted by exact fingerprint.
+- Phase 0 signed off (`phase-0-done`, docs/phase-0.md). Phase 1 results are in docs/phase-1.md, awaiting owner decisions (KNN scoring formula; content gate).
+- Wave 3a started: long fuzz runs (libFuzzer 1 CPU-hour across 4 harnesses; Go fuzz 15 min per decoder) and the integration agent (contract tests against real services, robustness through Caddy, degradation, p99 load, deploy/rollback and restore drills).
+
 ## Decisions made without the owner (please review)
 
 | # | Decision | Why | Easy to change? |
