@@ -1,0 +1,23 @@
+# Nightly export-ratings -> retrain -> backup (deploy/nightly.sh).
+# Install: see deploy/runbooks/nightly-jobs.md. Replace @REPO@ with the repo checkout path and
+# @USER@ with the deploy user (a member of the docker group) before installing.
+[Unit]
+Description=Intermission nightly export, retrain and backup
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+User=@USER@
+WorkingDirectory=@REPO@
+ExecStart=@REPO@/deploy/nightly.sh
+# Low priority for the docker client; the train container itself runs with a low CPU weight
+# (cpu_shares) and a raised OOM score from compose.yaml.
+Nice=19
+IOSchedulingClass=idle
+TimeoutStartSec=6h
+# Light hardening for the client process. ProtectHome is not used: the docker CLI writes
+# ~/.docker and the repo usually lives under /home.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
