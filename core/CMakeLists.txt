@@ -4,3 +4,10 @@ add_library(recs_core STATIC ${RECS_CORE_SOURCES})
 target_include_directories(recs_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(recs_core PUBLIC nlohmann_json::nlohmann_json Eigen3::Eigen OpenMP::OpenMP_CXX)
 recs_set_warnings(recs_core)
+
+if(RECS_FUZZ)
+  # Coverage-instrument librecs so libFuzzer is guided through the loaders, not only the harness
+  # files. The loader harnesses live in tests/fuzz/core (tests/ is not built in the fuzz preset).
+  target_compile_options(recs_core PRIVATE -fsanitize=fuzzer-no-link)
+  add_subdirectory(${CMAKE_SOURCE_DIR}/tests/fuzz/core ${CMAKE_BINARY_DIR}/fuzz-core)
+endif()
