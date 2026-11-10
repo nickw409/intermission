@@ -110,6 +110,8 @@ type options struct {
 	cacheEntries int
 	cacheBytes   int64
 	cachePerUser int
+	// observe, if set, receives the cache and the per-user buckets (tests).
+	observe func(*lru, *ratelimit.Keyed)
 }
 
 func register(mux *http.ServeMux, d *app.Deps, o options) {
@@ -137,13 +139,17 @@ func register(mux *http.ServeMux, d *app.Deps, o options) {
 	perSession := ratelimit.Middleware(ratelimit.NewKeyed(ratelimit.RecommendPerSession), auth.SessionKey)
 	userBuckets := ratelimit.NewKeyed(ratelimit.RecommendPerSession)
 	perUser := ratelimit.Middleware(userBuckets, userKey)
+	if o.observe != nil {
+		o.observe(h.cache, userBuckets)
+	}
 	limit := func(next http.Handler) http.Handler { return perSession(perUser(next)) }
 	// A deleted account's cached answers and rate-limit bucket go with it
-	// (security audit SA1-1). Its sessions are deleted with the account, so
-	// the per-session buckets can never be used again and simply age out.
+	// and can't come back, even from a request already in flight (security
+	// audit SA1-1). Its sessions are deleted with the account, so the
+	// per-session buckets can never be used again and simply age out.
 	d.DB.OnUserDeleted(func(uid int64) {
-		h.cache.purgeUser(uid)
-		userBuckets.Forget(userBucket(uid))
+		h.cache.retireUser(uid)
+		userBuckets.Retire(userBucket(uid))
 	})
 	mux.Handle("GET /api/recommend", session(limit(http.HandlerFunc(h.recommend))))
 	mux.Handle("GET /api/recommend/compare", session(limit(http.HandlerFunc(h.compare))))

@@ -141,15 +141,28 @@ func TestDeletedUserIDNotReusedAndCacheNotLeaked(t *testing.T) {
 	e.assertNoLeak(t, attackerID, attackerTok)
 }
 
-// Even if a row did come back with the same ID and created_at second
-// (restored backup, manual repair), deleting an account has already purged
-// its cached recommendations.
+// Deleting an account drops its cached recommendations at once. Even if a
+// row did come back with the same ID and created_at second (manual repair
+// while the server runs), nothing cached reaches it: the retired ID is
+// refused (429) before any lookup.
 func TestAccountDeletionPurgesRecommendCache(t *testing.T) {
-	e := newIDReuseEnv(t)
+	m := &echoModel{}
+	e, in := newRetireEnv(t, m)
+	e.model = m
 	victimID, createdAt := e.victim(t)
+	if n := in.cache.entriesFor(victimID); n != 0 {
+		t.Fatalf("%d cache entries left for the deleted account", n)
+	}
 	if _, err := e.DB.Writer.Exec("INSERT INTO users (id, username, pw_hash, created_at) VALUES (?, 'reborn', 'x', ?)", victimID, createdAt); err != nil {
 		t.Fatal(err)
 	}
 	tok := newSession(t, e.Env, victimID)
-	e.assertNoLeak(t, victimID, tok)
+	for i, mv := range []int64{201, 202, 203, 204, 205} {
+		rate(t, e.DB, victimID, mv, 3, int64(2000+i))
+	}
+	rec := get(e.Env, "/api/recommend?model=knn&k=5", tok)
+	if rec.Code != 429 {
+		t.Fatalf("reborn ID: %d %s, want 429", rec.Code, rec.Body.String())
+	}
 }
+

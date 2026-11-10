@@ -16,9 +16,11 @@ import (
 //     users.ratings_version in the same transaction, so new ratings mean a
 //     new key and the old entry simply ages out.
 //   - userCreated: users.created_at, which never changes for an account.
-//     IDs are not reused (migration 0003) and deleting an account purges
-//     its entries (purgeUser); this is a third, independent guard against
-//     one account ever being served another's answer (security audit SA1-1).
+//     The real guards against one account being served another's answer
+//     are that IDs are never reused (migration 0003) and that deleting an
+//     account retires its entries (retireUser) (security audit SA1-1). This
+//     is only a cheap extra check: created_at has one-second resolution, so
+//     two accounts created in the same second share it.
 //   - modelVersion: the artifact that computed the answer, taken from the
 //     X-Model-Version header of the recommend/compare response itself. Before
 //     every lookup the handler asks recs-model for its current version
@@ -88,6 +90,7 @@ type lru struct {
 	order      *list.List // front = most recently used; values are *lruItem
 	items      map[cacheKey]*list.Element
 	users      map[int64]int // entries held per user
+	retired    map[int64]struct{}
 }
 
 type lruItem struct {
@@ -104,6 +107,7 @@ func newLRU(maxEntries int, maxBytes int64, perUser int) *lru {
 		order:      list.New(),
 		items:      make(map[cacheKey]*list.Element),
 		users:      make(map[int64]int),
+		retired:    make(map[int64]struct{}),
 	}
 }
 
@@ -123,6 +127,9 @@ func (c *lru) put(k cacheKey, v *entry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if size > c.maxBytes {
+		return
+	}
+	if _, gone := c.retired[k.userID]; gone {
 		return
 	}
 	if el, ok := c.items[k]; ok {
@@ -147,10 +154,14 @@ func (c *lru) put(k cacheKey, v *entry) {
 	}
 }
 
-// purgeUser drops every entry of userID (account deletion).
-func (c *lru) purgeUser(userID int64) {
+// retireUser drops every entry of userID and refuses any later put for it
+// (account deletion), so a request already in flight when the account went
+// can't put its answer back. IDs are never reused (migration 0003); each
+// retired ID costs one map entry for the life of the process.
+func (c *lru) retireUser(userID int64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.retired[userID] = struct{}{}
 	if c.users[userID] == 0 {
 		return
 	}
