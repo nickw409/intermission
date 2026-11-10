@@ -247,6 +247,23 @@ constexpr char kMagic[8] = {'R', 'E', 'C', 'S', 'M', 'F', '0', '1'};
 constexpr std::uint32_t kFormatVersion = 1;
 // magic, format version, n_items, k
 constexpr std::uint64_t kHeaderBytes = sizeof(kMagic) + 3 * sizeof(std::uint32_t);
+// Bounds a servable model must meet, checked by save() and load() (not by fit(): training with
+// lambda = 0 is allowed, it just cannot be served). |mu|, |b_i| and every |q_if| are at most
+// kMaxAbsParam, and lambda (the fold-in ridge, lambda * n) is in [kMinServeLambda, kMaxServeLambda].
+// With those, k <= 4096 and ratings in [0.5, 5], the fold-in solve and every score stay far inside
+// float range. Finite alone is not enough: fuzz_model_load_mf found mu = -1.1e297, and lambda = 0
+// leaves only the 1e-9 ridge floor, either of which overflows fold-in into NaN scores. Trained
+// models are many orders of magnitude inside these bounds (configs/mf.json: lambda 0.05).
+constexpr double kMaxAbsParam = 1e6;
+constexpr double kMinServeLambda = 1e-6;
+constexpr double kMaxServeLambda = 1e6;
+
+bool param_in_range(double x) { return std::abs(x) <= kMaxAbsParam; }  // false for NaN and inf
+
+void check_servable_lambda(double lambda) {
+  if (!(lambda >= kMinServeLambda && lambda <= kMaxServeLambda))
+    throw std::runtime_error("mf model: lambda must be in [1e-6, 1e6] to be served");
+}
 
 template <class T>
 void put(std::string& buf, const T& x) {
@@ -386,6 +403,10 @@ class MfSgd final : public Model {
     const auto x = solve_user(ratings, std::nullopt);
     st.bias = x[0];
     for (std::uint32_t f = 0; f < k; ++f) st.vec[f] = static_cast<float>(x[f + 1]);
+    // Defensive: the save/load bounds keep this finite; never hand score() an inf/NaN state.
+    if (!std::isfinite(st.bias)) throw std::runtime_error("mf: fold-in produced a non-finite user bias");
+    for (const float v : st.vec)
+      if (!std::isfinite(v)) throw std::runtime_error("mf: fold-in produced a non-finite user vector");
     return st;
   }
 
@@ -426,6 +447,11 @@ class MfSgd final : public Model {
   }
 
   void save(const fs::path& dir) const override {
+    // The bounds load() enforces, so an unservable model fails here, at train time.
+    check_servable_lambda(cfg_.lambda);
+    if (!param_in_range(mu_) || !std::all_of(bi_.begin(), bi_.end(), param_in_range) ||
+        !std::all_of(Q_.begin(), Q_.end(), param_in_range))
+      throw std::runtime_error("mf model: parameters non-finite or out of range; not saved");
     std::string buf;
     buf.append(kMagic, sizeof(kMagic));
     put(buf, kFormatVersion);
@@ -448,6 +474,7 @@ class MfSgd final : public Model {
     const auto ni = in.get<std::uint32_t>();
     const auto k = in.get<std::uint32_t>();
     if (k != cfg.k) throw std::runtime_error("mf model file: k does not match config.json");
+    check_servable_lambda(cfg.lambda);
     // Check the exact length implied by the header before allocating anything from it, so a
     // corrupt or hostile n_items cannot trigger a huge allocation. No overflow: ni < 2^32 and
     // k <= 4096 (parse_config), so the products stay far below 2^64.
@@ -455,13 +482,13 @@ class MfSgd final : public Model {
                                    sizeof(float) * std::uint64_t{ni} * k;
     if (in.size() != expected) throw std::runtime_error("mf model file: wrong length for its header");
     const auto mu = in.get<double>();
-    if (!std::isfinite(mu)) throw std::runtime_error("mf model file: non-finite mu");
+    // Every parameter within kMaxAbsParam (see the comment there).
+    if (!param_in_range(mu)) throw std::runtime_error("mf model file: mu non-finite or out of range");
     std::vector<float> bi(ni), Q(std::size_t{ni} * k);
     for (auto& x : bi) x = in.get<float>();
     for (auto& x : Q) x = in.get<float>();
-    const auto finite = [](float x) { return std::isfinite(x); };
-    if (!std::all_of(bi.begin(), bi.end(), finite) || !std::all_of(Q.begin(), Q.end(), finite))
-      throw std::runtime_error("mf model file: non-finite item parameters");
+    if (!std::all_of(bi.begin(), bi.end(), param_in_range) || !std::all_of(Q.begin(), Q.end(), param_in_range))
+      throw std::runtime_error("mf model file: non-finite or out-of-range item parameters");
     if (!in.at_end()) throw std::runtime_error("mf model file: trailing bytes");
 
     cfg_ = cfg;

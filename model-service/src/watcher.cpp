@@ -14,9 +14,13 @@ ArtifactWatcher::Poll ArtifactWatcher::poll_once() noexcept {
     try {
       version = read_current(root_);
     } catch (const std::exception& e) {
-      log_.log_event("warn", std::string("cannot read CURRENT: ") + e.what());
+      // Polled every few seconds: report each distinct problem once, like a missing CURRENT.
+      std::string msg = std::string("cannot read CURRENT: ") + e.what();
+      if (msg != reported_current_error_) log_.log_event("warn", msg);
+      reported_current_error_ = std::move(msg);
       return Poll::failed;
     }
+    reported_current_error_.clear();
     if (!version) {
       if (!reported_no_current_) log_.log_event("warn", "no CURRENT pointer in " + root_.string());
       reported_no_current_ = true;

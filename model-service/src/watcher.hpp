@@ -47,6 +47,7 @@ class ArtifactWatcher {
   Service& log_;
   std::string failed_version_;  // last version that failed verification (not retried)
   bool reported_no_current_ = false;
+  std::string reported_current_error_;  // last CURRENT read error logged (logged once per change)
 
   std::mutex mu_;
   std::condition_variable cv_;

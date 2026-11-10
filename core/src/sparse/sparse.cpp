@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <string>
 
+#include "sparse/offsets.hpp"
+
 namespace recs {
 
 Csr csr_from_triplets(std::uint32_t n_rows, std::uint32_t n_cols, std::vector<Triplet> triplets) {
@@ -67,14 +69,12 @@ Csr transpose(const Csr& m) {
 }
 
 void validate(const Csr& m) {
-  if (m.indptr.size() != static_cast<std::size_t>(m.n_rows) + 1) throw SparseError("indptr size != n_rows + 1");
-  if (m.indptr.front() != 0) throw SparseError("indptr[0] != 0");
-  if (m.indptr.back() != m.indices.size()) throw SparseError("indptr.back() != nnz");
+  // The whole offset array is checked before any row is walked (see sparse/offsets.hpp).
+  if (const auto err = recs::detail::check_row_offsets(m.indptr, m.n_rows, m.indices.size())) throw SparseError(*err);
   if (m.values.size() != m.indices.size() || m.ts.size() != m.indices.size()) {
     throw SparseError("values/ts size != nnz");
   }
   for (std::uint32_t r = 0; r < m.n_rows; ++r) {
-    if (m.indptr[r + 1] < m.indptr[r]) throw SparseError("indptr decreases at row " + std::to_string(r));
     for (std::uint64_t k = m.indptr[r]; k < m.indptr[r + 1]; ++k) {
       if (m.indices[k] >= m.n_cols) throw SparseError("column out of range in row " + std::to_string(r));
       if (k > m.indptr[r] && m.indices[k] <= m.indices[k - 1]) {
