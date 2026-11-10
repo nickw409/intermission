@@ -8,6 +8,12 @@ recs_set_warnings(recs_core)
 if(RECS_FUZZ)
   # Coverage-instrument librecs so libFuzzer is guided through the loaders, not only the harness
   # files. The loader harnesses live in tests/fuzz/core (tests/ is not built in the fuzz preset).
+  # The instrumentation's __sanitizer_cov_* hooks are defined by libFuzzer in the fuzz targets and
+  # by the ASan/UBSan runtime everywhere else (recs-train, recs-model, fuzz_core_seedgen), so a
+  # fuzz build needs RECS_SANITIZE=ON, as the fuzz preset sets.
+  if(NOT RECS_SANITIZE)
+    message(FATAL_ERROR "RECS_FUZZ=ON requires RECS_SANITIZE=ON (use the fuzz preset)")
+  endif()
   target_compile_options(recs_core PRIVATE -fsanitize=fuzzer-no-link)
   add_subdirectory(${CMAKE_SOURCE_DIR}/tests/fuzz/core ${CMAKE_BINARY_DIR}/fuzz-core)
 endif()

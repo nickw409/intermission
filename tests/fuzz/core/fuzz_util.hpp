@@ -16,8 +16,10 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 #include "recs/sha256.hpp"
 
@@ -29,15 +31,30 @@ inline std::string_view as_view(const std::uint8_t* data, std::size_t size) {
   return {reinterpret_cast<const char*>(data), size};
 }
 
-/// One scratch directory per process (libFuzzer -fork/-jobs workers each get their own).
+/// One scratch directory per process (libFuzzer -fork/-jobs workers each get their own), reused
+/// for every input and removed when the process exits normally. A crashing run leaves it behind
+/// for triage, under $TMPDIR/recs-fuzz-<pid>.
+class ScratchDir {
+ public:
+  ScratchDir() : path_(fs::temp_directory_path() / ("recs-fuzz-" + std::to_string(::getpid()))) {
+    fs::remove_all(path_);
+    fs::create_directories(path_);
+  }
+  ~ScratchDir() {
+    std::error_code ec;
+    fs::remove_all(path_, ec);
+  }
+  ScratchDir(const ScratchDir&) = delete;
+  ScratchDir& operator=(const ScratchDir&) = delete;
+  const fs::path& path() const { return path_; }
+
+ private:
+  fs::path path_;
+};
+
 inline const fs::path& scratch_dir() {
-  static const fs::path dir = [] {
-    fs::path d = fs::temp_directory_path() / ("recs-fuzz-" + std::to_string(::getpid()));
-    fs::remove_all(d);
-    fs::create_directories(d);
-    return d;
-  }();
-  return dir;
+  static const ScratchDir dir;
+  return dir.path();
 }
 
 /// A fresh, empty subdirectory of the scratch directory.
@@ -48,9 +65,14 @@ inline fs::path fresh_dir(std::string_view name) {
   return d;
 }
 
+/// Writes `bytes` to `p`. Throws on any I/O error: a harness that silently fed the loader a
+/// truncated or stale file would report coverage it never had.
 inline void write_file(const fs::path& p, std::string_view bytes) {
   std::ofstream out(p, std::ios::binary | std::ios::trunc);
+  if (!out) throw std::runtime_error("fuzz: cannot open " + p.string() + " for writing");
   out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+  out.close();
+  if (!out) throw std::runtime_error("fuzz: cannot write " + p.string());
 }
 
 /// body + SHA-256(body).

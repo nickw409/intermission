@@ -4,7 +4,8 @@
 //
 // Seeds are real files produced by the real writers, from the synthetic tiny fixture (never
 // MovieLens data) and a 3 x 4 hand-made dataset, laid out the way each harness expects its input.
-// Small model configs keep every seed a few KiB at most. Re-run after a format change.
+// Small model configs keep every seed a few KiB at most; the output is deterministic, so a re-run
+// with unchanged formats leaves the committed corpus unchanged. Re-run after a format change.
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -12,6 +13,8 @@
 #include <iterator>
 #include <string>
 #include <vector>
+
+#include <nlohmann/json.hpp>
 
 #include "../artifact_template.hpp"
 #include "../fuzz_util.hpp"
@@ -30,6 +33,20 @@ std::string read_file(const fs::path& p) {
   return {std::istreambuf_iterator<char>(in), {}};
 }
 
+// Drops the trailing SHA-256 (the harnesses re-seal their input).
+std::string without_digest(std::string bytes, const fs::path& from) {
+  if (bytes.size() < 32) throw std::runtime_error(from.string() + " is shorter than its SHA-256 trailer");
+  bytes.resize(bytes.size() - 32);
+  return bytes;
+}
+
+// The manifest with a fixed created_at, so re-running the generator reproduces the committed seed.
+std::string stable_manifest(const fs::path& file) {
+  auto j = nlohmann::json::parse(read_file(file));
+  j["created_at"] = "2026-01-01T00:00:00Z";
+  return j.dump(2) + "\n";
+}
+
 void seed(const fs::path& corpus, const std::string& harness, const std::string& name, const std::string& bytes) {
   const fs::path dir = corpus / harness;
   fs::create_directories(dir);
@@ -40,7 +57,7 @@ void seed(const fs::path& corpus, const std::string& harness, const std::string&
 std::string model_input(const std::string& model, const fs::path& dir) {
   const auto f = recs::fuzz::model_files(model);
   std::string binary = read_file(dir / f.binary);
-  if (f.sealed) binary.resize(binary.size() - 32);
+  if (f.sealed) binary = without_digest(std::move(binary), dir / f.binary);
   if (!f.has_config) return binary;
   return recs::fuzz::join_config(read_file(dir / "config.json"), binary);
 }
@@ -70,9 +87,7 @@ int main(int argc, char** argv) {
   // Dataset cache: body without the trailing SHA-256 (the harness seals it).
   for (const auto& [name, ds] : {std::pair{"tiny", &tiny_ds}, std::pair{"small", &small_ds}}) {
     recs::save_cache(*ds, work / "ds.bin");
-    std::string bytes = read_file(work / "ds.bin");
-    bytes.resize(bytes.size() - 32);
-    seed(corpus, "dataset_cache", name, bytes);
+    seed(corpus, "dataset_cache", name, without_digest(read_file(work / "ds.bin"), work / "ds.bin"));
   }
 
   // CSV reader: first byte 0 (any field count), then the text.
@@ -85,7 +100,7 @@ int main(int argc, char** argv) {
 
   // Artifact: manifest and catalog of the template artifact.
   const fs::path art = recs::fuzz::write_template_artifact(work / "artifact");
-  seed(corpus, "artifact_manifest", "template", read_file(art / "manifest.json"));
+  seed(corpus, "artifact_manifest", "template", stable_manifest(art / "manifest.json"));
   seed(corpus, "artifact_catalog", "template", read_file(art / "catalog" / "catalog.bin"));
   {
     auto pop = recs::make_popularity();
@@ -93,7 +108,7 @@ int main(int argc, char** argv) {
     const fs::path art2 = recs::write_artifact(work / "artifact-tiny", "v1", recs::make_catalog(tiny_ds), {pop.get()},
                                                "pop", "abc1234", "tiny");
     seed(corpus, "artifact_catalog", "tiny", read_file(art2 / "catalog" / "catalog.bin"));
-    seed(corpus, "artifact_manifest", "tiny", read_file(art2 / "manifest.json"));
+    seed(corpus, "artifact_manifest", "tiny", stable_manifest(art2 / "manifest.json"));
   }
 
   // Model files: each model fitted on both datasets with a small config.
@@ -111,7 +126,6 @@ int main(int argc, char** argv) {
       seed(corpus, "model_load_" + model, name, model_input(model, dir));
     }
   }
-  fs::remove_all(recs::fuzz::scratch_dir());
   std::cout << "seeds written to " << corpus.string() << "\n";
   return 0;
 }
