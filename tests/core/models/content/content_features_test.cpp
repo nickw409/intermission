@@ -194,7 +194,8 @@ TEST_CASE("Content: fit refuses ratings outside [0.5, 5]; statistics at the edge
   CHECK_THROWS_AS(m->fit(with_ratings({5.0f, 5.5f, 4.0f}), Config::object(), TrainContext{}), std::invalid_argument);
   CHECK_THROWS_AS(m->fit(with_ratings({0.0f, 1.0f, 4.0f}), Config::object(), TrainContext{}), std::invalid_argument);
 
-  // mu = 5 and mu = 0.5 exactly; and with item_damping 0 the biases reach +-(5 - mu) = 4.5 * 2/3.
+  // mu = 5 and mu = 0.5 exactly; and with item_damping 0, {0.5, 5, 5} (mu = 3.5) gives
+  // b = -(mu - 0.5) = -3 and b = 5 - mu = +1.5: large biases of both signs.
   for (const auto& values : {std::vector<float>{5.0f, 5.0f, 5.0f}, std::vector<float>{0.5f, 0.5f, 0.5f},
                              std::vector<float>{0.5f, 5.0f, 5.0f}}) {
     auto trained = make_content();
