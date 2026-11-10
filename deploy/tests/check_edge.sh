@@ -264,6 +264,14 @@ v="$(hdr "$scratch/h" X-Request-ID)"
 [[ -n "$v" && "$v" != *script* && "$v" =~ ^[A-Za-z0-9._-]{1,64}$ ]] && pass "invalid incoming X-Request-ID replaced ($v)" \
   || fail "invalid incoming X-Request-ID gave '$v'"
 logged_rid 401
+# Two X-Request-ID headers, each valid on its own: neither is trusted; one fresh id is set.
+code="$(get /api/me -H 'X-Request-ID: edge-dup-aaa' -H 'X-Request-ID: edge-dup-bbb')"
+v="$(hdr "$scratch/h" X-Request-ID)"
+[[ "$v" =~ ^[A-Za-z0-9._-]{1,64}$ && "$v" != *edge-dup* ]] && pass "repeated X-Request-ID replaced by one fresh id ($v)" \
+  || fail "repeated X-Request-ID gave '$v'"
+[[ "$(grep -ci '^X-Request-ID:' "$scratch/h")" == 1 ]] && pass "one X-Request-ID on the response" \
+  || fail "$(grep -ci '^X-Request-ID:' "$scratch/h") X-Request-ID headers on the response"
+logged_rid 401
 
 echo "== errors Caddy raises itself (recs-api stopped: 502)"
 dc stop api >/dev/null 2>&1

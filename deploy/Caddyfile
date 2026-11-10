@@ -85,10 +85,15 @@
 		}
 	}
 	# One request id per request, for every response including the ones Caddy makes itself
-	# (static files, 404, 413, 502): keep a valid incoming X-Request-ID (recs-api's reqid.Valid
-	# rule: 1-64 of [A-Za-z0-9._-]) or set a fresh UUID, before anything is proxied. recs-api
-	# reuses a valid incoming id, so its log, Caddy's log and the response all carry the same one.
-	@no_request_id not header_regexp X-Request-ID ^[A-Za-z0-9._-]{1,64}$
+	# (static files, 404, 413, 502): keep the incoming X-Request-ID only when there is exactly one
+	# and it is valid (recs-api's reqid.Valid rule: 1-64 of [A-Za-z0-9._-]); otherwise replace
+	# every value with a fresh UUID, before anything is proxied. recs-api reuses a valid incoming
+	# id, so its log, Caddy's log and the response all carry the same one. The placeholder joins
+	# repeated headers with ",", which the pattern rejects; header_regexp would instead accept
+	# the header if any one value matched.
+	@no_request_id {
+		not expression `{http.request.header.X-Request-ID}.matches("^[A-Za-z0-9._-]{1,64}$")`
+	}
 	request_header @no_request_id X-Request-ID {http.request.uuid}
 	log_append request_id {http.request.header.X-Request-ID}
 
