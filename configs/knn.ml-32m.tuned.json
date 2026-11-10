@@ -1,0 +1,1 @@
+{ "neighbors": 50, "shrinkage": 30000, "min_support": 20, "normalize": false, "positive_only": true }
