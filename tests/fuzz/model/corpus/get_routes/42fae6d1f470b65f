@@ -1,0 +1,5 @@
+GET
+/v1/similar/999999999
+trace-1
+model=knn
+k=3

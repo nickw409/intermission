@@ -1,0 +1,5 @@
+GET
+/v1/movies/search
+trace-1
+q=star
+limit=3

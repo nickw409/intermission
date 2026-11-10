@@ -1,0 +1,7 @@
+POST /v1/compare HTTP/1.1
+Host: x
+X-Request-ID: r1
+Content-Type: application/json
+Content-Length: 49
+
+{"models": ["pop", "knn"], "ratings": [], "k": 3}

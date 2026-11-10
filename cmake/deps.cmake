@@ -21,8 +21,8 @@ FetchContent_Declare(eigen
   SOURCE_SUBDIR do-not-configure)
 
 FetchContent_Declare(httplib
-  URL https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.18.3.tar.gz
-  URL_HASH SHA256=a0567bcd6c3fe5cef1b329b96245119047f876b49e06cc129a36a7a8dffe173e
+  URL https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.63.0.tar.gz
+  URL_HASH SHA256=44ab42e16926e95f7641d286bc90d739ab1c16886114d7cc5bc7a9f905c5edf8
   SOURCE_SUBDIR do-not-configure)
 
 set(JSON_BuildTests OFF CACHE INTERNAL "")

@@ -1,0 +1,7 @@
+POST /v1/recommend HTTP/1.1
+Host: x
+X-Request-ID: r1
+Content-Type: application/json
+Content-Length: 71
+
+{"model": "pop", "ratings": [{"movie_id": 260, "rating": 4.5}], "k": 3}
