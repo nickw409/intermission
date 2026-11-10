@@ -30,10 +30,10 @@ const Header = "site_user_id,movie_id,rating,timestamp"
 // Keep is how many exports are retained.
 const Keep = 7
 
-// MaxAge is the oldest an export may be (by the timestamp in its name)
-// before prune deletes it whatever Keep says, so a deleted account's
-// ratings leave the exports within a week even if the nightly job paused.
-// The newest export is never deleted.
+// MaxAge: an export this old (by the timestamp in its name) is deleted
+// whatever Keep says, so a deleted account's ratings leave the exports
+// within a week even if the nightly job paused. The export LATEST names
+// and the one just written are never deleted (see prune).
 const MaxAge = 7 * 24 * time.Hour
 
 // exportLayout is the timestamp format in export file names (UTC).
@@ -71,13 +71,26 @@ func Run(ctx context.Context, d *app.Deps, args []string) error {
 	if fset.NArg() != 0 {
 		return fmt.Errorf("export-ratings: unexpected argument %q (usage: export-ratings [--dir DIR])", fset.Arg(0))
 	}
-	res, err := Export(ctx, d.DB, *dir, time.Now())
-	if err != nil {
-		return err
-	}
 	logger := d.Logger
 	if logger == nil {
 		logger = slog.Default()
+	}
+	now := time.Now()
+	// Nightly housekeeping first, whatever happens to the export (security
+	// audit SA5-3): drop pre-migration backups past retention and move the
+	// WAL into app.db, so a deleted account's data never waits for the next
+	// startup.
+	d.DB.PruneBackups(logger)
+	if err := d.DB.CheckpointTruncateRetry(ctx); err != nil {
+		logger.Warn("nightly WAL checkpoint did not complete", "err", err)
+	}
+	res, err := Export(ctx, d.DB, *dir, now)
+	if err != nil {
+		logger.Error("ratings export failed; pruning old exports anyway", "err", err)
+		if perr := prune(*dir, now, ""); perr != nil && !errors.Is(perr, fs.ErrNotExist) {
+			logger.Warn("pruning old exports failed", "err", perr)
+		}
+		return err
 	}
 	logger.Info("ratings exported", "file", filepath.Base(res.Path), "rows", res.Rows, "users", res.Users)
 	return nil
@@ -116,7 +129,7 @@ func Export(ctx context.Context, database *db.DB, dir string, now time.Time) (Re
 	}); err != nil {
 		return Result{}, err
 	}
-	if err := prune(dir, now); err != nil {
+	if err := prune(dir, now, name); err != nil {
 		return res, err
 	}
 	return res, nil
@@ -264,42 +277,82 @@ func syncDir(dir string) error {
 	return d.Sync()
 }
 
-// prune deletes exports beyond the Keep newest or older than MaxAge as of
-// now (never the newest one), and this package's temp files older than
-// staleTemp. Names embed a UTC timestamp in a fixed-width format, so name
-// order is time order. Only files matching exportName or tempName are ever
-// considered.
-func prune(dir string, now time.Time) error {
+// clockSkew is how far in the future an export's name may be dated before
+// it is treated as expired (the clock stepped back, or a bad name).
+const clockSkew = 24 * time.Hour
+
+// prune applies export retention as of now:
+//
+//   - kept: the export LATEST names, protect (the one just written, or ""),
+//     and, when neither exists, the newest datable export;
+//   - otherwise deleted when beyond the Keep newest, at least MaxAge old,
+//     dated more than clockSkew in the future, or not datable at all;
+//   - this package's temp files older than staleTemp are deleted too.
+//
+// Names embed a UTC timestamp in a fixed-width format, so name order is
+// time order. Only files matching exportName or tempName are ever touched.
+func prune(dir string, now time.Time, protect string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return err
 	}
-	var exports []string
+	latest := ""
+	if b, err := os.ReadFile(filepath.Join(dir, LatestName)); err == nil {
+		latest = strings.TrimSpace(string(b))
+	}
+	var valid, expired []string
 	var errs []error
 	for _, e := range entries {
 		if !e.Type().IsRegular() {
 			continue
 		}
+		name := e.Name()
 		switch {
-		case exportName.MatchString(e.Name()):
-			exports = append(exports, e.Name())
-		case tempName.MatchString(e.Name()):
+		case exportName.MatchString(name):
+			if name == protect || name == latest {
+				continue
+			}
+			at, ok := exportTime(name)
+			if !ok || at.Sub(now) > clockSkew {
+				expired = append(expired, name)
+				continue
+			}
+			valid = append(valid, name)
+		case tempName.MatchString(name):
 			if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > staleTemp {
-				if err := os.Remove(filepath.Join(dir, e.Name())); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				if err := os.Remove(filepath.Join(dir, name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 					errs = append(errs, err)
 				}
 			}
 		}
 	}
-	sort.Strings(exports) // oldest first
-	for i, name := range exports[:max(len(exports)-1, 0)] {
-		at, err := time.Parse(exportLayout, strings.TrimSuffix(strings.TrimPrefix(name, "ratings-"), ".csv"))
-		if len(exports)-i <= Keep && err == nil && now.Sub(at) <= MaxAge {
+	sort.Sort(sort.Reverse(sort.StringSlice(valid))) // newest first
+	kept := 0
+	if protect != "" {
+		kept++
+	}
+	if latest != "" && latest != protect {
+		kept++
+	}
+	for i, name := range valid {
+		at, _ := exportTime(name)
+		onlyCopy := i == 0 && kept == 0 // nothing protected: keep the newest
+		if onlyCopy || (kept < Keep && now.Sub(at) < MaxAge) {
+			kept++
 			continue
 		}
+		expired = append(expired, name)
+	}
+	for _, name := range expired {
 		if err := os.Remove(filepath.Join(dir, name)); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// exportTime parses the timestamp in an export's name.
+func exportTime(name string) (time.Time, bool) {
+	at, err := time.Parse(exportLayout, strings.TrimSuffix(strings.TrimPrefix(name, "ratings-"), ".csv"))
+	return at, err == nil
 }

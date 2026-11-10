@@ -20,11 +20,13 @@ func exportFile(at time.Time) string {
 func TestExportsOlderThanAWeekPruned(t *testing.T) {
 	d := cachetest.OpenDB(t)
 	dir := t.TempDir()
-	ages := map[time.Duration]bool{ // age -> kept
+	ages := map[time.Duration]bool{ // age -> kept; negative = dated in the future
 		2 * 24 * time.Hour:           true,
-		7 * 24 * time.Hour:           true, // exactly a week: kept
-		7*24*time.Hour + time.Second: false,
+		7*24*time.Hour - time.Second: true,
+		7 * 24 * time.Hour:           false, // nothing a week old survives
 		30 * 24 * time.Hour:          false,
+		-time.Hour:                   true,  // within the allowed clock skew
+		-2 * 24 * time.Hour:          false, // the clock stepped back, or a bad name
 	}
 	for age := range ages {
 		if err := os.WriteFile(filepath.Join(dir, exportFile(t0.Add(-age))), []byte("x"), 0o600); err != nil {
@@ -57,7 +59,7 @@ func TestPruneKeepsNewestExportWhateverItsAge(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := prune(dir, t0); err != nil {
+	if err := prune(dir, t0, ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, newest)); err != nil {

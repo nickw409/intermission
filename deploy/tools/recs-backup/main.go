@@ -21,9 +21,10 @@
 //  4. If the newest weekly copy is 7 or more days old (or there is none), the daily file is
 //     also copied to weekly/. Missing a Sunday therefore never skips a week.
 //  5. Old files are pruned: the newest --keep-daily daily and --keep-weekly weekly copies stay,
-//     except that any copy older than maxAge (35 days) is deleted whatever the counts say,
-//     because the site promises that backups holding a deleted account's data are gone
-//     within 5 weeks. The newest copy in each directory is never deleted.
+//     except that a copy 35 days old or older (maxAge), or dated more than a day ahead, or
+//     with no valid date, is deleted whatever the counts say, because the site promises that
+//     backups holding a deleted account's data are gone within 5 weeks. The copy just
+//     written is never deleted.
 //
 // The tool never logs row data; it prints one JSON line per command.
 package main
@@ -38,6 +39,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -172,7 +174,19 @@ func backup(ctx context.Context, dbPath, dir string, keepDaily, keepWeekly int, 
 		return nil, err
 	}
 	res := &BackupResult{Daily: final, Bytes: st.Size()}
+	pruneDir := func(dir string, keep int, protect string) error {
+		removed, err := prune(dir, keep, now, protect)
+		res.Removed = append(res.Removed, removed...)
+		return err
+	}
+	if err := pruneDir(dailyDir, keepDaily, name); err != nil {
+		return nil, err
+	}
 
+	// Expire bad weekly names first, so a copy dated in the future can't suppress this week's.
+	if err := pruneDir(weeklyDir, keepWeekly, ""); err != nil {
+		return nil, err
+	}
 	weekly, err := listBackups(weeklyDir)
 	if err != nil {
 		return nil, err
@@ -186,17 +200,9 @@ func backup(ctx context.Context, dbPath, dir string, keepDaily, keepWeekly int, 
 			return nil, err
 		}
 		res.Weekly = w
-	}
-
-	for _, d := range []struct {
-		dir  string
-		keep int
-	}{{dailyDir, keepDaily}, {weeklyDir, keepWeekly}} {
-		removed, err := prune(d.dir, d.keep, now)
-		if err != nil {
+		if err := pruneDir(weeklyDir, keepWeekly, name); err != nil {
 			return nil, err
 		}
-		res.Removed = append(res.Removed, removed...)
 	}
 	return res, nil
 }
@@ -388,28 +394,69 @@ func needWeekly(weekly []string, now time.Time) bool {
 	return today.Sub(newest) >= 7*24*time.Hour
 }
 
-// maxAge is the oldest a backup may be (by the date in its name) before prune deletes it
-// regardless of keep.
-const maxAge = 35 * 24 * time.Hour
+// Retention. maxAge: a backup this old (by the date in its name) is deleted regardless of
+// keep, so no copy older than 35 days survives a run (the site promises a deleted account's
+// data leaves the backups within 5 weeks). clockSkew: a name dated further ahead than this
+// (the clock stepped back, or a bad name) cannot be trusted to age out and counts as
+// expired, as does a name that matches the pattern but is no valid date.
+const (
+	maxAge    = 35 * 24 * time.Hour
+	clockSkew = 24 * time.Hour
+)
 
-// prune deletes the backups in dir beyond the newest keep, and any older than maxAge as of
-// now, but never the newest one. It returns what it removed.
-func prune(dir string, keep int, now time.Time) ([]string, error) {
-	files, err := listBackups(dir) // oldest first
+// backupPattern is every name prune may delete.
+var backupPattern = regexp.MustCompile(`^app-\d{4}-\d{2}-\d{2}\.db$`)
+
+// prune applies retention to dir as of now and returns what it removed. protect (a base
+// name, or "") is the file just written and is never deleted; with nothing protected the
+// newest datable copy is kept instead. Everything else is deleted when beyond the newest
+// keep, maxAge or older, or expired as above.
+func prune(dir string, keep int, now time.Time, protect string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
 	today, _ := time.Parse(dateLayout, now.UTC().Format(dateLayout))
-	var removed []string
-	for i, f := range files[:max(len(files)-1, 0)] {
-		date, _ := backupDate(filepath.Base(f))
-		if len(files)-i <= keep && today.Sub(date) <= maxAge {
+	type dated struct {
+		path string
+		date time.Time
+	}
+	var valid []dated
+	var expired []string
+	for _, e := range entries {
+		name := e.Name()
+		if !backupPattern.MatchString(name) || !e.Type().IsRegular() || name == protect {
 			continue
 		}
-		if err := os.Remove(f); err != nil {
+		date, ok := backupDate(name)
+		if !ok || date.Sub(today) > clockSkew {
+			expired = append(expired, filepath.Join(dir, name))
+			continue
+		}
+		valid = append(valid, dated{filepath.Join(dir, name), date})
+	}
+	sort.Slice(valid, func(i, j int) bool { return valid[i].date.After(valid[j].date) }) // newest first
+	kept := 0
+	if protect != "" {
+		kept = 1
+	}
+	for i, b := range valid {
+		if (i == 0 && kept == 0) || (kept < keep && today.Sub(b.date) < maxAge) {
+			kept++
+			continue
+		}
+		expired = append(expired, b.path)
+	}
+	sort.Strings(expired)
+	var removed []string
+	for _, p := range expired {
+		if err := os.Remove(p); err != nil {
 			return removed, err
 		}
-		removed = append(removed, f)
+		removed = append(removed, p)
 	}
 	return removed, nil
 }

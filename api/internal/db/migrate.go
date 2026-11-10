@@ -83,6 +83,9 @@ func (d *DB) migrate(ctx context.Context, logger *slog.Logger, fsys fs.FS) error
 		return fmt.Errorf("read user_version: %w", err)
 	}
 	latest := len(ms)
+	// Retention runs on every call (every startup), not only when a
+	// migration writes a new backup.
+	d.PruneBackups(logger)
 	switch {
 	case current > latest:
 		logger.Warn("database schema is newer than this binary; leaving it alone",
@@ -103,7 +106,7 @@ func (d *DB) migrate(ctx context.Context, logger *slog.Logger, fsys fs.FS) error
 			return fmt.Errorf("backup before migrating: %w", err)
 		}
 		logger.Info("database backup written before migrating", "backup", path, "version", current)
-		if err := pruneBackups(filepath.Dir(path), time.Now()); err != nil {
+		if err := pruneBackups(filepath.Dir(path), time.Now(), filepath.Base(path)); err != nil {
 			// The new backup exists; failing to delete old ones is not a
 			// reason to refuse to start.
 			logger.Warn("pruning old pre-migration backups failed", "err", err)
@@ -178,13 +181,17 @@ func (d *DB) applyWithoutForeignKeys(ctx context.Context, pending []migration, l
 // password hash and ratings, including accounts deleted since, and the site
 // promises that backups holding a deleted account's data are gone within 5
 // weeks. So pruneBackups deletes a backup that is beyond the newest
-// keepBackups OR older than maxBackupAge, except that a backup younger than
-// minBackupAge is never deleted (a fresh migration always leaves a rollback
-// point).
+// keepBackups OR at least maxBackupAge old, except that a backup younger
+// than minBackupAge is never deleted (a fresh migration always leaves a
+// rollback point), nor is the one just written. A name dated more than
+// clockSkew in the future (the clock stepped back, or a bad name) or whose
+// timestamp doesn't parse can't be trusted to age out, so it counts as
+// expired.
 const (
 	keepBackups  = 3
 	maxBackupAge = 35 * 24 * time.Hour
 	minBackupAge = 24 * time.Hour
+	clockSkew    = 24 * time.Hour
 )
 
 // backupStampLayout is the timestamp format in backup file names (UTC); it
@@ -194,10 +201,20 @@ const backupStampLayout = "20060102T150405.000000000Z"
 // backupName matches the files backup writes; the capture is the timestamp.
 var backupName = regexp.MustCompile(`^app-pre-migrate-v\d+-(\d{8}T\d{6}\.\d{9}Z)\.db$`)
 
+// PruneBackups applies the retention rules above to <db dir>/backups now.
+// Migrate calls it on every run (every startup) and export-ratings on every
+// nightly run. Failures are logged, never fatal.
+func (d *DB) PruneBackups(logger *slog.Logger) {
+	dir := filepath.Join(filepath.Dir(d.path), "backups")
+	if err := pruneBackups(dir, time.Now(), ""); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		logger.Warn("pruning old pre-migration backups failed", "err", err)
+	}
+}
+
 // pruneBackups applies the retention rules above to the pre-migration
-// backups in dir, as of now. Files that don't match backupName (or whose
-// timestamp doesn't parse) are never touched.
-func pruneBackups(dir string, now time.Time) error {
+// backups in dir, as of now; protect (a base name, or "") is never deleted.
+// Files that don't match backupName are never touched.
+func pruneBackups(dir string, now time.Time, protect string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return err
@@ -206,26 +223,36 @@ func pruneBackups(dir string, now time.Time) error {
 		name string
 		at   time.Time
 	}
-	var found []backupFile
+	var valid []backupFile
+	var expired []string
 	for _, e := range entries {
 		m := backupName.FindStringSubmatch(e.Name())
-		if m == nil || !e.Type().IsRegular() {
+		if m == nil || !e.Type().IsRegular() || e.Name() == protect {
 			continue
 		}
 		at, err := time.Parse(backupStampLayout, m[1])
-		if err != nil {
+		if err != nil || at.Sub(now) > clockSkew {
+			expired = append(expired, e.Name())
 			continue
 		}
-		found = append(found, backupFile{e.Name(), at})
+		valid = append(valid, backupFile{e.Name(), at})
 	}
-	sort.Slice(found, func(i, j int) bool { return found[i].at.After(found[j].at) }) // newest first
-	var errs []error
-	for i, b := range found {
+	sort.Slice(valid, func(i, j int) bool { return valid[i].at.After(valid[j].at) }) // newest first
+	rank := 0
+	if protect != "" {
+		rank = 1 // the protected file is the newest
+	}
+	for _, b := range valid {
 		age := now.Sub(b.at)
-		if age < minBackupAge || (i < keepBackups && age <= maxBackupAge) {
-			continue
+		keep := age < minBackupAge || (rank < keepBackups && age < maxBackupAge)
+		rank++
+		if !keep {
+			expired = append(expired, b.name)
 		}
-		if err := os.Remove(filepath.Join(dir, b.name)); err != nil {
+	}
+	var errs []error
+	for _, name := range expired {
+		if err := os.Remove(filepath.Join(dir, name)); err != nil {
 			errs = append(errs, err)
 		}
 	}

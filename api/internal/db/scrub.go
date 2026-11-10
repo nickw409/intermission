@@ -114,6 +114,24 @@ func (d *DB) stopScrub() {
 	s.wg.Wait()
 }
 
+// CheckpointTruncateRetry tries CheckpointTruncate a few times over about
+// three seconds (nightly and startup housekeeping) and returns the last
+// error if none finished.
+func (d *DB) CheckpointTruncateRetry(ctx context.Context) error {
+	var err error
+	for _, wait := range scrubBackoff[:5] {
+		if err = d.CheckpointTruncate(ctx); err == nil {
+			return nil
+		}
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return err
+}
+
 // CheckpointTruncate runs one PRAGMA wal_checkpoint(TRUNCATE) on the
 // maintenance connection: every WAL frame is copied into app.db and
 // app.db-wal is cut to zero bytes. It returns an error if a reader or

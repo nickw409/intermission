@@ -205,12 +205,24 @@ func TestPruneBackupsRetention(t *testing.T) {
 			[]string{"a", "b", "c"}},
 		{"age cap even within the newest 3", map[string]time.Duration{"a": 2 * day, "b": 36 * day, "c": 90 * day},
 			[]string{"a"}},
-		{"exactly 35 days is kept", map[string]time.Duration{"a": 35 * day},
+		// Nothing older than 35 days survives a run.
+		{"exactly 35 days is deleted", map[string]time.Duration{"a": 35 * day},
+			nil},
+		{"just under 35 days is kept", map[string]time.Duration{"a": 35*day - time.Minute},
 			[]string{"a"}},
 		{"never delete one younger than a day", map[string]time.Duration{"a": time.Hour, "b": 2 * time.Hour, "c": 3 * time.Hour, "d": 4 * time.Hour, "e": 23 * time.Hour},
 			[]string{"a", "b", "c", "d", "e"}},
 		{"old lone backup goes", map[string]time.Duration{"a": 40 * day},
 			nil},
+		// Negative ages are in the future: the clock stepped back, or a bad name.
+		{"dated more than a day ahead is expired", map[string]time.Duration{"a": -2 * day, "b": -30 * day, "c": 2 * day},
+			[]string{"c"}},
+		{"dated less than a day ahead is kept", map[string]time.Duration{"a": -time.Hour},
+			[]string{"a"}},
+		{"clock stepped back: only the file just written survives", map[string]time.Duration{"a": -2 * day, "b": -3 * day, "protected": -4 * day},
+			[]string{"protected"}},
+		{"the file just written is kept whatever its date", map[string]time.Duration{"protected": 90 * day},
+			[]string{"protected"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -230,8 +242,16 @@ func TestPruneBackupsRetention(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if err := pruneBackups(dir, now); err != nil {
+			// Matches the name pattern but is no valid time: expired.
+			bogus := "app-pre-migrate-v1-20261399T999999.000000000Z.db"
+			if err := os.WriteFile(filepath.Join(dir, bogus), []byte("x"), 0o600); err != nil {
 				t.Fatal(err)
+			}
+			if err := pruneBackups(dir, now, names["protected"]); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(filepath.Join(dir, bogus)); !os.IsNotExist(err) {
+				t.Errorf("unparsable backup name kept: %v", err)
 			}
 			for label, n := range names {
 				_, err := os.Stat(filepath.Join(dir, n))
@@ -325,4 +345,42 @@ func contains(list []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// PR #42 review H2: retention also runs when there is nothing to migrate,
+// so every startup prunes, not just the rare one that migrates.
+func TestUpToDateMigratePrunesOldBackups(t *testing.T) {
+	d, path := openTemp(t)
+	ctx := context.Background()
+	if err := d.Migrate(ctx, quietLogger()); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(filepath.Dir(path), "backups")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := filepath.Join(dir, backupFileName(2, time.Now().Add(-40*24*time.Hour)))
+	recent := filepath.Join(dir, backupFileName(2, time.Now().Add(-2*24*time.Hour)))
+	for _, p := range []string{old, recent} {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := d.Migrate(ctx, quietLogger()); err != nil { // up to date: no backup, no migration
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Errorf("40-day-old pre-migration backup survived an up-to-date Migrate: %v", err)
+	}
+	if _, err := os.Stat(recent); err != nil {
+		t.Errorf("recent backup removed: %v", err)
+	}
+	// No backups directory at all is fine.
+	d2, _ := openTemp(t)
+	if err := d2.Migrate(ctx, quietLogger()); err != nil {
+		t.Fatal(err)
+	}
+	if err := d2.Migrate(ctx, quietLogger()); err != nil {
+		t.Fatal(err)
+	}
 }
