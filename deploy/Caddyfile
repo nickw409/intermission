@@ -157,14 +157,10 @@
 			# Caddy's 64KB is 64,000 bytes (recs-api's own cap is 64 KiB = 65,536 bytes).
 			respond `{"error":{"code":"body_too_large","message":"request body exceeds 64,000 bytes"}}` 413
 		}
-		# Caddy reports a request body that stopped arriving (read_body timeout) as 499
-		# ("client closed request"), a non-standard code meant for logs. The client may still
-		# be there: answer 408 and close (security audit SA3-5).
-		@body_stalled expression {err.status_code} == 499
-		handle @body_stalled {
-			header Connection close
-			respond "" 408
-		}
+		# Not handled here: a request body that stalls past read_body makes reverse_proxy write
+		# its own 499 with an empty body and close (caddy v2.11.9 reverseproxy.go:735-742, the
+		# request context is cancelled). It never reaches handle_errors, so it cannot be mapped
+		# to 408 from this file; it does get the deferred security headers above (audit SA3-5).
 		handle {
 			respond "" {err.status_code}
 		}
