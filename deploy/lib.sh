@@ -10,6 +10,7 @@ DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$DEPLOY_DIR/.." && pwd)"
 ENV_FILE="${RECS_ENV_FILE:-$DEPLOY_DIR/.env}"
 # Deploy history (last 5 SHAs, release.sh). Overridable so test drills never touch the real one.
+# shellcheck disable=SC2034  # read by release.sh, which sources this file
 HISTORY_FILE="${RECS_HISTORY_FILE:-$DEPLOY_DIR/history}"
 COMPOSE_FILE="$DEPLOY_DIR/compose.yaml"
 IMAGES=(api model train web backup)
