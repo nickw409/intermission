@@ -68,8 +68,8 @@ func checkResp(t *testing.T, name string, resp response, status int, code string
 	if resp.Status != status {
 		t.Errorf("%s: status %d, want %d: %s", name, resp.Status, status, truncate(resp.Body))
 	}
-	if code != "" && resp.errorCode() != code {
-		t.Errorf("%s: error code %q, want %q", name, resp.errorCode(), code)
+	if code != "" && resp.ErrorCode() != code {
+		t.Errorf("%s: error code %q, want %q", name, resp.ErrorCode(), code)
 	}
 	if resp.Header.Get("X-Request-ID") == "" {
 		t.Errorf("%s: no X-Request-ID", name)
@@ -94,7 +94,7 @@ func TestPublicContract(t *testing.T) {
 			Title   string
 		}
 	}
-	r.json(t, &ml)
+	r.JSON(t, &ml)
 	if len(ml.Items) == 0 || ml.Items[0].MovieID != 1 {
 		t.Errorf("search toy: %+v, want Toy Story (1) first", ml.Items)
 	}
@@ -115,7 +115,7 @@ func TestPublicContract(t *testing.T) {
 		ArtifactVersion string `json:"artifact_version"`
 		DefaultModel    string `json:"default_model"`
 	}
-	r.json(t, &models)
+	r.JSON(t, &models)
 	if models.ArtifactVersion != env.version || models.DefaultModel != "knn" {
 		t.Errorf("models: %+v", models)
 	}
@@ -126,7 +126,7 @@ func TestPublicContract(t *testing.T) {
 			SchemaVersion int    `json:"schema_version"`
 		}
 	}
-	r.json(t, &reports)
+	r.JSON(t, &reports)
 	if len(reports.Items) < 2 {
 		t.Fatalf("reports: %d items, want the fixture reports", len(reports.Items))
 	}
@@ -182,7 +182,7 @@ func TestPublicContract(t *testing.T) {
 		Username    string
 		RatingCount int `json:"rating_count"`
 	}
-	r.json(t, &me)
+	r.JSON(t, &me)
 	if me.Username != "alice" || me.RatingCount != 0 {
 		t.Errorf("me: %+v", me)
 	}
@@ -200,7 +200,7 @@ func TestPublicContract(t *testing.T) {
 			MovieID int64 `json:"movieId"`
 		}
 	}
-	r.json(t, &rec)
+	r.JSON(t, &rec)
 	if !rec.ColdStart || rec.Model != "pop" {
 		t.Errorf("1 rating: cold_start %v model %s, want true/pop", rec.ColdStart, rec.Model)
 	}
@@ -222,14 +222,14 @@ func TestPublicContract(t *testing.T) {
 	checkResp(t, "delete rating no csrf", alice.call("deleteRating", "delete rating no csrf", "DELETE", "/api/ratings/2", nil, true), 403, "csrf_rejected")
 	r = alice.expect("listRatings", "ratings", "GET", "/api/ratings", nil, 200, "")
 	var rl struct{ Items []json.RawMessage }
-	r.json(t, &rl)
+	r.JSON(t, &rl)
 	if len(rl.Items) != 5 {
 		t.Errorf("ratings: %d items, want 5", len(rl.Items))
 	}
 
 	// ---- recommendations ----
 	r = alice.expect("recommend", "recommend default", "GET", "/api/recommend", nil, 200, "")
-	r.json(t, &rec)
+	r.JSON(t, &rec)
 	if rec.ColdStart || rec.Model != "knn" || len(rec.Items) == 0 {
 		t.Errorf("5 ratings, default model: %+v", rec)
 	}

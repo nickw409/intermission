@@ -171,8 +171,8 @@ func TestModelRawContract(t *testing.T) {
 		if resp.Status != status {
 			t.Errorf("%s: status %d, want %d: %s", r.name, resp.Status, status, truncate(resp.Body))
 		}
-		if code != "" && resp.errorCode() != code {
-			t.Errorf("%s: error code %q, want %q", r.name, resp.errorCode(), code)
+		if code != "" && resp.ErrorCode() != code {
+			t.Errorf("%s: error code %q, want %q", r.name, resp.ErrorCode(), code)
 		}
 		if got := resp.Header.Get("X-Model-Version"); got != env.version {
 			t.Errorf("%s: X-Model-Version %q, want %q", r.name, got, env.version)
@@ -202,7 +202,7 @@ func TestModelRawContract(t *testing.T) {
 	expect(modelReq("recommend", "recommend empty ratings", "POST", "/v1/recommend", `{"model":"pop","k":5,"ratings":[]}`), 200, "")
 	r := expect(modelReq("recommend", "recommend unknown ids ignored", "POST", "/v1/recommend", `{"model":"pop","k":5,"ratings":[{"movie_id":777777,"rating":4}],"exclude":[888888]}`), 200, "")
 	var rr struct{ Ignored int }
-	r.json(t, &rr)
+	r.JSON(t, &rr)
 	if rr.Ignored != 1 {
 		t.Errorf("unknown rating id: ignored = %d, want 1", rr.Ignored)
 	}
@@ -309,8 +309,8 @@ func TestModelUnavailable(t *testing.T) {
 		if resp.Status != http.StatusServiceUnavailable {
 			t.Errorf("%s: status %d, want 503", c.name, resp.Status)
 		}
-		if c.op != "healthz" && resp.errorCode() != "model_unavailable" {
-			t.Errorf("%s: code %q, want model_unavailable", c.name, resp.errorCode())
+		if c.op != "healthz" && resp.ErrorCode() != "model_unavailable" {
+			t.Errorf("%s: code %q, want model_unavailable", c.name, resp.ErrorCode())
 		}
 		if v := resp.Header.Get("X-Model-Version"); v != "none" {
 			t.Errorf("%s: X-Model-Version %q, want none", c.name, v)

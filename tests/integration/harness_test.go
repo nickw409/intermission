@@ -11,13 +11,9 @@
 package integrationtest
 
 import (
-	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"os"
@@ -27,6 +23,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/nickw409/intermission/api/integrationtest/internal/record"
 )
 
 // env is the running stack shared by every test.
@@ -51,7 +49,7 @@ type stack struct {
 	api       *exec.Cmd
 	apiStderr *lockedBuffer
 
-	obs *observer
+	obs *record.Recorder
 }
 
 func TestMain(m *testing.M) {
@@ -80,21 +78,6 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-func repoRoot() (string, error) {
-	wd, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-	for dir := wd; ; dir = filepath.Dir(dir) {
-		if _, err := os.Stat(filepath.Join(dir, "contracts", "model.yaml")); err == nil {
-			return dir, nil
-		}
-		if filepath.Dir(dir) == dir {
-			return "", errors.New("repository root (contracts/model.yaml) not found")
-		}
-	}
-}
-
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -103,7 +86,7 @@ func envOr(key, def string) string {
 }
 
 func start() (*stack, error) {
-	repo, err := repoRoot()
+	repo, err := record.RepoRoot()
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +105,7 @@ func start() (*stack, error) {
 	if s.sockDir, err = os.MkdirTemp(shortTempRoot(), "it"); err != nil {
 		return s, err
 	}
-	s.obs = &observer{path: filepath.Join(s.work, "observations.jsonl")}
+	s.obs = &record.Recorder{}
 
 	if err := s.trainTiny(); err != nil {
 		return s, fmt.Errorf("train tiny artifact: %w", err)
@@ -330,32 +313,10 @@ func (s *stack) stop() {
 // stopModel stops recs-model (degradation tests).
 func (s *stack) stopModel() { stopCmd(s.model) }
 
+// validate checks every recorded exchange against the contracts, requiring
+// every documented status of every operation to have been seen.
 func (s *stack) validate() int {
-	if err := s.obs.flush(); err != nil {
-		fmt.Fprintln(os.Stderr, "writing observations:", err)
-		return 1
-	}
-	cmd := exec.Command("node", filepath.Join(s.repo, "tests", "integration", "validate-observations.mjs"), s.obs.path, "--require-coverage")
-	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-	if err := cmd.Run(); err != nil {
-		fmt.Fprintln(os.Stderr, "contract validation failed:", err)
-		if out := os.Getenv("RECS_INTEGRATION_OBS_OUT"); out != "" {
-			_ = copyFile(s.obs.path, out)
-		}
-		return 1
-	}
-	if out := os.Getenv("RECS_INTEGRATION_OBS_OUT"); out != "" {
-		_ = copyFile(s.obs.path, out)
-	}
-	return 0
-}
-
-func copyFile(src, dst string) error {
-	b, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(dst, b, 0o644)
+	return s.obs.Validate(s.repo, filepath.Join(s.work, "observations.jsonl"), true)
 }
 
 func waitFor(d time.Duration, ok func() bool) error {
@@ -393,138 +354,6 @@ func socketGet(sock, path string) int {
 	return resp.StatusCode
 }
 
-// ---- recorded exchanges ----
-
-// observation is one HTTP exchange, checked later against the contract.
-type observation struct {
-	Spec        string            `json:"spec"`
-	OperationID string            `json:"operationId"`
-	Case        string            `json:"case"`
-	Method      string            `json:"method"`
-	Path        string            `json:"path"`
-	Status      int               `json:"status"`
-	Headers     map[string]string `json:"headers"`
-	Body        json.RawMessage   `json:"body"`
-	ContentType string            `json:"contentType"`
-}
-
-type observer struct {
-	path string
-	mu   sync.Mutex
-	list []observation
-}
-
-func (o *observer) add(ob observation) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	o.list = append(o.list, ob)
-}
-
-func (o *observer) flush() error {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	f, err := os.Create(o.path)
-	if err != nil {
-		return err
-	}
-	w := bufio.NewWriter(f)
-	enc := json.NewEncoder(w)
-	for _, ob := range o.list {
-		if err := enc.Encode(ob); err != nil {
-			f.Close()
-			return err
-		}
-	}
-	if err := w.Flush(); err != nil {
-		f.Close()
-		return err
-	}
-	return f.Close()
-}
-
-// response is what a test sees of one exchange.
-type response struct {
-	Status  int
-	Header  http.Header
-	Body    []byte
-	Elapsed time.Duration
-}
-
-func (r response) json(t *testing.T, v any) {
-	t.Helper()
-	if err := json.Unmarshal(r.Body, v); err != nil {
-		t.Fatalf("decode %q: %v", truncate(r.Body), err)
-	}
-}
-
-func (r response) errorCode() string {
-	var e struct {
-		Error struct {
-			Code string `json:"code"`
-		} `json:"error"`
-	}
-	_ = json.Unmarshal(r.Body, &e)
-	return e.Error.Code
-}
-
-func truncate(b []byte) string {
-	if len(b) > 300 {
-		return string(b[:300]) + "..."
-	}
-	return string(b)
-}
-
-// request describes one exchange to send and record.
-type request struct {
-	spec, op, name string
-	method, path   string
-	headers        map[string]string
-	body           []byte
-}
-
-// do sends req with client to base and records the exchange.
-func do(t *testing.T, client *http.Client, base string, req request) response {
-	t.Helper()
-	var body io.Reader
-	if req.body != nil {
-		body = bytes.NewReader(req.body)
-	}
-	hr, err := http.NewRequest(req.method, base+req.path, body)
-	if err != nil {
-		t.Fatalf("%s: %v", req.name, err)
-	}
-	for k, v := range req.headers {
-		hr.Header.Set(k, v)
-	}
-	if req.body != nil && hr.Header.Get("Content-Type") == "" {
-		hr.Header.Set("Content-Type", "application/json")
-	}
-	start := time.Now()
-	resp, err := client.Do(hr)
-	if err != nil {
-		t.Fatalf("%s %s %s: %v", req.name, req.method, req.path, err)
-	}
-	data, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	elapsed := time.Since(start)
-	if err != nil {
-		t.Fatalf("%s: read body: %v", req.name, err)
-	}
-	hdrs := map[string]string{}
-	for k := range resp.Header {
-		hdrs[strings.ToLower(k)] = resp.Header.Get(k)
-	}
-	ob := observation{
-		Spec: req.spec, OperationID: req.op, Case: req.name, Method: req.method, Path: req.path,
-		Status: resp.StatusCode, Headers: hdrs, ContentType: resp.Header.Get("Content-Type"),
-	}
-	if strings.HasPrefix(ob.ContentType, "application/json") && json.Valid(data) {
-		ob.Body = data
-	}
-	env.obs.add(ob)
-	return response{Status: resp.StatusCode, Header: resp.Header, Body: data, Elapsed: elapsed}
-}
-
 // lockedBuffer collects a child's output safely.
 type lockedBuffer struct {
 	mu  sync.Mutex
@@ -542,3 +371,24 @@ func (b *lockedBuffer) String() string {
 	defer b.mu.Unlock()
 	return b.buf.String()
 }
+
+// ---- recorded exchanges (package record) ----
+
+type response = record.Response
+
+// request is one exchange against the native stack.
+type request struct {
+	spec, op, name string
+	method, path   string
+	headers        map[string]string
+	body           []byte
+}
+
+// do sends req and records it for the contract check.
+func do(t *testing.T, client *http.Client, base string, req request) response {
+	t.Helper()
+	return env.obs.Do(t, client, base, record.Request{Spec: req.spec, Op: req.op, Name: req.name,
+		Method: req.method, Path: req.path, Headers: req.headers, Body: req.body})
+}
+
+func truncate(b []byte) string { return record.Truncate(b) }
