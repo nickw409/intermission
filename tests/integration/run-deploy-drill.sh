@@ -71,26 +71,27 @@ step "first start with A, create the smoke account (runbooks/deploy.md step 6)"
 TAG="$tagA" stack_up
 code="$(TAG="$tagA" stack_invite 1)"
 # Credentials never go through argv: password from the env file on stdin, request bodies and
-# the session cookie in 0600 files (as deploy/smoke.sh does).
+# the session cookie in files inside a private 0700 directory (STACK_DIR itself is 0755).
+cred="$(mktemp -d "$STACK_DIR/cred.XXXXXX")"
 sed -n 's/^SMOKE_PASSWORD=//p' "$STACK_DIR/env" | stack_signup smoke-test "$code"
 sed -n 's/^SMOKE_PASSWORD=//p' "$STACK_DIR/env" \
   | python3 -c 'import json,sys; print(json.dumps({"username": "smoke-test", "password": sys.stdin.read().rstrip("\n")}))' \
-  > "$STACK_DIR/login.json"
+  > "$cred/login.json"
 host_hdr="Host: ${STACK_ORIGIN#*://}"
-curl -fsS -D "$STACK_DIR/login.headers" -o /dev/null -X POST -H "$host_hdr" -H "Origin: $STACK_ORIGIN" \
-  -H 'X-Requested-With: recs' -H 'Content-Type: application/json' --data-binary "@$STACK_DIR/login.json" \
+curl -fsS -D "$cred/login.headers" -o /dev/null -X POST -H "$host_hdr" -H "Origin: $STACK_ORIGIN" \
+  -H 'X-Requested-With: recs' -H 'Content-Type: application/json' --data-binary "@$cred/login.json" \
   "http://127.0.0.1:$STACK_PORT/api/auth/login"
-sed -n 's/^[Ss]et-[Cc]ookie: *\(session=[^;]*\).*/Cookie: \1/p' "$STACK_DIR/login.headers" | tr -d '\r' > "$STACK_DIR/cookie"
-rm -f "$STACK_DIR/login.json" "$STACK_DIR/login.headers"
-[[ -s "$STACK_DIR/cookie" ]] || sdie "smoke account login set no session cookie"
+sed -n 's/^[Ss]et-[Cc]ookie: *\(session=[^;]*\).*/Cookie: \1/p' "$cred/login.headers" | tr -d '\r' > "$cred/cookie"
+rm -f "$cred/login.json" "$cred/login.headers"
+[[ -s "$cred/cookie" ]] || sdie "smoke account login set no session cookie"
 # A few ratings (movies the site has shown), so the smoke account's recommendations are personal.
-curl -fsS -o /dev/null -H "$host_hdr" -H "@$STACK_DIR/cookie" "http://127.0.0.1:$STACK_PORT/api/onboarding?n=30"
+curl -fsS -o /dev/null -H "$host_hdr" -H "@$cred/cookie" "http://127.0.0.1:$STACK_PORT/api/onboarding?n=30"
 for m in 1 2 6 32 47 50 110 260 296 318; do
   curl -fsS -o /dev/null -X PUT -H "$host_hdr" -H "Origin: $STACK_ORIGIN" -H 'X-Requested-With: recs' \
-    -H 'Content-Type: application/json' -H "@$STACK_DIR/cookie" --data-binary '{"rating":4.5}' \
+    -H 'Content-Type: application/json' -H "@$cred/cookie" --data-binary '{"rating":4.5}' \
     "http://127.0.0.1:$STACK_PORT/api/ratings/$m"
 done
-rm -f "$STACK_DIR/cookie"
+rm -rf "$cred"
 
 images() { local svc; for svc in caddy api model; do docker inspect --format "$svc {{.Config.Image}}" "$(stack_dc ps -q "$svc")"; done; }
 
