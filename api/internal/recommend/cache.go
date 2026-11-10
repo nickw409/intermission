@@ -15,6 +15,10 @@ import (
 //   - userID and ratingsVersion: the user's ratings. Every rating write bumps
 //     users.ratings_version in the same transaction, so new ratings mean a
 //     new key and the old entry simply ages out.
+//   - userCreated: users.created_at, which never changes for an account.
+//     IDs are not reused (migration 0003) and deleting an account purges
+//     its entries (purgeUser); this is a third, independent guard against
+//     one account ever being served another's answer (security audit SA1-1).
 //   - modelVersion: the artifact that computed the answer, taken from the
 //     X-Model-Version header of the recommend/compare response itself. Before
 //     every lookup the handler asks recs-model for its current version
@@ -31,6 +35,7 @@ import (
 // cacheKey identifies one cached answer.
 type cacheKey struct {
 	userID         int64
+	userCreated    int64 // users.created_at: tells two accounts with one ID apart
 	ratingsVersion int64
 	modelVersion   string
 	op             string // "recommend" or "compare"
@@ -139,6 +144,22 @@ func (c *lru) put(k cacheKey, v *entry) {
 	}
 	for c.order.Len() > c.maxEntries || c.total > c.maxBytes {
 		c.removeLocked(c.order.Back())
+	}
+}
+
+// purgeUser drops every entry of userID (account deletion).
+func (c *lru) purgeUser(userID int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.users[userID] == 0 {
+		return
+	}
+	for el := c.order.Front(); el != nil; {
+		next := el.Next()
+		if el.Value.(*lruItem).key.userID == userID {
+			c.removeLocked(el)
+		}
+		el = next
 	}
 }
 

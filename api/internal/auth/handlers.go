@@ -361,12 +361,23 @@ func (s *service) getMe(w http.ResponseWriter, r *http.Request) {
 }
 
 // deleteMe removes the user; ON DELETE CASCADE removes their sessions,
-// ratings and feedback in the same statement.
+// ratings and feedback in the same statement. Afterwards it tells every
+// package holding per-user state in memory to forget this user ID, and
+// checkpoints the WAL so the deleted rows' old page images don't stay in
+// app.db-wal (secure_delete has overwritten them in the main file).
 func (s *service) deleteMe(w http.ResponseWriter, r *http.Request) {
-	sess := r.Context().Value(sessionKey{}).(*Session)
-	if _, err := s.db.Writer.ExecContext(r.Context(), "DELETE FROM users WHERE id = ?", sess.UserID); err != nil {
+	ctx := r.Context()
+	sess := ctx.Value(sessionKey{}).(*Session)
+	if _, err := s.db.Writer.ExecContext(ctx, "DELETE FROM users WHERE id = ?", sess.UserID); err != nil {
 		s.fail(w, r, err)
 		return
+	}
+	s.db.UserDeleted(sess.UserID)
+	// Best effort: the account is gone either way. The error text carries
+	// no user data.
+	if err := s.db.CheckpointTruncate(context.WithoutCancel(ctx)); err != nil {
+		s.logger.WarnContext(ctx, "auth: WAL checkpoint after account deletion failed",
+			"request_id", reqid.FromContext(ctx), "err", err)
 	}
 	http.SetCookie(w, clearedCookie())
 	w.WriteHeader(http.StatusNoContent)

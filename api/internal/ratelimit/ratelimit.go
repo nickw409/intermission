@@ -118,6 +118,14 @@ func (k *Keyed) sweep(now time.Time) {
 	}
 }
 
+// Forget drops key's bucket, e.g. when the account it belongs to is
+// deleted. Unknown keys are ignored.
+func (k *Keyed) Forget(key string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	delete(k.buckets, key)
+}
+
 // Len returns the number of tracked keys.
 func (k *Keyed) Len() int {
 	k.mu.Lock()

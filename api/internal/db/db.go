@@ -17,7 +17,9 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"slices"
 	"strings"
+	"sync"
 
 	_ "modernc.org/sqlite" // registers the "sqlite" database/sql driver (pure Go)
 )
@@ -31,6 +33,9 @@ type DB struct {
 	Writer *sql.DB // SetMaxOpenConns(1)
 	Reader *sql.DB
 	path   string
+
+	hooksMu     sync.Mutex
+	userDeleted []func(userID int64)
 }
 
 // BusyTimeoutMS is how long a connection waits on a lock before SQLITE_BUSY.
@@ -38,7 +43,8 @@ const BusyTimeoutMS = 5000
 
 // Open opens app.db at path: a writer pool limited to one connection (so
 // writes queue in Go instead of fighting over SQLite's lock) and a read-only
-// reader pool. Both use WAL, foreign_keys=ON and busy_timeout=5000. Writer
+// reader pool. Both use WAL, foreign_keys=ON, secure_delete=FAST and
+// busy_timeout=5000. Writer
 // transactions start with BEGIN IMMEDIATE so a transaction that reads and
 // then writes can never fail half-way on a lock upgrade.
 //
@@ -57,6 +63,10 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		"foreign_keys(1)",
 		"journal_mode(WAL)",
 		"synchronous(NORMAL)",
+		// Overwrite deleted content in the database file (FAST: whenever
+		// that costs no extra I/O), so a deleted account's ratings and
+		// password hash don't survive in free pages.
+		"secure_delete(FAST)",
 	}
 	writer, err := openPool(ctx, path, common, "immediate")
 	if err != nil {
@@ -119,6 +129,48 @@ func (d *DB) Version(ctx context.Context) (int, error) {
 // Migrate backs up the database and applies pending migrations; see migrate.go.
 func (d *DB) Migrate(ctx context.Context, logger *slog.Logger) error {
 	return d.migrate(ctx, logger, embedded())
+}
+
+// OnUserDeleted registers f to run after an account is deleted. Packages
+// that keep per-user state in memory (the recommendation cache, per-user
+// rate limits) use it to forget that user, so nothing they hold can outlive
+// the account. f runs synchronously in the deleting request and must be
+// quick and must not call back into OnUserDeleted.
+//
+// The registry lives here because every package already shares the one
+// *DB, and the package that deletes accounts (auth) must not import the
+// packages that cache per-user data (recommend imports auth).
+func (d *DB) OnUserDeleted(f func(userID int64)) {
+	d.hooksMu.Lock()
+	defer d.hooksMu.Unlock()
+	d.userDeleted = append(d.userDeleted, f)
+}
+
+// UserDeleted runs every OnUserDeleted hook. The caller has committed the
+// deletion.
+func (d *DB) UserDeleted(userID int64) {
+	d.hooksMu.Lock()
+	hooks := slices.Clone(d.userDeleted)
+	d.hooksMu.Unlock()
+	for _, f := range hooks {
+		f(userID)
+	}
+}
+
+// CheckpointTruncate copies every WAL frame back into the database file and
+// truncates the WAL to zero bytes (PRAGMA wal_checkpoint(TRUNCATE)). Called
+// after an account deletion so the deleted rows' old page images don't
+// linger in app.db-wal; secure_delete has already zeroed them in the main
+// file. It returns an error if a reader kept the checkpoint from finishing.
+func (d *DB) CheckpointTruncate(ctx context.Context) error {
+	var busy, logFrames, checkpointed int
+	if err := d.Writer.QueryRowContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &logFrames, &checkpointed); err != nil {
+		return err
+	}
+	if busy != 0 {
+		return fmt.Errorf("wal checkpoint incomplete: %d of %d frames checkpointed", checkpointed, logFrames)
+	}
+	return nil
 }
 
 // Close closes both pools.
