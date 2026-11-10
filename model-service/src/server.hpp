@@ -17,7 +17,7 @@ struct ListenOptions {
   std::string unix_socket;  // e.g. /run/recs/model.sock; used when non-empty
   std::string tcp_host;     // dev fallback; must be a loopback address
   int tcp_port = 0;         // 0 = pick a free port (tests)
-  int threads = 8;          // worker threads
+  int threads = 16;         // worker threads (each keep-alive connection holds one while open)
   unsigned socket_mode = 0660;  // permissions of the Unix socket file
 };
 

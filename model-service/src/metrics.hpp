@@ -38,6 +38,8 @@ class Metrics {
   void observe_foldin(std::string_view model, double seconds);
   /// Time taken to verify and load the artifact now serving.
   void set_artifact_load_seconds(double seconds);
+  /// A new artifact failed verification or loading (the old one kept serving).
+  void count_artifact_failure();
 
   /// The full exposition. `version` is the serving artifact version ("none" if none).
   std::string render(std::string_view version) const;
@@ -48,6 +50,7 @@ class Metrics {
   std::map<std::string, Histogram> latency_;
   std::map<std::string, Histogram> foldin_;
   double artifact_load_seconds_ = 0.0;
+  std::uint64_t artifact_failures_ = 0;
 };
 
 }  // namespace recs::service

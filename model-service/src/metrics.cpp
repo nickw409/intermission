@@ -73,6 +73,11 @@ void Metrics::set_artifact_load_seconds(double seconds) {
   artifact_load_seconds_ = seconds;
 }
 
+void Metrics::count_artifact_failure() {
+  std::lock_guard lock(mu_);
+  ++artifact_failures_;
+}
+
 std::string Metrics::render(std::string_view version) const {
   std::lock_guard lock(mu_);
   std::string out;
@@ -97,6 +102,9 @@ std::string Metrics::render(std::string_view version) const {
   out += "# HELP recs_model_artifact_load_seconds Time to verify and load the serving artifact.\n";
   out += "# TYPE recs_model_artifact_load_seconds gauge\n";
   out += "recs_model_artifact_load_seconds " + fmt(artifact_load_seconds_) + "\n";
+  out += "# HELP recs_model_artifact_load_failures_total New artifacts rejected (the previous one kept serving).\n";
+  out += "# TYPE recs_model_artifact_load_failures_total counter\n";
+  out += "recs_model_artifact_load_failures_total " + std::to_string(artifact_failures_) + "\n";
   return out;
 }
 

@@ -4,6 +4,10 @@ add_library(recs_model_service STATIC ${RECS_MODEL_LIB_SOURCES})
 target_include_directories(recs_model_service PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 find_package(Threads REQUIRED)
 target_link_libraries(recs_model_service PUBLIC recs_core httplib::httplib Threads::Threads)
+# httplib's default listen backlog is 5. On a Unix socket a full backlog makes connect() fail at once
+# (EAGAIN) instead of retrying, so a burst of new connections from recs-api would see errors.
+# PUBLIC so every translation unit that includes httplib.h agrees on the value.
+target_compile_definitions(recs_model_service PUBLIC CPPHTTPLIB_LISTEN_BACKLOG=512)
 recs_set_warnings(recs_model_service)
 
 add_executable(recs-model ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp)
