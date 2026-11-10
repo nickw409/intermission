@@ -1,6 +1,10 @@
-import { useEffect, useState } from 'react';
-import { NavLink, Outlet } from 'react-router';
-import { api, ApiError } from '../api/client';
+// Page frame shared by every route: header navigation, account menu, the model-unavailable
+// banner, and the attribution footer. It is the root route element, so it also provides the
+// session to every page.
+import { Link, NavLink, Outlet } from 'react-router';
+import { SessionProvider } from '../auth/session';
+import { AccountMenu } from './AccountMenu';
+import { ModelUnavailableBanner } from './ModelUnavailableBanner';
 
 const NAV = [
   { to: '/', label: 'For you' },
@@ -10,43 +14,37 @@ const NAV = [
   { to: '/how-it-works', label: 'How it works' },
 ];
 
-type Session = { state: 'loading' } | { state: 'anonymous' } | { state: 'user'; username: string };
-
 export function AppShell() {
-  const [session, setSession] = useState<Session>({ state: 'loading' });
-
-  useEffect(() => {
-    const controller = new AbortController();
-    api
-      .get('/api/me', { signal: controller.signal })
-      .then((me) => setSession({ state: 'user', username: me.username }))
-      .catch((err: unknown) => {
-        if (err instanceof ApiError) setSession({ state: 'anonymous' });
-      });
-    return () => controller.abort();
-  }, []);
-
   return (
-    <div className="shell">
-      <header className="shell-header">
-        <NavLink to="/" className="brand">
-          Intermission
-        </NavLink>
-        <nav aria-label="Main">
-          {NAV.map((item) => (
-            <NavLink key={item.to} to={item.to} end={item.to === '/'}>
-              {item.label}
-            </NavLink>
-          ))}
-        </nav>
-        <div className="account">
-          {session.state === 'user' && <span>{session.username}</span>}
-          {session.state === 'anonymous' && <NavLink to="/login">Log in</NavLink>}
-        </div>
-      </header>
-      <main>
-        <Outlet />
-      </main>
-    </div>
+    <SessionProvider>
+      <div className="shell">
+        <a className="skip-link" href="#main">
+          Skip to content
+        </a>
+        <header className="shell-header">
+          <div className="shell-header__inner">
+            <Link to="/" className="brand">
+              Intermission
+            </Link>
+            <nav aria-label="Main">
+              {NAV.map((item) => (
+                <NavLink key={item.to} to={item.to} end={item.to === '/'}>
+                  {item.label}
+                </NavLink>
+              ))}
+            </nav>
+            <AccountMenu />
+          </div>
+        </header>
+        <ModelUnavailableBanner />
+        <main id="main" tabIndex={-1}>
+          <Outlet />
+        </main>
+        <footer className="shell-footer">
+          <p>Data from MovieLens by GroupLens Research; not endorsed by the University of Minnesota or GroupLens.</p>
+          <p>This product uses the TMDB API but is not endorsed or certified by TMDB.</p>
+        </footer>
+      </div>
+    </SessionProvider>
   );
 }
