@@ -143,9 +143,11 @@ bool CsvReader::next(std::vector<std::string>& fields) {
         break;
     }
   }
+  const bool blank_line = state == State::FieldStart && n == 0;
   ++n;
   fields.resize(n);
   if (expected_ && n != *expected_) {
+    if (blank_line) fail("empty record (blank line), expected " + std::to_string(*expected_) + " fields");
     fail(std::to_string(n) + " fields, expected " + std::to_string(*expected_));
   }
   return true;

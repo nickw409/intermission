@@ -21,7 +21,9 @@
 // Titles: MovieLens appends the release year as "(YYYY)". After trimming whitespace, a title that
 // ends in "(" + four digits + ")" has that year removed and the remaining text trimmed; anything
 // else (no parentheses, a range such as "(1994-1998)", a three-digit year) keeps the title as is
-// with no year. Genres are '|'-separated; "(no genres listed)" becomes an empty list.
+// with no year. If removing the year would leave an empty title (a title that is only "(YYYY)"),
+// the raw title is kept and the year is still recorded. Genres are '|'-separated; "(no genres
+// listed)" becomes an empty list, and an empty genre token (as in "Action||Drama") is an error.
 //
 // Genome: relevance is stored densely as n_items x n_tags (rows indexed by ItemIdx, columns in
 // genome-tags.csv order). Movies without genome scores keep relevance 0.
@@ -30,6 +32,8 @@
 #include <cmath>
 #include <fstream>
 #include <memory>
+#include <new>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -130,7 +134,8 @@ void parse_title(std::string_view raw, MovieMeta& m) {
       int year = 0;
       std::from_chars(digits.data(), digits.data() + digits.size(), year);
       m.year = year;
-      m.title = std::string(trim(t.substr(0, t.size() - kSuffix)));
+      const std::string_view stripped = trim(t.substr(0, t.size() - kSuffix));
+      m.title = std::string(stripped.empty() ? t : stripped);  // never leave a movie without a title
       return;
     }
   }
@@ -138,13 +143,15 @@ void parse_title(std::string_view raw, MovieMeta& m) {
   m.title = std::string(t);
 }
 
-std::vector<std::string> parse_genres(std::string_view s) {
+std::vector<std::string> parse_genres(const CsvFile& f, std::string_view s) {
   std::vector<std::string> out;
   if (s == "(no genres listed)" || s.empty()) return out;
   std::size_t start = 0;
   while (true) {
     const auto bar = s.find('|', start);
-    out.emplace_back(s.substr(start, bar == std::string_view::npos ? std::string_view::npos : bar - start));
+    const auto genre = s.substr(start, bar == std::string_view::npos ? std::string_view::npos : bar - start);
+    if (genre.empty()) f.fail("empty genre in '" + std::string(s) + "'");
+    out.emplace_back(genre);
     if (bar == std::string_view::npos) break;
     start = bar + 1;
   }
@@ -161,7 +168,7 @@ void load_movies(const fs::path& file, Dataset& ds) {
     const auto before = ds.items.size();
     if (ds.items.insert(m.movie_id) != before) f.fail("duplicate movieId " + row[0]);
     parse_title(row[1], m);
-    m.genres = parse_genres(row[2]);
+    m.genres = parse_genres(f, row[2]);
     ds.movies.push_back(std::move(m));
   }
 }
@@ -198,14 +205,17 @@ void load_links(const fs::path& file, Dataset& ds) {
   throw DatasetError(file.string() + ": duplicate rating reported but not found on re-read");
 }
 
-void load_ratings(const fs::path& file, Dataset& ds) {
+void load_ratings_impl(const fs::path& file, Dataset& ds) {
   std::vector<Triplet> triplets;
   {
     CsvFile f(file, 4);
     f.expect_header({"userId", "movieId", "rating", "timestamp"});
+    // Pre-size for ~27 bytes per row (ml-32m), capped so a huge file cannot demand a huge
+    // allocation up front; beyond the cap the vector simply grows.
+    constexpr std::uintmax_t kMaxReserve = std::uintmax_t{1} << 26;  // 64M ratings
     std::error_code ec;
     const auto bytes = fs::file_size(file, ec);
-    if (!ec) triplets.reserve(static_cast<std::size_t>(bytes / 24));  // ~27 bytes per row in ml-32m
+    if (!ec) triplets.reserve(static_cast<std::size_t>(std::min(bytes / 24, kMaxReserve)));
     std::vector<std::string> row;
     std::int64_t last_user = 0;
     UserIdx last_idx = 0;
@@ -232,6 +242,17 @@ void load_ratings(const fs::path& file, Dataset& ds) {
     report_duplicate_rating(file, ds);  // the only possible failure: ids are in range by construction
   }
   ds.by_item = transpose(ds.by_user);
+}
+
+void load_ratings(const fs::path& file, Dataset& ds) {
+  try {
+    load_ratings_impl(file, ds);
+  } catch (const std::bad_alloc&) {
+    throw DatasetError(file.string() + ": out of memory while loading ratings (" + std::to_string(ds.n_users()) +
+                       " users so far)");
+  } catch (const std::length_error&) {
+    throw DatasetError(file.string() + ": too many ratings to hold in memory");
+  }
 }
 
 void load_tags(const fs::path& file, Dataset& ds) {
