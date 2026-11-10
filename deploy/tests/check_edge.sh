@@ -6,6 +6,11 @@
 #   - /api/* and /healthz reach recs-api with Host preserved
 #   - a 65 KB body to /api/* gets 413 from Caddy
 #   - the only host binding is 127.0.0.1
+#   - security audit fixes: gzip only (no zstd), unknown /assets/* is 404, recs-api's sandbox
+#     CSP survives on /api/posters/*, no h2c, a stalled body never yields 499, and the access
+#     log holds no query strings, headers or cookies but does hold the request id
+#
+# EDGE_PROJECT overrides the compose project name, EDGE_PORT the loopback port.
 #
 #   deploy/tests/check_edge.sh <tag>     # needs intermission-{web,api,model}:<tag>
 #
@@ -18,7 +23,7 @@ set -Eeuo pipefail
 tag="${1:?usage: check_edge.sh <tag>}"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 port="${EDGE_PORT:-18081}"
-project=intermission-edgetest
+project="${EDGE_PROJECT:-intermission-edgetest}"
 scratch="$(mktemp -d)"
 fails=0
 fail() { echo "  FAIL: $*" >&2; fails=$((fails + 1)); }
@@ -122,22 +127,93 @@ head -c 65000 /dev/zero | tr '\0' 'a' > "$scratch/big"
 code="$(get /api/auth/login -X POST "${csrf[@]}" --data-binary "@$scratch/big")"
 [[ "$code" == 413 ]] && pass "65,000-byte body -> 413" || fail "65,000-byte body returned $code"
 
-echo "== compression"
+echo "== compression (gzip only: SA4-2, zstd disabled until Caddy ships a fixed klauspost/compress)"
 asset="$(grep -o '/assets/[^"]*\.js' "$(get / >/dev/null; echo "$scratch/b")" | head -n 1 || true)"
 if [[ -n "$asset" ]]; then
   get "$asset" -H 'Accept-Encoding: zstd, gzip' >/dev/null
   enc="$(hdr "$scratch/h" Content-Encoding)"
-  [[ "$enc" == zstd || "$enc" == gzip ]] && pass "$asset served with Content-Encoding: $enc" || fail "$asset not compressed"
+  [[ "$enc" == gzip ]] && pass "$asset served with Content-Encoding: gzip" || fail "$asset Content-Encoding is '$enc', want gzip"
+  get "$asset" -H 'Accept-Encoding: zstd' >/dev/null
+  enc="$(hdr "$scratch/h" Content-Encoding)"
+  [[ -z "$enc" ]] && pass "zstd-only client gets an uncompressed response" || fail "zstd-only client got Content-Encoding '$enc'"
 else
   fail "no JS asset referenced from index.html"
 fi
 
-echo "== access log is JSON without cookies"
-get /api/me -H 'Cookie: session=edgetest-secret-cookie' >/dev/null
+echo "== unknown /assets/* is a 404, not the SPA (SA3-3)"
+code="$(get /assets/does-not-exist-0123456789.js)"
+[[ "$code" == 404 ]] && pass "missing asset -> 404" || fail "missing asset returned $code"
+grep -qi '<!doctype html' "$scratch/b" && fail "missing asset served index.html" || pass "missing asset is not index.html"
+[[ "$(hdr "$scratch/h" Cache-Control)" == *immutable* ]] && fail "missing asset cached as immutable" || pass "missing asset not cached as immutable"
+[[ -n "$(hdr "$scratch/h" Content-Security-Policy)" ]] && pass "missing asset has security headers" || fail "missing asset lacks CSP"
+
+echo "== recs-api's sandbox CSP kept on posters (SA5-7)"
+code="$(get /api/posters/1)"
+[[ "$code" == 200 ]] && pass "/api/posters/1 -> 200" || fail "/api/posters/1 returned $code"
+expect Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'; sandbox"
+get /api/me >/dev/null
+expect Content-Security-Policy "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'"
+
+echo "== HTTP/1.1 only: no h2c (SA3-1)"
+ver="$(curl -s -o /dev/null --max-time 5 --http2-prior-knowledge -w '%{http_version}' -H "Host: $host" "$base/" || true)"
+[[ "$ver" != 2 ]] && pass "h2c prior knowledge refused (http_version '$ver')" || fail "h2c prior knowledge accepted"
+ver="$(curl -s -o /dev/null --max-time 5 --http2 -w '%{http_version}' -H "Host: $host" "$base/" || true)"
+[[ "$ver" == 1.1 ]] && pass "h2c upgrade ignored, served HTTP/1.1" || fail "h2c upgrade gave http_version '$ver'"
+
+echo "== stalled request body (SA3-5)"
+# Send headers announcing 100 bytes, then 10 bytes, then stall past read_body (15 s). The
+# client must get a 408 with the security headers or a clean close, never a 499.
+stall="$(python3 -I - "$port" "$host" <<'PY'
+import socket, sys
+port, host = int(sys.argv[1]), sys.argv[2]
+s = socket.create_connection(("127.0.0.1", port), timeout=30)
+s.sendall((f"POST /api/auth/login HTTP/1.1\r\nHost: {host}\r\nOrigin: http://{host}\r\n"
+           "X-Requested-With: recs\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n"
+           '{"username"').encode())
+data = b""
+try:
+    while True:
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        data += chunk
+except socket.timeout:
+    pass
+print(data.decode("latin-1"))
+PY
+)"
+status="$(head -n 1 <<<"$stall" | tr -d '\r')"
+if [[ -z "$status" ]]; then
+  pass "stalled body: connection closed without a response"
+elif [[ "$status" == "HTTP/1.1 408"* ]]; then
+  pass "stalled body -> $status"
+  grep -qi '^Content-Security-Policy:' <<<"$stall" && pass "408 has security headers" || fail "408 lacks CSP"
+  grep -qi '^Server:' <<<"$stall" && fail "408 has a Server header" || pass "408 has no Server header"
+else
+  fail "stalled body answered '$status'"
+fi
+
+echo "== access log: method, path, status, timing, request id only (SA3-2, SA5-2)"
+get '/api/me?edgecanary=query-canary-7c1e' -H 'Cookie: session=edgetest-secret-cookie' \
+  -H 'X-Edge-Canary: header-canary-5d2b' -H 'User-Agent: ua-canary-9f4a' >/dev/null
 sleep 1
 logs="$(dc logs --no-color caddy 2>&1)"
 grep -q '"logger":"http.log.access' <<<"$logs" && pass "JSON access log lines" || fail "no JSON access log lines"
-grep -q 'edgetest-secret-cookie' <<<"$logs" && fail "cookie value appears in access log" || pass "cookie value not logged"
+for canary in edgetest-secret-cookie query-canary-7c1e header-canary-5d2b ua-canary-9f4a; do
+  grep -q "$canary" <<<"$logs" && fail "'$canary' appears in the caddy log" || pass "'$canary' not logged"
+done
+line="$(grep '"logger":"http.log.access' <<<"$logs" | grep '"/api/me"' | tail -n 1 || true)"
+if [[ -n "$line" ]]; then
+  pass "access log records the path without its query string"
+  for field in '"method":"GET"' '"status":' '"duration":' '"size":' '"request_id":"'; do
+    grep -q "$field" <<<"$line" && pass "access log has $field" || fail "access log lacks $field: $line"
+  done
+  rid="$(hdr "$scratch/h" X-Request-ID)"
+  [[ -n "$rid" ]] && grep -q "\"request_id\":\"$rid\"" <<<"$line" \
+    && pass "access log request_id matches X-Request-ID" || fail "request_id '$rid' not in: $line"
+else
+  fail "no access log line with uri \"/api/me\" (query stripped)"
+fi
 
 echo "== errors Caddy raises itself (recs-api stopped: 502)"
 dc stop api >/dev/null 2>&1

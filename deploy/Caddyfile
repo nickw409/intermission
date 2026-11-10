@@ -13,6 +13,9 @@
 	persist_config off
 
 	servers :8080 {
+		# HTTP/1.1 only. Funnel speaks HTTP/1.1 to us, and with h2c a client can hold a stream
+		# open far past these timeouts by trickling frames (security audit SA3-1).
+		protocols h1
 		timeouts {
 			read_header 5s
 			read_body 15s
@@ -25,9 +28,22 @@
 		# deploy/runbooks/funnel-setup.md ("Does Funnel pass the client IP?").
 	}
 
+	# Caddy's own logs (startup, and http.log.error lines, which carry the request). Filtered
+	# like the access log below (keep the two field lists in sync).
 	log {
 		output stdout
-		format json
+		format filter {
+			wrap json
+			fields {
+				request>uri regexp \?.*$ ""
+				request>headers delete
+				request>remote_ip delete
+				request>remote_port delete
+				request>client_ip delete
+				request>tls delete
+				resp_headers delete
+			}
+		}
 	}
 }
 
@@ -35,7 +51,9 @@
 	header {
 		defer
 		Strict-Transport-Security "max-age=31536000"
-		Content-Security-Policy "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'"
+		# Set only if the response has none: recs-api sends a stricter sandbox CSP with poster
+		# placeholders (SVG) and it must survive (security audit SA5-7).
+		?Content-Security-Policy "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'"
 		X-Content-Type-Options "nosniff"
 		Referrer-Policy "strict-origin-when-cross-origin"
 		-Server
@@ -45,13 +63,31 @@
 }
 
 :8080 {
-	# JSON access log on stdout. Caddy redacts Cookie, Set-Cookie and Authorization by default.
+	# JSON access log on stdout with only what operations needs: method, path (the query string
+	# is cut off: it may carry search terms), status, duration, size and request_id (recs-api's
+	# X-Request-ID, to correlate with its own log). No request or response headers (cookies,
+	# User-Agent, ...) and no client address (security audit SA3-2, SA5-2).
 	log {
 		output stdout
-		format json
+		format filter {
+			wrap json
+			fields {
+				request>uri regexp \?.*$ ""
+				request>headers delete
+				request>remote_ip delete
+				request>remote_port delete
+				request>client_ip delete
+				request>tls delete
+				resp_headers delete
+			}
+		}
 	}
+	log_append request_id {http.response.header.X-Request-ID}
 
-	encode zstd gzip
+	# gzip only. Caddy 2.11.9 bundles a klauspost/compress whose zstd path is affected by
+	# GO-2026-6865 (security audit SA4-2). Put zstd back (`encode zstd gzip`) once the pinned
+	# Caddy release ships a fixed klauspost/compress (check `govulncheck -mode=binary` on it).
+	encode gzip
 
 	# Applied to every response, including proxied ones (defer = run when the response is
 	# written, after the upstream's own headers). Errors Caddy raises itself are answered by
@@ -89,13 +125,20 @@
 		}
 	}
 
+	# Hashed build assets: served when they exist and cached forever; a missing one is a plain
+	# 404 (handle_errors), never index.html with an immutable cache header (security audit
+	# SA3-3).
+	handle /assets/* {
+		root * /srv/www
+		@exists file
+		header @exists Cache-Control "public, max-age=31536000, immutable"
+		file_server
+	}
+
 	# The SPA: real files when they exist, otherwise index.html (client-side routing).
 	handle {
 		root * /srv/www
-		@hashed path /assets/*
-		header @hashed Cache-Control "public, max-age=31536000, immutable"
-		@html not path /assets/*
-		header @html Cache-Control "no-cache"
+		header Cache-Control "no-cache"
 		try_files {path} /index.html
 		file_server
 	}
@@ -113,6 +156,14 @@
 			header Content-Type application/json
 			# Caddy's 64KB is 64,000 bytes (recs-api's own cap is 64 KiB = 65,536 bytes).
 			respond `{"error":{"code":"body_too_large","message":"request body exceeds 64,000 bytes"}}` 413
+		}
+		# Caddy reports a request body that stopped arriving (read_body timeout) as 499
+		# ("client closed request"), a non-standard code meant for logs. The client may still
+		# be there: answer 408 and close (security audit SA3-5).
+		@body_stalled expression {err.status_code} == 499
+		handle @body_stalled {
+			header Connection close
+			respond "" 408
 		}
 		handle {
 			respond "" {err.status_code}
