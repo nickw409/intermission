@@ -144,6 +144,33 @@ describe('auth state', () => {
     expect(screen.queryByRole('button', { name: /alice/ })).not.toBeInTheDocument();
   });
 
+  it('ignores a 401 from a request that was sent before the user logged in', async () => {
+    const user = userEvent.setup();
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    server.use(
+      handlerFor('getMe', 'unauthorized'),
+      http.get('/api/ratings', async () => {
+        await gate;
+        return HttpResponse.json({ error: { code: 'unauthorized', message: 'not logged in' } }, { status: 401 });
+      }),
+    );
+    renderApp('/login');
+    await screen.findByRole('link', { name: 'Log in' });
+    const stale = api.get('/api/ratings').catch(() => undefined); // sent while logged out
+    await user.type(screen.getByLabelText('Username'), 'alice');
+    await user.type(screen.getByLabelText('Password'), 'correct horse battery');
+    await user.click(within(screen.getByRole('main')).getByRole('button', { name: 'Log in' }));
+    await screen.findByRole('button', { name: /alice/ });
+    await act(async () => {
+      release();
+      await stale;
+    });
+    expect(screen.getByRole('button', { name: /alice/ })).toBeInTheDocument();
+  });
+
   it('a wrong password (401 invalid_credentials) does not end an existing session', async () => {
     renderApp('/');
     await screen.findByRole('button', { name: /alice/ });

@@ -1,5 +1,5 @@
 import { useRef, useState, type FormEvent } from 'react';
-import { Link, useNavigate } from 'react-router';
+import { Link, Navigate, useNavigate } from 'react-router';
 import { api, type Schemas } from '../../api/client';
 import { homeFor, useSession } from '../../auth/session';
 import {
@@ -18,7 +18,7 @@ const INVITE_HINT = 'Required while signup is invite-only';
 
 export default function SignupPage() {
   const navigate = useNavigate();
-  const { signedIn } = useSession();
+  const { session, signedIn } = useSession();
   const [fields, setFields] = useState<SignupFields>({ username: '', password: '', invite: '' });
   const [errors, setErrors] = useState<FieldErrors<keyof SignupFields>>({});
   const [serverError, setServerError] = useState<string | null>(null);
@@ -52,6 +52,9 @@ export default function SignupPage() {
       setBusy(false);
     }
   };
+
+  // Already signed in (e.g. a bookmarked /login): nothing to do here.
+  if (session.status === 'user') return <Navigate to={homeFor(session.me)} replace />;
 
   return (
     <section className="auth-page">

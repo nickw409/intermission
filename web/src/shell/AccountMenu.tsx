@@ -7,7 +7,7 @@ import { useSession } from '../auth/session';
 import { friendlyMessage } from '../lib/errors';
 
 export function AccountMenu() {
-  const { session, logOut } = useSession();
+  const { session, logOut, retry } = useSession();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -26,6 +26,17 @@ export function AccountMenu() {
   }, [open]);
 
   if (session.status === 'loading') return <div className="account" />;
+
+  if (session.status === 'error') {
+    return (
+      <div className="account">
+        <span className="muted">Couldn't check your sign-in.</span>
+        <button type="button" className="button button--quiet" onClick={retry}>
+          Retry
+        </button>
+      </div>
+    );
+  }
 
   if (session.status === 'anonymous') {
     return (

@@ -2,37 +2,75 @@
 // returned Me straight to `signedIn`, and `logOut` ends the session on the server.
 //
 // The session cookie is HttpOnly, so the browser code never sees it: /api/me is the only way to
-// know whether a session exists. Any failure there (401, network error) means "logged out".
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { api, ApiError, type Schemas } from '../api/client';
+// know whether a session exists.
+//   - /api/me 200 → user; 401 → anonymous.
+//   - Any other failure (5xx, network) → error: we don't know, so we don't claim "logged out";
+//     the account menu offers a retry.
+//   - A /api/me answer only counts while we are still waiting for it ('loading'), so a slow
+//     response can't undo a login or logout that finished first.
+//   - Any later call answering 401 `unauthorized` means the session expired → anonymous, unless
+//     that request was sent before the most recent sign-in.
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { api, ApiError, onApiError, type Schemas } from '../api/client';
 
 export type Me = Schemas['Me'];
 
-export type Session = { status: 'loading' } | { status: 'anonymous' } | { status: 'user'; me: Me };
+export type Session =
+  | { status: 'loading' }
+  | { status: 'anonymous' }
+  | { status: 'error' }
+  | { status: 'user'; me: Me };
 
 interface SessionContextValue {
   session: Session;
   signedIn: (me: Me) => void;
   logOut: () => Promise<void>;
+  /** Ask /api/me again (after an 'error'). */
+  retry: () => void;
 }
 
 const SessionContext = createContext<SessionContextValue | null>(null);
 
+// Requests whose 401s are handled where they are made, not by the expiry listener.
+const SELF_HANDLED = new Set(['GET /api/me', 'POST /api/auth/logout']);
+
 export function SessionProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session>({ status: 'loading' });
+  const signedInAt = useRef(Number.NEGATIVE_INFINITY);
+
+  const loadMe = useCallback((signal?: AbortSignal) => {
+    const settle = (next: Session) => setSession((current) => (current.status === 'loading' ? next : current));
+    api
+      .get('/api/me', signal ? { signal } : {})
+      .then((me) => settle({ status: 'user', me }))
+      .catch((err: unknown) => {
+        if (signal?.aborted) return;
+        settle(err instanceof ApiError && err.status === 401 ? { status: 'anonymous' } : { status: 'error' });
+      });
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
-    api
-      .get('/api/me', { signal: controller.signal })
-      .then((me) => setSession({ status: 'user', me }))
-      .catch(() => {
-        if (!controller.signal.aborted) setSession({ status: 'anonymous' });
-      });
+    loadMe(controller.signal);
     return () => controller.abort();
-  }, []);
+  }, [loadMe]);
 
-  const signedIn = useCallback((me: Me) => setSession({ status: 'user', me }), []);
+  useEffect(
+    () =>
+      onApiError((error) => {
+        if (error.status !== 401 || error.code !== 'unauthorized' || !error.request) return;
+        const { method, path, startedAt } = error.request;
+        if (SELF_HANDLED.has(`${method} ${path}`)) return;
+        if (startedAt < signedInAt.current) return; // sent before the current session existed
+        setSession((current) => (current.status === 'user' ? { status: 'anonymous' } : current));
+      }),
+    [],
+  );
+
+  const signedIn = useCallback((me: Me) => {
+    signedInAt.current = performance.now();
+    setSession({ status: 'user', me });
+  }, []);
 
   const logOut = useCallback(async () => {
     try {
@@ -45,7 +83,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setSession({ status: 'anonymous' });
   }, []);
 
-  const value = useMemo(() => ({ session, signedIn, logOut }), [session, signedIn, logOut]);
+  const retry = useCallback(() => {
+    setSession({ status: 'loading' });
+    loadMe();
+  }, [loadMe]);
+
+  const value = useMemo(() => ({ session, signedIn, logOut, retry }), [session, signedIn, logOut, retry]);
   return <SessionContext value={value}>{children}</SessionContext>;
 }
 
