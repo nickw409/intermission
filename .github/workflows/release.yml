@@ -3,7 +3,9 @@
 # On every push to main: build all five images tagged with the short SHA
 # (intermission-{api,model,train,web,backup}:<sha>), run the image and edge gates against
 # them, and keep the image set as a workflow artifact for 7 days.
-# On pull requests that touch the deploy setup: the same gates, without the artifact.
+# On every pull request: the same gates, without the artifact. Both jobs are required checks on
+# main, so the workflow must run on every PR (a path filter would leave them pending forever);
+# the images are built from all of the code, not just deploy/.
 #
 # There is no registry: production builds the same SHA locally with deploy/build.sh (from a
 # clean git worktree, same Dockerfiles, base images pinned by digest), or loads this artifact:
@@ -15,10 +17,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    paths:
-      - deploy/**
-      - .dockerignore
-      - .github/workflows/release.yml
   workflow_dispatch:
 permissions:
   contents: read

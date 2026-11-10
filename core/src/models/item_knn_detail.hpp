@@ -10,13 +10,14 @@
 
 namespace recs::item_knn_detail {
 
-/// Hyperparameters (configs/knn.json). Defaults match the spec's starting values.
+/// Hyperparameters (configs/knn.json). The defaults are the spec's top-N form, with M and lambda
+/// chosen on the ml-latest-small validation split (ml-32m uses configs/knn.ml-32m.tuned.json).
 struct Params {
-  std::uint32_t neighbors = 100;   // M: neighbours kept per item
-  double shrinkage = 100.0;        // lambda in s * n / (n + lambda)
+  std::uint32_t neighbors = 10;    // M: neighbours kept per item
+  double shrinkage = 1000.0;       // lambda in s * n / (n + lambda)
   std::uint32_t min_support = 20;  // minimum training ratings for an item to take part at all
-  bool normalize = true;           // divide the score by sum |s'| (spec); false = plain weighted sum
-  bool positive_only = false;      // keep only s' > 0 neighbours (false = spec: rank by |s'|)
+  bool normalize = false;          // true = divide the score by sum |s'| (rating-prediction form)
+  bool positive_only = true;       // keep only s' > 0 neighbours (false = rank by |s'|, negatives kept)
 };
 
 /// Reads a knn config, filling defaults for missing keys. Throws std::invalid_argument on an
