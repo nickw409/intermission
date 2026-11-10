@@ -295,8 +295,9 @@ func syncDir(dir string) error {
 	return d.Sync()
 }
 
-// clockSkew is how far in the future an export's name may be dated before
-// it is treated as expired (the clock stepped back, or a bad name).
+// clockSkew is how far in the future an export's name may be dated before it
+// is treated as future-dated: kept, not counted towards Keep, and reported in a
+// warning (the clock stepped back, or the file dates are wrong).
 const clockSkew = 24 * time.Hour
 
 // prune applies export retention as of now:
