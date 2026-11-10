@@ -1,6 +1,7 @@
 // Gate tests for recs/stats.hpp (B1 gate 3): percentile bootstrap over users.
 #include <cmath>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -211,4 +212,29 @@ TEST_CASE("bootstrap rejects invalid arguments", "[eval][stats]") {
   CHECK_THROWS_AS(recs::bootstrap_ci(x, 100, 42, 1.0), std::invalid_argument);
   CHECK_THROWS_AS(recs::bootstrap_ratio_ci(x, std::vector<double>{1.0}), std::invalid_argument);
   CHECK_THROWS_AS(recs::bootstrap_ratio_ci(x, std::vector<double>{0.0, 0.0}), std::invalid_argument);
+}
+
+TEST_CASE("bootstrap rejects NaN inputs and negative sums of squares", "[eval][stats]") {
+  const double nan = std::nan("");
+  const std::vector<double> ok{1.0, 2.0};
+  const std::vector<double> bad{1.0, nan};
+  CHECK_THROWS_AS(recs::bootstrap_ci(bad), std::invalid_argument);
+  CHECK_THROWS_AS(recs::paired_bootstrap(bad, ok), std::invalid_argument);
+  CHECK_THROWS_AS(recs::paired_bootstrap(ok, bad), std::invalid_argument);
+  CHECK_THROWS_AS(recs::bootstrap_ratio_ci(bad, ok), std::invalid_argument);
+  CHECK_THROWS_AS(recs::bootstrap_ratio_ci(ok, bad), std::invalid_argument);
+  // sqrt_result means num is a sum of squared errors: a negative value is a caller bug.
+  const std::vector<double> neg{-1.0, 2.0};
+  CHECK_THROWS_AS(recs::bootstrap_ratio_ci(neg, ok, 100, 42, 0.95, true), std::invalid_argument);
+  CHECK_NOTHROW(recs::bootstrap_ratio_ci(neg, ok, 100, 42, 0.95, false));
+}
+
+TEST_CASE("paired_bootstrap names itself in its empty-input error", "[eval][stats]") {
+  const std::vector<double> empty;
+  try {
+    (void)recs::paired_bootstrap(empty, empty);
+    FAIL("expected std::invalid_argument");
+  } catch (const std::invalid_argument& e) {
+    CHECK(std::string(e.what()).find("paired_bootstrap") != std::string::npos);
+  }
 }

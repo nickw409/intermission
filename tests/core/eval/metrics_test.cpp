@@ -440,8 +440,20 @@ TEST_CASE("roc_auc hand fixtures", "[eval][metrics][auc]") {
     CHECK(recs::roc_auc(S{0.3f, 0.6f}, V{0}, V{1}) == 0.5);         // no negatives left
     CHECK(recs::roc_auc(S{0.3f, 0.6f}, V{0, 1}, V{}) == 0.5);       // every item positive
   }
+  SECTION("a positive that is also excluded is ignored") {
+    // scores [0.9, 0.1, 0.95, 0.2]; positives {0, 2}, exclude {2}: item 2 is dropped entirely, so
+    // positive 0 (0.9) vs negatives 1 (0.1), 3 (0.2): wins 2 of 2 -> 1.
+    // (If item 2 were kept as a positive, the pairs (2,1), (2,3) are also wins -> still 1, so
+    // also check a case where keeping it would change the answer:)
+    // scores [0.9, 0.1, 0.05, 0.2]; positives {0, 2}, exclude {2}: again 2/2 wins -> 1.
+    // Keeping item 2 as a positive would give (0,1) win, (0,3) win, (2,1) loss, (2,3) loss -> 0.5.
+    CHECK_THAT(recs::roc_auc(S{0.9f, 0.1f, 0.95f, 0.2f}, V{0, 2}, V{2}), WithinAbs(1.0, kTol));
+    CHECK_THAT(recs::roc_auc(S{0.9f, 0.1f, 0.05f, 0.2f}, V{0, 2}, V{2}), WithinAbs(1.0, kTol));
+    // Every positive excluded -> no positives left -> 0.5.
+    CHECK(recs::roc_auc(S{0.3f, 0.1f}, V{0}, V{0}) == 0.5);
+  }
   SECTION("invalid input throws") {
     CHECK_THROWS_AS(recs::roc_auc(S{0.3f}, V{1}, V{}), std::invalid_argument);   // out of range
-    CHECK_THROWS_AS(recs::roc_auc(S{0.3f, 0.1f}, V{0}, V{0}), std::invalid_argument);  // both
+    CHECK_THROWS_AS(recs::roc_auc(S{0.3f}, V{}, V{1}), std::invalid_argument);   // out of range
   }
 }

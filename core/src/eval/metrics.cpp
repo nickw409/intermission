@@ -19,13 +19,15 @@
 //
 // ROC AUC is the Mann-Whitney U statistic normalised by P * N: the probability that a random
 // positive scores above a random negative, ties counting 1/2 (Hanley & McNeil, 1982). It is
-// computed from average ranks in O(n log n).
+// computed from average ranks in O(n log n). Excluded items are dropped from both classes: a
+// positive that is also in `exclude` is ignored.
 //
 // All sums are accumulated in double.
 #include "recs/metrics.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <iterator>
 #include <numeric>
 #include <optional>
@@ -235,7 +237,7 @@ double roc_auc(std::span<const float> scores, std::span<const ItemIdx> positives
   }
   for (ItemIdx i : positives) {
     if (i >= n) throw std::invalid_argument("roc_auc: positive item out of range");
-    if (label[i] == kExcluded) throw std::invalid_argument("roc_auc: item is both positive and excluded");
+    if (label[i] == kExcluded) continue;  // excluded wins: an excluded positive is ignored
     label[i] = kPos;
   }
 

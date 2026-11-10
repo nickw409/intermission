@@ -20,6 +20,12 @@
 //
 // Every resampling function draws the same index stream for the same (n, B, seed), so the
 // statistics are comparable across calls. Everything accumulates in double.
+//
+// The resampling loop is deliberately serial: one Rng stream drawn in a fixed order is what makes
+// the CI a pure function of (values, resamples, seed), independent of the thread count. At
+// ml-32m scale (2e5 users x 1000 resamples) it takes on the order of a second per metric.
+//
+// NaN inputs are rejected: one NaN would silently poison every resample containing that user.
 #include "recs/stats.hpp"
 
 #include <algorithm>
@@ -41,6 +47,12 @@ void check_args(std::size_t n, std::size_t resamples, double level, const char* 
   if (resamples == 0) throw std::invalid_argument(std::string(who) + ": resamples must be > 0");
   if (!(level > 0.0 && level < 1.0)) {
     throw std::invalid_argument(std::string(who) + ": level must be in (0, 1)");
+  }
+}
+
+void check_no_nan(std::span<const double> xs, const char* who) {
+  for (double v : xs) {
+    if (std::isnan(v)) throw std::invalid_argument(std::string(who) + ": NaN input");
   }
 }
 
@@ -70,12 +82,12 @@ std::pair<double, double> percentile_ci(const std::vector<double>& sorted, doubl
   return {quantile_sorted(sorted, (1.0 - level) / 2.0), quantile_sorted(sorted, (1.0 + level) / 2.0)};
 }
 
-}  // namespace
-
-Estimate bootstrap_ci(std::span<const double> per_user, std::size_t resamples, std::uint64_t seed,
-                      double level) {
+// Percentile bootstrap of the mean; `who` names the public caller in error messages.
+Estimate bootstrap_mean(std::span<const double> per_user, std::size_t resamples, std::uint64_t seed,
+                        double level, const char* who) {
   const std::size_t n = per_user.size();
-  check_args(n, resamples, level, "bootstrap_ci");
+  check_args(n, resamples, level, who);
+  check_no_nan(per_user, who);
   const double dn = static_cast<double>(n);
 
   Estimate e;
@@ -92,14 +104,23 @@ Estimate bootstrap_ci(std::span<const double> per_user, std::size_t resamples, s
   return e;
 }
 
+}  // namespace
+
+Estimate bootstrap_ci(std::span<const double> per_user, std::size_t resamples, std::uint64_t seed,
+                      double level) {
+  return bootstrap_mean(per_user, resamples, seed, level, "bootstrap_ci");
+}
+
 PairedComparison paired_bootstrap(std::span<const double> a, std::span<const double> b,
                                   std::size_t resamples, std::uint64_t seed, double level) {
   if (a.size() != b.size()) {
     throw std::invalid_argument("paired_bootstrap: a and b must hold the same users");
   }
+  check_no_nan(a, "paired_bootstrap");
+  check_no_nan(b, "paired_bootstrap");
   std::vector<double> delta(a.size());
   for (std::size_t i = 0; i < a.size(); ++i) delta[i] = a[i] - b[i];
-  const Estimate e = bootstrap_ci(delta, resamples, seed, level);
+  const Estimate e = bootstrap_mean(delta, resamples, seed, level, "paired_bootstrap");
   PairedComparison p;
   p.mean_delta = e.mean;
   p.lo = e.lo;
@@ -116,9 +137,16 @@ Estimate bootstrap_ratio_ci(std::span<const double> num, std::span<const double>
   const std::size_t n = num.size();
   if (den.size() != n) throw std::invalid_argument("bootstrap_ratio_ci: num and den differ in size");
   check_args(n, resamples, level, "bootstrap_ratio_ci");
+  check_no_nan(num, "bootstrap_ratio_ci");
+  check_no_nan(den, "bootstrap_ratio_ci");
   double total_num = 0.0, total_den = 0.0;
   for (std::size_t i = 0; i < n; ++i) {
     if (den[i] < 0.0) throw std::invalid_argument("bootstrap_ratio_ci: negative denominator");
+    // With sqrt_result, num holds sums of squared errors: a negative one is a caller bug (and
+    // could make a resample's ratio negative, so sqrt would return NaN).
+    if (sqrt_result && num[i] < 0.0) {
+      throw std::invalid_argument("bootstrap_ratio_ci: negative numerator with sqrt_result");
+    }
     total_num += num[i];
     total_den += den[i];
   }
