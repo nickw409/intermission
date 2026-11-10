@@ -20,7 +20,10 @@
 //     same day replaces that day's file, so the job is idempotent).
 //  4. If the newest weekly copy is 7 or more days old (or there is none), the daily file is
 //     also copied to weekly/. Missing a Sunday therefore never skips a week.
-//  5. Old files are pruned: the newest --keep-daily daily and --keep-weekly weekly copies stay.
+//  5. Old files are pruned: the newest --keep-daily daily and --keep-weekly weekly copies stay,
+//     except that any copy older than maxAge (35 days) is deleted whatever the counts say,
+//     because the site promises that backups holding a deleted account's data are gone
+//     within 5 weeks. The newest copy in each directory is never deleted.
 //
 // The tool never logs row data; it prints one JSON line per command.
 package main
@@ -189,7 +192,7 @@ func backup(ctx context.Context, dbPath, dir string, keepDaily, keepWeekly int, 
 		dir  string
 		keep int
 	}{{dailyDir, keepDaily}, {weeklyDir, keepWeekly}} {
-		removed, err := prune(d.dir, d.keep)
+		removed, err := prune(d.dir, d.keep, now)
 		if err != nil {
 			return nil, err
 		}
@@ -385,19 +388,28 @@ func needWeekly(weekly []string, now time.Time) bool {
 	return today.Sub(newest) >= 7*24*time.Hour
 }
 
-// prune deletes all but the newest keep backups in dir and returns what it removed.
-func prune(dir string, keep int) ([]string, error) {
-	files, err := listBackups(dir)
+// maxAge is the oldest a backup may be (by the date in its name) before prune deletes it
+// regardless of keep.
+const maxAge = 35 * 24 * time.Hour
+
+// prune deletes the backups in dir beyond the newest keep, and any older than maxAge as of
+// now, but never the newest one. It returns what it removed.
+func prune(dir string, keep int, now time.Time) ([]string, error) {
+	files, err := listBackups(dir) // oldest first
 	if err != nil {
 		return nil, err
 	}
+	today, _ := time.Parse(dateLayout, now.UTC().Format(dateLayout))
 	var removed []string
-	for len(files) > keep {
-		if err := os.Remove(files[0]); err != nil {
+	for i, f := range files[:max(len(files)-1, 0)] {
+		date, _ := backupDate(filepath.Base(f))
+		if len(files)-i <= keep && today.Sub(date) <= maxAge {
+			continue
+		}
+		if err := os.Remove(f); err != nil {
 			return removed, err
 		}
-		removed = append(removed, files[0])
-		files = files[1:]
+		removed = append(removed, f)
 	}
 	return removed, nil
 }

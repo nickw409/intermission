@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/nickw409/intermission/api/internal/app"
@@ -28,6 +29,15 @@ const Header = "site_user_id,movie_id,rating,timestamp"
 
 // Keep is how many exports are retained.
 const Keep = 7
+
+// MaxAge is the oldest an export may be (by the timestamp in its name)
+// before prune deletes it whatever Keep says, so a deleted account's
+// ratings leave the exports within a week even if the nightly job paused.
+// The newest export is never deleted.
+const MaxAge = 7 * 24 * time.Hour
+
+// exportLayout is the timestamp format in export file names (UTC).
+const exportLayout = "2006-01-02T15-04-05Z"
 
 // LatestName is the pointer file holding the newest export's file name.
 const LatestName = "LATEST"
@@ -88,7 +98,7 @@ func Export(ctx context.Context, database *db.DB, dir string, now time.Time) (Re
 	if err := checkDir(dir); err != nil {
 		return Result{}, err
 	}
-	name := "ratings-" + now.UTC().Format("2006-01-02T15-04-05Z") + ".csv"
+	name := "ratings-" + now.UTC().Format(exportLayout) + ".csv"
 	final := filepath.Join(dir, name)
 
 	res := Result{Path: final}
@@ -106,7 +116,7 @@ func Export(ctx context.Context, database *db.DB, dir string, now time.Time) (Re
 	}); err != nil {
 		return Result{}, err
 	}
-	if err := prune(dir); err != nil {
+	if err := prune(dir, now); err != nil {
 		return res, err
 	}
 	return res, nil
@@ -254,11 +264,12 @@ func syncDir(dir string) error {
 	return d.Sync()
 }
 
-// prune deletes all but the Keep newest exports, and this package's temp
-// files older than staleTemp. Names embed a UTC timestamp in a fixed-width
-// format, so name order is time order. Only files matching exportName or
-// tempName are ever considered.
-func prune(dir string) error {
+// prune deletes exports beyond the Keep newest or older than MaxAge as of
+// now (never the newest one), and this package's temp files older than
+// staleTemp. Names embed a UTC timestamp in a fixed-width format, so name
+// order is time order. Only files matching exportName or tempName are ever
+// considered.
+func prune(dir string, now time.Time) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return err
@@ -280,12 +291,15 @@ func prune(dir string) error {
 			}
 		}
 	}
-	sort.Strings(exports)
-	for len(exports) > Keep {
-		if err := os.Remove(filepath.Join(dir, exports[0])); err != nil {
+	sort.Strings(exports) // oldest first
+	for i, name := range exports[:max(len(exports)-1, 0)] {
+		at, err := time.Parse(exportLayout, strings.TrimSuffix(strings.TrimPrefix(name, "ratings-"), ".csv"))
+		if len(exports)-i <= Keep && err == nil && now.Sub(at) <= MaxAge {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, name)); err != nil {
 			errs = append(errs, err)
 		}
-		exports = exports[1:]
 	}
 	return errors.Join(errs...)
 }

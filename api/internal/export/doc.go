@@ -4,13 +4,12 @@
 //
 // Account deletion and retention: a deleted account's ratings cascade away
 // in app.db, so they are absent from every export written afterwards. They
-// do remain in the older exports already on disk (at most Keep = 7 files)
-// until those are pruned, i.e. for up to 7 further export runs (a week on a
-// nightly timer). Those files hold only internal integer user IDs. Note that
-// users.id has no AUTOINCREMENT, so SQLite may give the highest deleted ID to
-// a new account; an older retained file can therefore attribute a deleted
-// user's rows to that ID. recs-train reads only the file named by LATEST, so
-// this never mixes accounts in training.
+// do remain in the older exports already on disk until those are pruned:
+// an export is deleted once it is beyond the Keep = 7 newest or older than
+// MaxAge (7 days), whichever comes first, except the newest one. Those files
+// hold only internal integer user IDs, which are never reused
+// (users.id is AUTOINCREMENT since migration 0003). recs-train reads only
+// the file named by LATEST.
 //
 // Owner: workstream J.
 package export
