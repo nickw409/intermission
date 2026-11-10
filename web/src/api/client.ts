@@ -133,6 +133,10 @@ function method<M extends Method>(m: M) {
     request(m, path, options as RawOptions) as Promise<SuccessBody<Operation<M, P>>>;
 }
 
+export function onApiError(_listener: (error: ApiError) => void): () => void {
+  throw new Error('not implemented');
+}
+
 export const api = {
   get: method('get'),
   put: method('put'),
