@@ -460,8 +460,8 @@ func TestCacheKey(t *testing.T) {
 
 	steps := []struct {
 		name, path, token string
-		wantCalls          int64
-		before             func()
+		wantCalls         int64
+		before            func()
 	}{
 		{"first", "/api/recommend?model=als&k=3", tok, 1, nil},
 		{"same", "/api/recommend?model=als&k=3", tok, 1, nil},
