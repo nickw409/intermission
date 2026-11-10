@@ -3,7 +3,8 @@
 #
 #   deploy/release.sh <sha>                  # deploy; on smoke failure, roll back automatically
 #   deploy/release.sh --no-rollback <sha>    # deploy; on smoke failure, leave it running
-#   deploy/release.sh --list                 # the last 5 deployed SHAs (deploy/history)
+#   deploy/release.sh --list                 # the last 5 deployed SHAs (deploy/history;
+#                                            # RECS_HISTORY_FILE overrides it, tests only)
 #
 # Steps: make sure the images exist (build them from git if not), set TAG=<sha> in
 # deploy/.env, `docker compose up -d`, wait for /healthz, run deploy/smoke.sh, then record the
@@ -12,7 +13,7 @@
 # shellcheck source=lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-HISTORY="$DEPLOY_DIR/history"
+HISTORY="$HISTORY_FILE"
 rollback=1
 case "${1:-}" in
   --list) [[ -f "$HISTORY" ]] && cat "$HISTORY"; exit 0 ;;

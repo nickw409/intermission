@@ -8,8 +8,8 @@
 #   deploy/restore-drill.sh            # images: the TAG in deploy/.env
 #   deploy/restore-drill.sh <sha>      # images for another SHA
 #
-# Env: DRILL_PORT (default 18080). Always tears the scratch project down; exits non-zero on
-# any failure.
+# Env: DRILL_PORT (default 18080); RECS_DRILL_PROJECT (default intermission-drill; set only by
+# tests). Always tears the scratch project down; exits non-zero on any failure.
 # shellcheck source=lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 require_env_file
@@ -22,7 +22,9 @@ tag="${1:-$(env_get TAG)}"
 tag="$(short_sha "$tag")"
 images_present "$tag" || die "images for $tag are missing (deploy/build.sh $tag)"
 
-project="intermission-drill"
+# Overridable (RECS_DRILL_PROJECT) so a test of this script never tears down the real drill project.
+project="${RECS_DRILL_PROJECT:-intermission-drill}"
+[[ "$project" != intermission ]] || die "RECS_DRILL_PROJECT must not be the production project"
 export TAG="$tag" RECS_HTTP_PORT="${DRILL_PORT:-18080}"
 drill() {
   docker compose --project-name "$project" --project-directory "$DEPLOY_DIR" --env-file "$ENV_FILE" \
