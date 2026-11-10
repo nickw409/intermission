@@ -250,7 +250,7 @@ func TestFailuresGivePlaceholder(t *testing.T) {
 		{"api 404", func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) }, nil},
 		{"api 500", func(w http.ResponseWriter, r *http.Request) { http.Error(w, "boom "+r.URL.RawQuery, 500) }, nil},
 		{"api 401 echoing key", func(w http.ResponseWriter, r *http.Request) {
-			http.Error(w, `{"status_message":"Invalid API key: `+r.URL.Query().Get("api_key")+`"}`, 401)
+			http.Error(w, `{"status_message":"Invalid API key: `+r.URL.Query().Get("api_key")+`"}`, http.StatusUnauthorized)
 		}, nil},
 		{"api not json", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "<html>") }, nil},
 		{"api null poster", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"poster_path":null}`) }, nil},
