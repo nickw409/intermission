@@ -1,43 +1,437 @@
+/* Intermission design basics: plain CSS with custom properties. Light and dark follow the OS
+   setting (prefers-color-scheme). System fonts only; nothing is loaded from other origins. */
+
 :root {
-  font-family: system-ui, sans-serif;
+  color-scheme: light dark;
+
+  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-display: Georgia, 'Times New Roman', serif;
+
+  --bg: #f7f4ef;
+  --surface: #ffffff;
+  --surface-raised: #ffffff;
+  --text: #1f1c1a;
+  --text-muted: #5f5852;
+  --border: #ddd5cb;
+  --accent: #8a1c2b; /* theatre-curtain red */
+  --accent-text: #ffffff;
+  --accent-soft: #f5e3e5;
+  --link: #8a1c2b;
+  --focus: #1f5fbf;
+  --star: #b26a00;
+  --star-empty: #cfc6bb;
+  --warning-bg: #fff4d6;
+  --warning-border: #d9a400;
+  --warning-text: #4a3500;
+  --danger: #a1152a;
+  --danger-bg: #fdecee;
+
+  --radius: 8px;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --content-width: 72rem;
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.06), 0 2px 8px rgb(0 0 0 / 0.05);
+
+  font-family: var(--font-sans);
   line-height: 1.5;
-  color: #1d1d1f;
-  background: #fafafa;
+  color: var(--text);
+  background: var(--bg);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14110f;
+    --surface: #1e1a17;
+    --surface-raised: #27221e;
+    --text: #efe9e2;
+    --text-muted: #b3a99f;
+    --border: #3a332d;
+    --accent: #e0707d;
+    --accent-text: #1b0d0f;
+    --accent-soft: #3a1d21;
+    --link: #f0939e;
+    --focus: #8ab4ff;
+    --star: #f2b544;
+    --star-empty: #4d443c;
+    --warning-bg: #3a2f10;
+    --warning-border: #b38a1a;
+    --warning-text: #f7e3a8;
+    --danger: #ff8e9c;
+    --danger-bg: #3b1a1f;
+    --shadow: 0 1px 2px rgb(0 0 0 / 0.4);
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
 }
 
 body {
   margin: 0;
+  min-height: 100vh;
+}
+
+a {
+  color: var(--link);
+}
+
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-display);
+  line-height: 1.2;
+  margin: 0 0 var(--space-4);
+}
+
+.muted {
+  color: var(--text-muted);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---- Shell ---- */
+
+.shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.skip-link {
+  position: absolute;
+  left: var(--space-2);
+  top: -3rem;
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface);
+  border-radius: var(--radius);
+  z-index: 10;
+}
+
+.skip-link:focus {
+  top: var(--space-2);
 }
 
 .shell-header {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.shell-header__inner {
   display: flex;
   flex-wrap: wrap;
-  gap: 1rem;
+  gap: var(--space-2) var(--space-6);
   align-items: center;
-  padding: 0.75rem 1rem;
-  border-bottom: 1px solid #ddd;
+  max-width: var(--content-width);
+  margin: 0 auto;
+  padding: var(--space-3) var(--space-4);
+}
+
+.brand {
+  font-family: var(--font-display);
+  font-size: 1.35rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  color: var(--accent);
+  text-decoration: none;
 }
 
 .shell-header nav {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.75rem;
+  gap: var(--space-1) var(--space-4);
 }
 
-.shell-header a.active {
+.shell-header nav a {
+  color: var(--text);
+  text-decoration: none;
+  padding: var(--space-1) 0;
+  border-bottom: 2px solid transparent;
+}
+
+.shell-header nav a:hover {
+  border-bottom-color: var(--border);
+}
+
+.shell-header nav a.active {
+  border-bottom-color: var(--accent);
   font-weight: 600;
 }
 
-.brand {
-  font-weight: 700;
+main {
+  flex: 1;
+  width: 100%;
+  max-width: var(--content-width);
+  margin: 0 auto;
+  padding: var(--space-6) var(--space-4);
+}
+
+main:focus {
+  outline: none;
+}
+
+.shell-footer {
+  border-top: 1px solid var(--border);
+  padding: var(--space-4);
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  text-align: center;
+}
+
+.shell-footer p {
+  margin: var(--space-1) 0;
+}
+
+/* ---- Account menu ---- */
+
+.account {
+  position: relative;
+  margin-left: auto;
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+}
+
+.account__button {
+  display: inline-flex;
+  gap: var(--space-1);
+  align-items: center;
+  font: inherit;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: var(--space-1) var(--space-3);
+  cursor: pointer;
+}
+
+.account__panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + var(--space-2));
+  min-width: 12rem;
+  padding: var(--space-3);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  z-index: 5;
+}
+
+.account__panel p {
+  margin: 0 0 var(--space-2);
+}
+
+/* ---- Banner ---- */
+
+.banner {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  justify-content: space-between;
+  max-width: var(--content-width);
+  width: calc(100% - 2 * var(--space-4));
+  margin: var(--space-4) auto 0;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius);
+}
+
+.banner p {
+  margin: 0;
+}
+
+.banner--warning {
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
+  color: var(--warning-text);
+}
+
+/* ---- Buttons ---- */
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font: inherit;
+  font-weight: 600;
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
   text-decoration: none;
+  cursor: pointer;
+}
+
+.button:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.button--primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+.button--quiet {
+  background: transparent;
+  border-color: currentColor;
   color: inherit;
 }
 
-.account {
-  margin-left: auto;
+/* ---- Cards and forms ---- */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: var(--space-6);
 }
 
-main {
-  padding: 1rem;
+.auth-page {
+  max-width: 26rem;
+  margin: var(--space-8) auto;
+}
+
+.auth-page__switch {
+  text-align: center;
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.field label {
+  font-weight: 600;
+}
+
+.field input {
+  font: inherit;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+}
+
+.field__hint,
+.field__error {
+  margin: 0;
+  font-size: 0.875rem;
+}
+
+.field__hint {
+  color: var(--text-muted);
+}
+
+.field--invalid input {
+  border-color: var(--danger);
+}
+
+.field__error {
+  color: var(--danger);
+}
+
+.form-error {
+  margin: 0;
+  padding: var(--space-3);
+  border-radius: var(--radius);
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+/* ---- Star rating ---- */
+
+.star-rating {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 1.5rem;
+  line-height: 1;
+}
+
+.star-rating--small {
+  font-size: 1rem;
+}
+
+.star-rating__control {
+  display: inline-flex;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.stars {
+  position: relative;
+  display: inline-block;
+  white-space: nowrap;
+}
+
+.stars__empty {
+  color: var(--star-empty);
+}
+
+.stars__filled {
+  position: absolute;
+  inset: 0 auto 0 0;
+  overflow: hidden;
+  color: var(--star);
+}
+
+.stars__targets {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-columns: repeat(10, 1fr);
+}
+
+.star-rating__clear {
+  font: inherit;
+  font-size: 1rem;
+  line-height: 1;
+  padding: var(--space-1) var(--space-2);
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.star-rating__clear:hover {
+  border-color: var(--border);
+}
+
+@media (max-width: 40rem) {
+  .account {
+    margin-left: 0;
+  }
 }

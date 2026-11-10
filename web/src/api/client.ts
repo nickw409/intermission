@@ -114,6 +114,19 @@ async function toApiError(response: Response): Promise<ApiError> {
   return new ApiError(response.status, 'internal', `unexpected ${response.status} response`);
 }
 
+// Site-wide observers of failed calls (e.g. the model-unavailable banner). Each caller still gets
+// the rejected promise and handles the error itself; listeners only observe.
+type ErrorListener = (error: ApiError) => void;
+const errorListeners = new Set<ErrorListener>();
+
+/** Calls `listener` for every ApiError from any request. Returns an unsubscribe function. */
+export function onApiError(listener: ErrorListener): () => void {
+  errorListeners.add(listener);
+  return () => {
+    errorListeners.delete(listener);
+  };
+}
+
 async function request(method: Method, template: string, options: RawOptions = {}): Promise<unknown> {
   const headers: Record<string, string> = { 'X-Requested-With': 'recs', Accept: 'application/json' };
   const init: RequestInit = { method: method.toUpperCase(), credentials: 'same-origin', headers };
@@ -123,7 +136,11 @@ async function request(method: Method, template: string, options: RawOptions = {
     init.body = JSON.stringify(options.body);
   }
   const response = await fetch(buildUrl(template, options), init);
-  if (!response.ok) throw await toApiError(response);
+  if (!response.ok) {
+    const error = await toApiError(response);
+    for (const listener of [...errorListeners]) listener(error);
+    throw error;
+  }
   if (response.status === 204) return undefined;
   return response.json();
 }
