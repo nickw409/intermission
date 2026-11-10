@@ -751,28 +751,34 @@ TEST_CASE("knn: load rejects a corrupt or truncated file", "[knn]") {
 TEST_CASE("knn gate 6: identical neighbour lists with 1 and 4 OpenMP threads", "[knn][gate]") {
   recs::Rng rng(0xD007);
   const auto ds = random_dataset(rng, 400, 300, 0.15);
-  const Config cfg{{"neighbors", 20},     {"shrinkage", 10.0},      {"min_support", 15},
-                   {"normalize", true}, {"positive_only", false}};
-  const int saved = omp_get_max_threads();
-  omp_set_num_threads(1);
-  const auto m1 = fit_knn(ds, cfg);
-  omp_set_num_threads(4);
-  const auto m4 = fit_knn(ds, cfg);
-  omp_set_num_threads(saved);
-  std::size_t total = 0;
-  for (ItemIdx i = 0; i < ds.n_items(); ++i) {
-    const auto a = neighbour_list(*m1, i);
-    REQUIRE(a == neighbour_list(*m4, i));
-    total += a.size();
-  }
-  CHECK(total > 0);
-  // Byte-identical artifacts too.
-  recs::testing::TempDir d1("knn-t1"), d4("knn-t4");
-  m1->save(d1.path());
-  m4->save(d4.path());
-  for (const auto& e : std::filesystem::directory_iterator(d1.path())) {
-    std::ifstream a(e.path(), std::ios::binary), b(d4.path() / e.path().filename(), std::ios::binary);
-    const std::string sa((std::istreambuf_iterator<char>(a)), {}), sb((std::istreambuf_iterator<char>(b)), {});
-    CHECK(sa == sb);
+  // Both scoring forms: the rating-prediction form keeps negative neighbours; the default top-N
+  // form (no flags) drops them after the similarity pass.
+  const std::vector<Config> cfgs{
+      Config{{"neighbors", 20}, {"shrinkage", 10.0}, {"min_support", 15}, {"normalize", true}, {"positive_only", false}},
+      Config{{"neighbors", 20}, {"shrinkage", 10.0}, {"min_support", 15}}};
+  for (const auto& cfg : cfgs) {
+    INFO("config " << cfg.dump());
+    const int saved = omp_get_max_threads();
+    omp_set_num_threads(1);
+    const auto m1 = fit_knn(ds, cfg);
+    omp_set_num_threads(4);
+    const auto m4 = fit_knn(ds, cfg);
+    omp_set_num_threads(saved);
+    std::size_t total = 0;
+    for (ItemIdx i = 0; i < ds.n_items(); ++i) {
+      const auto a = neighbour_list(*m1, i);
+      REQUIRE(a == neighbour_list(*m4, i));
+      total += a.size();
+    }
+    CHECK(total > 0);
+    // Byte-identical artifacts too.
+    recs::testing::TempDir d1("knn-t1"), d4("knn-t4");
+    m1->save(d1.path());
+    m4->save(d4.path());
+    for (const auto& e : std::filesystem::directory_iterator(d1.path())) {
+      std::ifstream a(e.path(), std::ios::binary), b(d4.path() / e.path().filename(), std::ios::binary);
+      const std::string sa((std::istreambuf_iterator<char>(a)), {}), sb((std::istreambuf_iterator<char>(b)), {});
+      CHECK(sa == sb);
+    }
   }
 }

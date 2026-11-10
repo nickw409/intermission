@@ -1,18 +1,26 @@
 # Model configs
 
-One JSON file per model with its starting hyperparameters (spec defaults where the spec gives one).
-Each file is copied into every artifact and run report. Tuned configs are added as
-`<model>.<dataset>.json` once validation-set tuning has picked them; the test set is evaluated once
-per final config.
+One JSON file per model. Each file is copied into every artifact and run report.
+
+`recs-train train` looks up `<model>.<dataset>.tuned.json` first, then `<model>.json`, then the
+model's code defaults. A `.tuned.json` file holds hyperparameters chosen on the validation split
+for one dataset. `<model>.json` holds the starting values (spec defaults where the spec gives one,
+or tuned ml-latest-small values where noted below). The test split is evaluated once per final
+config.
 
 ## knn
 
 `knn.json` is the ml-latest-small config and matches the code defaults. `knn.ml-32m.tuned.json` is
 the ml-32m config. Both use the spec's top-N score (`normalize: false`, `positive_only: true`).
-M (`neighbors`) and λ (`shrinkage`) were chosen on the **validation** split only (split seed 42,
-seed 42, `min_support` 20). The ml-32m search is in `docs/phase-1.md`.
+M (`neighbors`) and λ (`shrinkage`) were chosen on the **validation** split only (split seed 42 and
+model and bootstrap seed 42, `min_support` 20). The ml-32m search is in `docs/phase-1.md`.
 
-ml-latest-small validation NDCG@10 (610 users), top-N form, full grid:
+ml-latest-small validation NDCG@10 (610 users), top-N form, full grid. Each cell is one run of:
+
+```bash
+build/release/train/recs-train eval --dataset ml-latest-small --model knn --on validation --split-seed 42 --seed 42 \
+  --config <(echo '{"neighbors": M, "shrinkage": λ, "min_support": 20, "normalize": false, "positive_only": true}')
+```
 
 | M \ λ | 0 | 10 | 25 | 50 | 100 | 300 | 1,000 | 3,000 | 10,000 | 30,000 |
 |---|---|---|---|---|---|---|---|---|---|---|

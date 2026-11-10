@@ -113,7 +113,7 @@
 //   C. Desrosiers, G. Karypis. "A comprehensive survey of neighborhood-based recommendation
 //     methods." Recommender Systems Handbook, 2011.
 //
-// ARTIFACT (save/load): one file `item_knn.bin`, little-endian, see write_file() below.
+// ARTIFACT (save/load): one file `item_knn.bin`, little-endian, see save() below.
 #include <omp.h>
 
 #include <algorithm>
