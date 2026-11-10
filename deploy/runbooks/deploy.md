@@ -66,8 +66,14 @@ directory `data/dev/` (see `deploy/compose.dev.yaml`), so it never touches produ
 
    ```bash
    docker compose -f deploy/compose.yaml run --rm train ingest --dataset ml-32m
-   docker compose -f deploy/compose.yaml run --rm train train --dataset ml-32m ...   # see train/README
+   docker compose -f deploy/compose.yaml run --rm train train --dataset ml-32m \
+     --models pop,pop_count,knn,content,mf,als --default-model knn --set-current --seed 42
    ```
+
+   The train job mounts `configs/` read-only (`RECS_CONFIG_DIR`). Each model uses
+   `configs/<model>.<dataset>.tuned.json` when it exists (for example
+   `knn.ml-32m.tuned.json`), else `configs/<model>.json`, else its built-in defaults; the
+   train log prints which file each model used (`config <model>: <path>`).
 
 6. Create the smoke-test account (needs an invite; `create-invites.md`):
 

@@ -122,6 +122,14 @@ services:
       - ${RECS_DATA_DIR:-../data}/cache:/srv/data/cache
       - ${RECS_DATA_DIR:-../data}/raw:/srv/data/raw:ro
       - ${RECS_DATA_DIR:-../data}/exports:/srv/data/exports:ro
+      # Tuned per-model configs; recs-train's default --config-dir (configs, WORKDIR /srv). Long
+      # syntax so a missing directory is an error, not an empty one created by Docker (training
+      # would then silently use model defaults).
+      - type: bind
+        source: ${RECS_CONFIG_DIR:-../configs}
+        target: /srv/configs
+        read_only: true
+        bind: { create_host_path: false }
     tmpfs:
       - /tmp:size=256m,mode=1777
     cpu_shares: 128

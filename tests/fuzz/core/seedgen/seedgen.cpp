@@ -69,7 +69,9 @@ std::string model_input(const std::string& model, const fs::path& dir) {
 
 recs::Config small_config(const std::string& model) {
   if (model == "pop") return {{"m", 5}};
-  if (model == "knn") return {{"neighbors", 5}, {"shrinkage", 10}, {"min_support", 1}};
+  if (model == "knn") {
+    return {{"neighbors", 5}, {"shrinkage", 10}, {"min_support", 1}, {"normalize", true}, {"positive_only", false}};
+  }
   if (model == "content") return {{"min_tag_count", 1}, {"genre_weight", 1.0}};
   if (model == "mf") return {{"k", 3}, {"max_epochs", 3}};
   if (model == "als") return {{"k", 3}, {"iters", 2}};

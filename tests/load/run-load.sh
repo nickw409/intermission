@@ -45,6 +45,9 @@ if [[ -z "$knn_config" ]]; then
 fi
 
 stack_init
+# recs-train prefers knn.<dataset>.tuned.json over knn.json; remove the copied tuned files so the
+# config requested here is the one trained (and named in the result label).
+rm -f "$STACK_DIR"/configs/knn.*.tuned.json
 install -m 0644 "$knn_config" "$STACK_DIR/configs/knn.json"
 slog "knn config ($knn_config): $(cat "$knn_config")"
 stack_train "$dataset" pop,knn knn

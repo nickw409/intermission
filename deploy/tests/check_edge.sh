@@ -83,7 +83,8 @@ expect() { # expect NAME VALUE
   local v; v="$(hdr "$scratch/h" "$1")"
   [[ "$v" == "$2" ]] && pass "$1: $v" || fail "$1 is '$v', want '$2'"
 }
-expect Content-Security-Policy "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'"
+site_csp="default-src 'self'; img-src 'self' data:; frame-ancestors 'none'; form-action 'self'; base-uri 'none'"
+expect Content-Security-Policy "$site_csp"
 expect X-Content-Type-Options nosniff
 expect Referrer-Policy strict-origin-when-cross-origin
 v="$(hdr "$scratch/h" Strict-Transport-Security)"
@@ -125,8 +126,8 @@ code="$(get /api/auth/login -X POST "${csrf[@]}" --data-binary "@$scratch/big")"
 # no Server header, an X-Request-ID.
 grep -q '"code":"body_too_large"' "$scratch/b" && [[ "$(hdr "$scratch/h" Content-Type)" == application/json* ]] \
   && pass "413 body is the Error shape (body_too_large)" || fail "413 body is not the Error shape: $(head -c 200 "$scratch/b")"
-[[ -n "$(hdr "$scratch/h" Content-Security-Policy)" && -z "$(hdr "$scratch/h" Server)" && -n "$(hdr "$scratch/h" X-Request-ID)" ]] \
-  && pass "413 has security headers and X-Request-ID, no Server" || fail "413 headers: CSP '$(hdr "$scratch/h" Content-Security-Policy)', Server '$(hdr "$scratch/h" Server)', X-Request-ID '$(hdr "$scratch/h" X-Request-ID)'"
+[[ "$(hdr "$scratch/h" Content-Security-Policy)" == "$site_csp" && -z "$(hdr "$scratch/h" Server)" && -n "$(hdr "$scratch/h" X-Request-ID)" ]] \
+  && pass "413 has the site CSP, security headers and X-Request-ID, no Server" || fail "413 headers: CSP '$(hdr "$scratch/h" Content-Security-Policy)', Server '$(hdr "$scratch/h" Server)', X-Request-ID '$(hdr "$scratch/h" X-Request-ID)'"
 [[ "$(hdr "$scratch/h" Cache-Control)" == no-store ]] && pass "413 is Cache-Control: no-store" || fail "413 Cache-Control is '$(hdr "$scratch/h" Cache-Control)'"
 head -c 65000 /dev/zero | tr '\0' 'a' > "$scratch/big"
 code="$(get /api/auth/login -X POST "${csrf[@]}" --data-binary "@$scratch/big")"
@@ -157,7 +158,7 @@ code="$(get /api/posters/1)"
 [[ "$code" == 200 ]] && pass "/api/posters/1 -> 200" || fail "/api/posters/1 returned $code"
 expect Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; sandbox"
 get /api/me >/dev/null
-expect Content-Security-Policy "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'"
+expect Content-Security-Policy "$site_csp"
 
 echo "== HTTP/1.1 only: no h2c (SA3-1)"
 ver="$(curl -s -o /dev/null --max-time 5 --http2-prior-knowledge -w '%{http_version}' -H "Host: $host" "$base/" || true)"
@@ -191,12 +192,15 @@ status="$(head -n 1 <<<"$stall" | tr -d '\r')"
 # Expected failure, tracked as open finding SA3-5b (owner decision): the wanted outcome is a
 # 408 or a clean close, but Caddy 2.11.9's reverse_proxy writes this 499 itself when the
 # request context is cancelled, bypassing handle_errors (see the Caddyfile). Which status the
-# client sees is a race between Caddy's read_body timeout and recs-api's own 15 s ReadTimeout:
-# 499 when Caddy's fires first, 504 (through handle_errors) when recs-api's does; both were
-# observed. Either is reported as XFAIL, never as a pass; any other wrong answer fails; and the
-# wanted outcome itself fails as XPASS, so this check must be updated (and SA3-5b closed) the
-# moment the behaviour changes.
-if [[ "$status" == "HTTP/1.1 499"* || "$status" == "HTTP/1.1 504"* ]]; then
+# client sees is a race between Caddy's read_body timeout and recs-api's own 15 s ReadTimeout.
+# recs-api always answers the truncated body with 400 at 15 s (seen in its log for every
+# stalled request); the client then gets 499 when Caddy's timeout fires first, 504 (through
+# handle_errors) when Caddy treats the upstream as timed out, or recs-api's 400 when it
+# reaches Caddy just before Caddy's own timeout. All three were observed (400 rarely, in CI).
+# Each is reported as XFAIL, never as a pass; any other wrong answer fails; and the wanted
+# outcome itself fails as XPASS, so this check must be updated (and SA3-5b closed) the moment
+# the behaviour changes.
+if [[ "$status" == "HTTP/1.1 499"* || "$status" == "HTTP/1.1 504"* || "$status" == "HTTP/1.1 400"* ]]; then
   xfail "SA3-5b" "stalled body answered '$status', want 408 or a clean close (Caddy/recs-api timeout race)"
 elif [[ -z "$status" || "$status" == "HTTP/1.1 408"* ]]; then
   fail "XPASS: stalled body now gives '${status:-a clean close}'; SA3-5b looks fixed: make this a normal pass and close the finding"
@@ -277,8 +281,8 @@ echo "== errors Caddy raises itself (recs-api stopped: 502)"
 dc stop api >/dev/null 2>&1
 code="$(get /api/me)"
 [[ "$code" == 502 ]] && pass "recs-api down -> 502 from Caddy" || fail "recs-api down returned $code"
-[[ -n "$(hdr "$scratch/h" Content-Security-Policy)" && -z "$(hdr "$scratch/h" Server)" && -n "$(hdr "$scratch/h" X-Request-ID)" ]] \
-  && pass "502 has security headers and X-Request-ID, no Server" || fail "502 headers: CSP '$(hdr "$scratch/h" Content-Security-Policy)', Server '$(hdr "$scratch/h" Server)', X-Request-ID '$(hdr "$scratch/h" X-Request-ID)'"
+[[ "$(hdr "$scratch/h" Content-Security-Policy)" == "$site_csp" && -z "$(hdr "$scratch/h" Server)" && -n "$(hdr "$scratch/h" X-Request-ID)" ]] \
+  && pass "502 has the site CSP, security headers and X-Request-ID, no Server" || fail "502 headers: CSP '$(hdr "$scratch/h" Content-Security-Policy)', Server '$(hdr "$scratch/h" Server)', X-Request-ID '$(hdr "$scratch/h" X-Request-ID)'"
 [[ "$(hdr "$scratch/h" Cache-Control)" == no-store ]] && pass "502 is Cache-Control: no-store" || fail "502 Cache-Control is '$(hdr "$scratch/h" Cache-Control)'"
 
 if [[ $fails -gt 0 ]]; then
