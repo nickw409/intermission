@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -52,9 +53,9 @@ func TestInvalidConfigFailsFast(t *testing.T) {
 }
 
 func TestStubSubcommands(t *testing.T) {
-	for _, args := range [][]string{{"migrate"}, {"export-ratings"}, {"admin", "invite", "create"}} {
+	for _, args := range [][]string{{"export-ratings"}} {
 		var out, errb bytes.Buffer
-		code := run(context.Background(), args, env(nil), &out, &errb, nil)
+		code := run(context.Background(), args, env(map[string]string{"RECS_DB_PATH": filepath.Join(t.TempDir(), "app.db")}), &out, &errb, nil)
 		if code != 1 || !strings.Contains(errb.String(), "not implemented yet") {
 			t.Errorf("%v: code %d stderr %q", args, code, errb.String())
 		}
@@ -68,7 +69,7 @@ func TestServeAndGracefulShutdown(t *testing.T) {
 	addrc := make(chan string, 1)
 	done := make(chan int, 1)
 	go func() {
-		done <- run(ctx, []string{"serve"}, env(map[string]string{"RECS_ADDR": "127.0.0.1:0", "TMDB_API_KEY": "do-not-log"}),
+		done <- run(ctx, []string{"serve"}, env(map[string]string{"RECS_ADDR": "127.0.0.1:0", "TMDB_API_KEY": "do-not-log", "RECS_DB_PATH": filepath.Join(t.TempDir(), "app.db")}),
 			&out, &errb, func(a string) { addrc <- a })
 	}()
 	var addr string
