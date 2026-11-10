@@ -15,6 +15,9 @@ Stop conditions (only the affected task stops; the others keep going):
 - Downloaded ml-latest-small and ml-32m (MD5 verified). ml-32m counts match the spec exactly: 32,000,204 ratings, 87,585 movies, 200,948 users.
 - Spine: C++ build (debug+ASan/UBSan, release, clang fuzz presets; all green), frozen headers, contracts (public.yaml, model.yaml, report.schema.json, artifact.md), report fixtures, tiny dataset, CSV edge-case fixtures, configs, CI workflow, gitleaks config, Dependabot, SECURITY.md, pre-commit hook.
 
+- PR #1 (Wave 0 spine) passed all 7 CI jobs and was merged; tagged `spine-v1`. Branch protection on `main`: 7 required checks, no force-pushes, no deletions.
+- Wave 1 started: A1 (ingest), B1 (split + metrics), C1 (popularity + evaluator), I1 (Go auth). K1 and L1 (web) start as slots free up (4-agent limit).
+
 ## Decisions made without the owner (please review)
 
 | # | Decision | Why | Easy to change? |
