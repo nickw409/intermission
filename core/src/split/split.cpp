@@ -43,14 +43,19 @@
 // Parallelism: the per-user sort runs under OpenMP with a static schedule; each user writes only
 // its own slots, and everything order-dependent (CSR assembly, hash) runs serially, so the
 // output does not depend on the thread count.
+//
+// Memory: `train` and `train_minus_val` each carry a full copy of the metadata, including the tag
+// genome when present. That copy is required, not incidental: Dataset owns its metadata by value
+// (recs/types.hpp), and models fit on split.train (e.g. the content model) read the genome from
+// the Dataset they are given. ml-32m ships no genome, so there the copy costs nothing.
 #include "recs/split.hpp"
+
+#include <omp.h>
 
 #include <algorithm>
 #include <cmath>
-#include <numeric>
 #include <stdexcept>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -79,31 +84,85 @@ void validate_config(const SplitConfig& c) {
   if (c.val_min > c.val_max) throw std::invalid_argument("make_split: val_min > val_max");
 }
 
-std::string config_json(const SplitConfig& c) {
-  nlohmann::json j;  // object keys are kept sorted by nlohmann::json's default std::map
-  j["min_ratings"] = c.min_ratings;
-  j["seed"] = c.seed;
-  j["test_fraction"] = c.test_fraction;
-  j["test_max"] = c.test_max;
-  j["test_min"] = c.test_min;
-  j["val_fraction"] = c.val_fraction;
-  j["val_max"] = c.val_max;
-  j["val_min"] = c.val_min;
-  return j.dump();
+// Chronological sort key of one rating; `pos` is its offset within the user's CSR row.
+struct SortKey {
+  std::int64_t ts;
+  std::uint64_t tie;
+  ItemIdx item;
+  std::uint32_t pos;
+};
+
+// Step 1: the set of every rating, as a vector aligned with full.by_user's CSR positions.
+std::vector<char> assign_sets(const Csr& R, const SplitConfig& cfg) {
+  const std::uint32_t n_users = R.n_rows;
+  std::vector<char> assign(R.nnz(), kTrainMinusVal);
+  std::vector<char> infeasible(n_users, 0);
+
+  // One sort buffer per thread, allocated before the parallel region so nothing inside it
+  // allocates (and so nothing inside it can throw).
+  std::uint32_t max_row = 0;
+  for (std::uint32_t u = 0; u < n_users; ++u) max_row = std::max(max_row, R.row_size(u));
+  std::vector<std::vector<SortKey>> buffers(static_cast<std::size_t>(omp_get_max_threads()));
+  for (auto& b : buffers) b.resize(max_row);
+
+  const auto n_users_signed = static_cast<std::int64_t>(n_users);
+#pragma omp parallel for schedule(static)
+  for (std::int64_t su = 0; su < n_users_signed; ++su) {
+    const auto u = static_cast<std::uint32_t>(su);
+    const std::uint32_t n = R.row_size(u);
+    if (n < cfg.min_ratings) continue;
+
+    const std::uint64_t n_test =
+        clamp_u64(round_half_up(cfg.test_fraction * static_cast<double>(n)), cfg.test_min, cfg.test_max);
+    if (n_test > n) {
+      infeasible[u] = 1;
+      continue;
+    }
+    const std::uint64_t n_train = n - n_test;
+    const std::uint64_t n_val =
+        clamp_u64(round_half_up(cfg.val_fraction * static_cast<double>(n_train)), cfg.val_min, cfg.val_max);
+    if (n_val > n_train) {
+      infeasible[u] = 1;
+      continue;
+    }
+
+    SortKey* order = buffers[static_cast<std::size_t>(omp_get_thread_num())].data();
+    const auto items = R.row_indices(u);
+    const auto ts = R.row_ts(u);
+    for (std::uint32_t i = 0; i < n; ++i) order[i] = {ts[i], mix_seed(cfg.seed, u, items[i]), items[i], i};
+    std::sort(order, order + n, [](const SortKey& a, const SortKey& b) {
+      if (a.ts != b.ts) return a.ts < b.ts;
+      if (a.tie != b.tie) return a.tie < b.tie;
+      return a.item < b.item;
+    });
+    const std::uint64_t base = R.indptr[u];
+    for (std::uint64_t r = n_train; r < n; ++r) assign[base + order[r].pos] = kTest;
+    for (std::uint64_t r = n_train - n_val; r < n_train; ++r) assign[base + order[r].pos] = kValidation;
+  }
+
+  for (std::uint32_t u = 0; u < n_users; ++u) {
+    if (infeasible[u]) {
+      throw std::invalid_argument(
+          "make_split: user " + std::to_string(u) + " with " + std::to_string(R.row_size(u)) +
+          " ratings cannot hold the clamped test/validation sizes; raise min_ratings or lower "
+          "test_min/val_min");
+    }
+  }
+  return assign;
 }
 
-// A Dataset with `full`'s index spaces and metadata but only the ratings whose assignment
-// passes `keep`.
+// Step 2: a Dataset with `full`'s index spaces and metadata, holding only the ratings whose set
+// passes `keep`, and only the tags that do not reveal a dropped rating.
 template <class Keep>
-Dataset filtered_copy(const Dataset& full, const std::vector<char>& assign, Keep keep) {
+Dataset build(const Dataset& full, const std::vector<char>& assign, Keep keep) {
+  const Csr& src = full.by_user;
   Dataset d;
   d.name = full.name;
   d.users = full.users;
   d.items = full.items;
   d.movies = full.movies;
-  d.genome = full.genome;
+  d.genome = full.genome;  // see "Memory" above
 
-  const Csr& src = full.by_user;
   // Leakage guard: a tag stays unless its tagger is a rating user whose rating of the same item
   // was moved out of this Dataset (to validation or test).
   for (const TagApplication& t : full.tags) {
@@ -122,8 +181,11 @@ Dataset filtered_copy(const Dataset& full, const std::vector<char>& assign, Keep
   Csr& m = d.by_user;
   m.n_rows = src.n_rows;
   m.n_cols = src.n_cols;
-  m.indptr.assign(1, 0);
+  const auto kept = static_cast<std::size_t>(std::count_if(assign.begin(), assign.end(), keep));
   m.indptr.reserve(static_cast<std::size_t>(src.n_rows) + 1);
+  m.indices.reserve(kept);
+  m.values.reserve(kept);
+  m.ts.reserve(kept);
   for (std::uint32_t u = 0; u < src.n_rows; ++u) {
     for (std::uint64_t p = src.indptr[u]; p < src.indptr[u + 1]; ++p) {
       if (!keep(assign[p])) continue;
@@ -137,107 +199,86 @@ Dataset filtered_copy(const Dataset& full, const std::vector<char>& assign, Keep
   return d;
 }
 
+// Per-user held-out ratings of one set, in ascending item order.
+std::vector<std::vector<Rating>> collect(const Csr& R, const std::vector<char>& assign, char set) {
+  std::vector<std::vector<Rating>> out(R.n_rows);
+  for (std::uint32_t u = 0; u < R.n_rows; ++u) {
+    for (std::uint64_t p = R.indptr[u]; p < R.indptr[u + 1]; ++p) {
+      if (assign[p] == set) out[u].push_back(Rating{R.indices[p], R.values[p], R.ts[p]});
+    }
+  }
+  return out;
+}
+
+std::string config_json(const SplitConfig& c) {
+  nlohmann::json j;  // object keys are kept sorted by nlohmann::json's default std::map
+  j["min_ratings"] = c.min_ratings;
+  j["seed"] = c.seed;
+  j["test_fraction"] = c.test_fraction;
+  j["test_max"] = c.test_max;
+  j["test_min"] = c.test_min;
+  j["val_fraction"] = c.val_fraction;
+  j["val_max"] = c.val_max;
+  j["val_min"] = c.val_min;
+  return j.dump();
+}
+
+// Step 3: the hash described at the top of this file. Lines are batched into a buffer so the
+// hasher sees large updates instead of one tiny update per rating.
+std::string hash_split(const SplitConfig& cfg, const Csr& R, const std::vector<char>& assign) {
+  constexpr std::size_t kFlushBytes = 1 << 20;
+  Sha256 hasher;
+  hasher.update(config_json(cfg));
+  std::string buf;
+  buf.reserve(kFlushBytes + 64);
+  for (std::uint32_t u = 0; u < R.n_rows; ++u) {
+    const std::string prefix = std::to_string(u) + ",";
+    for (std::uint64_t p = R.indptr[u]; p < R.indptr[u + 1]; ++p) {
+      buf += prefix;
+      buf += std::to_string(R.indices[p]);
+      buf += ',';
+      buf += assign[p];
+      buf += '\n';
+      if (buf.size() >= kFlushBytes) {
+        hasher.update(buf);
+        buf.clear();
+      }
+    }
+  }
+  hasher.update(buf);
+  return hasher.hex_digest();
+}
+
+// Step 4: share of test ratings whose item has no rating in `train` (0 with no test ratings).
+double cold_share(const Dataset& train, const std::vector<std::vector<Rating>>& test) {
+  std::uint64_t n_test = 0, n_cold = 0;
+  for (const auto& ratings : test) {
+    for (const Rating& r : ratings) {
+      ++n_test;
+      if (train.by_item.row_size(r.item) == 0) ++n_cold;
+    }
+  }
+  return n_test == 0 ? 0.0 : static_cast<double>(n_cold) / static_cast<double>(n_test);
+}
+
 }  // namespace
 
 Split make_split(const Dataset& full, const SplitConfig& cfg) {
   validate_config(cfg);
   const Csr& R = full.by_user;
-  const std::uint32_t n_users = R.n_rows;
-
-  // assign[p] is the set of the rating stored at CSR position p (row order = item order).
-  std::vector<char> assign(R.nnz(), kTrainMinusVal);
-  std::vector<char> infeasible(n_users, 0);
-
-  const auto n_users_signed = static_cast<std::int64_t>(n_users);
-#pragma omp parallel for schedule(static)
-  for (std::int64_t su = 0; su < n_users_signed; ++su) {
-    const auto u = static_cast<std::uint32_t>(su);
-    const std::uint64_t n = R.row_size(u);
-    if (n < cfg.min_ratings) continue;
-
-    const std::uint64_t n_test =
-        clamp_u64(round_half_up(cfg.test_fraction * static_cast<double>(n)), cfg.test_min, cfg.test_max);
-    if (n_test > n) {
-      infeasible[u] = 1;
-      continue;
-    }
-    const std::uint64_t n_train = n - n_test;
-    const std::uint64_t n_val =
-        clamp_u64(round_half_up(cfg.val_fraction * static_cast<double>(n_train)), cfg.val_min, cfg.val_max);
-    if (n_val > n_train) {
-      infeasible[u] = 1;
-      continue;
-    }
-
-    // Chronological order of the user's ratings: positions 0..n-1 within the row.
-    const auto items = R.row_indices(u);
-    const auto ts = R.row_ts(u);
-    struct Key {
-      std::int64_t ts;
-      std::uint64_t tie;
-      ItemIdx item;
-      std::uint64_t pos;
-    };
-    std::vector<Key> order(n);
-    for (std::uint64_t i = 0; i < n; ++i) {
-      order[i] = {ts[i], mix_seed(cfg.seed, u, items[i]), items[i], i};
-    }
-    std::sort(order.begin(), order.end(), [](const Key& a, const Key& b) {
-      if (a.ts != b.ts) return a.ts < b.ts;
-      if (a.tie != b.tie) return a.tie < b.tie;
-      return a.item < b.item;
-    });
-    const std::uint64_t base = R.indptr[u];
-    for (std::uint64_t r = n_train; r < n; ++r) assign[base + order[r].pos] = kTest;
-    for (std::uint64_t r = n_train - n_val; r < n_train; ++r) assign[base + order[r].pos] = kValidation;
-  }
-
-  for (std::uint32_t u = 0; u < n_users; ++u) {
-    if (infeasible[u]) {
-      throw std::invalid_argument(
-          "make_split: user " + std::to_string(u) + " with " + std::to_string(R.row_size(u)) +
-          " ratings cannot hold the clamped test/validation sizes; raise min_ratings or lower "
-          "test_min/val_min");
-    }
-  }
+  const std::vector<char> assign = assign_sets(R, cfg);
 
   Split s;
   s.config = cfg;
-  s.train = filtered_copy(full, assign, [](char a) { return a != kTest; });
-  s.train_minus_val = filtered_copy(full, assign, [](char a) { return a == kTrainMinusVal; });
-  s.validation.assign(n_users, {});
-  s.test.assign(n_users, {});
-
-  Sha256 hasher;
-  hasher.update(config_json(cfg));
-  std::string line;
-  for (std::uint32_t u = 0; u < n_users; ++u) {
-    const std::uint64_t n = R.row_size(u);
-    if (n >= cfg.min_ratings) s.eval_users.push_back(u);
-    const std::string prefix = std::to_string(u) + ",";
-    for (std::uint64_t p = R.indptr[u]; p < R.indptr[u + 1]; ++p) {
-      const Rating r{R.indices[p], R.values[p], R.ts[p]};
-      if (assign[p] == kTest) s.test[u].push_back(r);
-      if (assign[p] == kValidation) s.validation[u].push_back(r);
-      line = prefix;
-      line += std::to_string(r.item);
-      line += ',';
-      line += assign[p];
-      line += '\n';
-      hasher.update(line);
-    }
+  s.train = build(full, assign, [](char a) { return a != kTest; });
+  s.train_minus_val = build(full, assign, [](char a) { return a == kTrainMinusVal; });
+  s.validation = collect(R, assign, kValidation);
+  s.test = collect(R, assign, kTest);
+  for (std::uint32_t u = 0; u < R.n_rows; ++u) {
+    if (R.row_size(u) >= cfg.min_ratings) s.eval_users.push_back(u);
   }
-  s.hash = hasher.hex_digest();
-
-  std::uint64_t n_test_total = 0, n_cold = 0;
-  for (std::uint32_t u = 0; u < n_users; ++u) {
-    for (const Rating& r : s.test[u]) {
-      ++n_test_total;
-      if (s.train.by_item.row_size(r.item) == 0) ++n_cold;
-    }
-  }
-  s.cold_item_share =
-      n_test_total == 0 ? 0.0 : static_cast<double>(n_cold) / static_cast<double>(n_test_total);
+  s.hash = hash_split(cfg, R, assign);
+  s.cold_item_share = cold_share(s.train, s.test);
   return s;
 }
 
