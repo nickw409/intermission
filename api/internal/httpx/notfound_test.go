@@ -14,6 +14,7 @@ import (
 func TestUnmatchedAPIRoutesAnswerErrorJSON(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/x", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("GET /api/item/{id}", func(w http.ResponseWriter, r *http.Request) {
 		apperr.WriteError(w, http.StatusNotFound, apperr.CodeNotFound, "movie not found")
 	})
@@ -29,6 +30,8 @@ func TestUnmatchedAPIRoutesAnswerErrorJSON(t *testing.T) {
 		{"GET", "/api/x/deeper", 404, apperr.CodeNotFound, ""},
 		{"DELETE", "/api/x", 405, apperr.CodeBadRequest, "GET, HEAD"},
 		{"POST", "/api/x", 405, apperr.CodeBadRequest, "GET, HEAD"},
+		{"POST", "/healthz", 405, apperr.CodeBadRequest, "GET, HEAD"},
+		{"OPTIONS", "/healthz", 405, apperr.CodeBadRequest, "GET, HEAD"},
 	} {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, sameSiteReq(c.method, c.path, nil))

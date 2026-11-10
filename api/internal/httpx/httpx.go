@@ -119,12 +119,12 @@ func Wrap(h http.Handler, d *app.Deps) http.Handler {
 	})
 }
 
-// unmatchedAPI reports whether r is under /api/ and matches no registered
+// unmatchedAPI reports whether r is under /api/ (or is /healthz) and matches no registered
 // pattern of h (an *http.ServeMux), so the mux itself will answer 404 or
 // 405 in plain text.
 func unmatchedAPI(h http.Handler, r *http.Request) bool {
 	mux, ok := h.(*http.ServeMux)
-	if !ok || !strings.HasPrefix(r.URL.Path, "/api/") {
+	if !ok || (!strings.HasPrefix(r.URL.Path, "/api/") && r.URL.Path != "/healthz") {
 		return false
 	}
 	_, pattern := mux.Handler(r)
