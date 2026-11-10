@@ -90,8 +90,8 @@ func Register(mux *http.ServeMux, d *app.Deps) {
 
 // options are the parts tests replace.
 type options struct {
-	apiBase   string // default defaultAPIBase
-	imageBase string // default defaultImageBase
+	apiBase   string            // default defaultAPIBase
+	imageBase string            // default defaultImageBase
 	limiter   *ratelimit.Global // upstream (TMDB); default UpstreamLimit
 	lookup    *ratelimit.Global // movie lookups; default LookupLimit
 	timeout   time.Duration
