@@ -65,6 +65,16 @@ func TestOpenPoolsAndPragmas(t *testing.T) {
 	}
 }
 
+// latestVersion is the number of embedded migrations.
+func latestVersion(t *testing.T) int {
+	t.Helper()
+	ms, err := loadMigrations(embedded())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(ms)
+}
+
 // columns returns "name type notnull dflt pk" for every column of table.
 func columns(t *testing.T, conn *sql.DB, table string) []string {
 	t.Helper()
@@ -91,7 +101,7 @@ func TestMigrateFreshSchemaMatchesSpec(t *testing.T) {
 	if err := d.Migrate(ctx, quietLogger()); err != nil {
 		t.Fatal(err)
 	}
-	if v, err := d.Version(ctx); err != nil || v != 1 {
+	if v, err := d.Version(ctx); err != nil || v != latestVersion(t) {
 		t.Fatalf("version = %d, %v", v, err)
 	}
 	want := map[string][]string{
@@ -155,7 +165,7 @@ func TestMigrateTwiceIsNoop(t *testing.T) {
 			t.Fatalf("run %d: %v", i, err)
 		}
 	}
-	if v, _ := d.Version(ctx); v != 1 {
+	if v, _ := d.Version(ctx); v != latestVersion(t) {
 		t.Fatalf("version = %d", v)
 	}
 	if _, err := os.Stat(filepath.Join(filepath.Dir(path), "backups")); !os.IsNotExist(err) {
