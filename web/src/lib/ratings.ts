@@ -68,16 +68,27 @@ export function useOptimisticRatings(): OptimisticRatings {
   const saved = useRef(new Map<number, RatingValue>()); // last value the server accepted
   const latest = useRef(new Map<number, number>()); // newest save attempt per movie
   const counter = useRef(0);
+  // A save can settle after the page unmounts (the user navigated away); drop its state updates.
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
-  const setOverride = (movieId: number, value: RatingValue) =>
-    setOverrides((current) => new Map(current).set(movieId, value));
-  const setError = (movieId: number, message: string | undefined) =>
+  const setOverride = (movieId: number, value: RatingValue) => {
+    if (mounted.current) setOverrides((current) => new Map(current).set(movieId, value));
+  };
+  const setError = (movieId: number, message: string | undefined) => {
+    if (!mounted.current) return;
     setErrors((current) => {
       const next = new Map(current);
       if (message === undefined) next.delete(movieId);
       else next.set(movieId, message);
       return next;
     });
+  };
 
   const rate = useCallback(async (movieId: number, next: RatingValue, current: RatingValue) => {
     const attempt = ++counter.current;
