@@ -125,6 +125,12 @@ void parallel_rows(std::size_t n, Body&& body) {
 // ---------------------------------------------------------------------------------------------
 // Config
 
+namespace {
+constexpr double kMinLambda = 1e-6;
+constexpr double kMaxLambda = 1e6;
+constexpr double kMaxAlpha = 1e6;
+}  // namespace
+
 Params parse_config(const Config& cfg) {
   if (!cfg.is_object()) throw std::invalid_argument("als config must be a JSON object");
   static const std::set<std::string> known{"k", "lambda", "alpha", "iters", "interaction_threshold", "init_sd"};
@@ -158,8 +164,14 @@ Params parse_config(const Config& cfg) {
   p.alpha = number("alpha", d.alpha);
   p.interaction_threshold = static_cast<float>(number("interaction_threshold", d.interaction_threshold));
   p.init_sd = number("init_sd", d.init_sd);
+  // lambda keeps every solve well conditioned; with a vanishing lambda (1e-300) and tiny factors
+  // the fold-in solve overflowed to infinity and scores became NaN (audit SA2-7). The bounds hold
+  // at fit and at load. Tuned values are 0.01-50 (configs/als.json: 0.05) and alpha 1-40.
   if (!(p.lambda > 0.0)) throw std::invalid_argument("als config: 'lambda' must be > 0");
+  if (!(p.lambda >= kMinLambda && p.lambda <= kMaxLambda))
+    throw std::invalid_argument("als config: 'lambda' must be in [1e-6, 1e6]");
   if (!(p.alpha >= 0.0)) throw std::invalid_argument("als config: 'alpha' must be >= 0");
+  if (!(p.alpha <= kMaxAlpha)) throw std::invalid_argument("als config: 'alpha' must be <= 1e6");
   if (!(p.init_sd > 0.0)) throw std::invalid_argument("als config: 'init_sd' must be > 0");
   if (!(p.interaction_threshold > 0.0f && p.interaction_threshold <= 5.0f))
     throw std::invalid_argument("als config: 'interaction_threshold' must be in (0, 5]");
@@ -434,6 +446,9 @@ class AlsModel final : public Model {
     UserState s;
     s.ratings.assign(ratings.begin(), ratings.end());
     s.vec.assign(x.begin(), x.end());  // double -> float32
+    // Defensive: the load-time bounds keep this finite; never hand score() an inf/NaN vector.
+    for (const float v : s.vec)
+      if (!std::isfinite(v)) throw std::runtime_error("als: fold-in produced a non-finite user vector");
     return s;
   }
 
@@ -465,6 +480,9 @@ class AlsModel final : public Model {
   // User factors are not saved (contracts/artifact.md rule 7); a loaded model serves fold-in only.
   void save(const fs::path& dir) const override {
     require_fitted();
+    // The same bound load() applies, so a bad model fails at train time rather than at load.
+    for (float y : Y_)
+      if (!factor_in_range(y)) throw std::runtime_error("als: item factor non-finite or out of range; not saved");
     write_file(dir / "config.json", ad::to_config(params_).dump(2) + "\n");
     std::string buf;
     buf.reserve(kHeaderBytes + has_data_.size() + Y_.size() * sizeof(float));
@@ -501,7 +519,7 @@ class AlsModel final : public Model {
     std::vector<float> Y(n_values);
     std::memcpy(Y.data(), buf.data() + pos, n_values * sizeof(float));
     for (float y : Y)
-      if (!std::isfinite(y)) throw std::runtime_error("als: factors.bin has a non-finite factor");
+      if (!factor_in_range(y)) throw std::runtime_error("als: factors.bin has a non-finite or out of range factor");
 
     params_ = p;
     n_items_ = n_items;
@@ -529,6 +547,10 @@ class AlsModel final : public Model {
   std::string training_curve_metric() const override { return "objective"; }
 
  private:
+  // |y| <= 1e6 (false for NaN and infinity). With lambda >= 1e-6 and alpha <= 1e6 this keeps the
+  // fold-in solution and every score far inside float range; trained factors are O(1).
+  static bool factor_in_range(float y) { return std::abs(double{y}) <= 1e6; }
+
   void require_fitted() const {
     if (!fitted_) throw std::logic_error("als: model is not fitted or loaded");
   }

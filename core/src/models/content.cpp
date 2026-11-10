@@ -307,6 +307,11 @@ class ContentModel final : public Model {
       values[k] = s.ratings[k].value;
     }
     s.vec = build_profile(items, values, s.mean);
+    // Defensive: inputs are finite and stored features are in (0, 1], so this cannot fire; never
+    // hand score() an inf/NaN profile.
+    if (!std::isfinite(s.mean)) throw std::runtime_error("content: fold-in produced a non-finite user mean");
+    for (const float v : s.vec)
+      if (!std::isfinite(v)) throw std::runtime_error("content: fold-in produced a non-finite profile");
     return s;
   }
 
