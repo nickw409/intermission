@@ -96,6 +96,7 @@
 
 #include "recs/model.hpp"
 #include "recs/sha256.hpp"
+#include "sparse/offsets.hpp"
 
 namespace recs {
 namespace {
@@ -460,9 +461,9 @@ class ContentModel final : public Model {
     f.indptr = in.get_array<std::uint64_t>(static_cast<std::uint64_t>(n_items) + 1);
     f.indices = in.get_array<std::uint32_t>(nnz);
     f.values = in.get_array<float>(nnz);
-    if (f.indptr.front() != 0 || f.indptr.back() != nnz) Reader::fail("bad row pointers");
+    // Validate the whole offset array before walking any row (audit SA2-1).
+    if (const auto err = recs::detail::check_row_offsets(f.indptr, n_items, nnz)) Reader::fail("bad " + *err);
     for (std::uint32_t r = 0; r < n_items; ++r) {
-      if (f.indptr[r] > f.indptr[r + 1]) Reader::fail("bad row pointers");
       const auto idx = f.row_indices(r);
       for (std::size_t t = 0; t < idx.size(); ++t) {
         if (idx[t] >= n_features) Reader::fail("feature index out of range");

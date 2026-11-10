@@ -115,6 +115,7 @@
 
 #include "models/item_knn_detail.hpp"
 #include "recs/model.hpp"
+#include "sparse/offsets.hpp"
 
 namespace recs {
 
@@ -587,11 +588,12 @@ class ItemKnn final : public Model {
     std::vector<float> sims(nnz);
     for (auto& v : sims) v = r.f32();
 
-    if (ptr.front() != 0 || ptr.back() != nnz) throw std::runtime_error("knn: bad row offsets");
+    // Validate the whole offset array before walking any row (audit SA2-1).
+    if (const auto err = recs::detail::check_row_offsets(ptr, n_items, nnz)) throw std::runtime_error("knn: bad " + *err);
     // seen_in_row[j] == i + 1 marks j as already listed in row i (catches duplicate ids).
     std::vector<std::uint32_t> seen_in_row(n_items, 0);
     for (std::uint32_t i = 0; i < n_items; ++i) {
-      if (ptr[i] > ptr[i + 1] || ptr[i + 1] - ptr[i] > p.neighbors) throw std::runtime_error("knn: bad row offsets");
+      if (ptr[i + 1] - ptr[i] > p.neighbors) throw std::runtime_error("knn: bad row offsets");
       for (std::uint64_t e = ptr[i]; e < ptr[i + 1]; ++e) {
         if (items[e] >= n_items || items[e] == i) throw std::runtime_error("knn: bad neighbour id");
         if (seen_in_row[items[e]] == i + 1) throw std::runtime_error("knn: duplicate neighbour id");
