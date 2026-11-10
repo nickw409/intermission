@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -606,6 +607,56 @@ func TestGetMeCountsRatings(t *testing.T) {
 	}
 	if cc := rec.Header().Get("Cache-Control"); !strings.Contains(cc, "no-store") {
 		t.Fatalf("Cache-Control %q", cc)
+	}
+}
+
+// Security audit SA1-1 / SA5-3: deleting an account tells the rest of the
+// process (recommendation cache, rate limits) to forget that user ID, and
+// checkpoints the WAL so the deleted rows' old pages don't linger in it.
+func TestDeleteMeNotifiesAndCheckpoints(t *testing.T) {
+	h := newHarness(t, app.SignupOpen)
+	var mu sync.Mutex
+	var notified []int64
+	h.db.OnUserDeleted(func(uid int64) {
+		mu.Lock()
+		defer mu.Unlock()
+		notified = append(notified, uid)
+	})
+	token := h.mustSignup("alice", goodPass)
+	var id int64
+	if err := h.db.Reader.QueryRow("SELECT id FROM users WHERE username = 'alice'").Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	if rec := h.do("DELETE", "/api/me", nil, token); rec.Code != 204 {
+		t.Fatalf("delete: %d", rec.Code)
+	}
+	mu.Lock()
+	got := append([]int64(nil), notified...)
+	mu.Unlock()
+	if len(got) != 1 || got[0] != id {
+		t.Fatalf("user-deleted hooks got %v, want [%d]", got, id)
+	}
+	// The checkpoint runs in the background, soon after.
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		st, err := os.Stat(h.db.Path() + "-wal")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Size() == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("WAL still holds %d bytes 5 s after an account deletion", st.Size())
+		}
+	}
+	// A failed delete (no session) notifies nobody.
+	if rec := h.do("DELETE", "/api/me", nil, token); rec.Code != 401 {
+		t.Fatalf("second delete: %d", rec.Code)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(notified) != 1 {
+		t.Fatalf("hooks ran %d times", len(notified))
 	}
 }
 

@@ -69,6 +69,9 @@ services:
       RECS_LOG_LEVEL: ${RECS_LOG_LEVEL:-info}
       TMDB_API_KEY: ${TMDB_API_KEY:-}
       TMPDIR: /tmp
+      # Soft heap limit below mem_limit (768m): the Go GC works harder near it instead of
+      # letting a burst grow the heap into an OOM kill. Also applies to `run api export-ratings`.
+      GOMEMLIMIT: 512MiB
     volumes:
       - ${RECS_DATA_DIR:-../data}/db:/srv/data/db
       - ${RECS_DATA_DIR:-../data}/exports:/srv/data/exports

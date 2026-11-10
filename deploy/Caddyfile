@@ -13,6 +13,9 @@
 	persist_config off
 
 	servers :8080 {
+		# HTTP/1.1 only. Funnel speaks HTTP/1.1 to us, and with h2c a client can hold a stream
+		# open far past these timeouts by trickling frames (security audit SA3-1).
+		protocols h1
 		timeouts {
 			read_header 5s
 			read_body 15s
@@ -25,9 +28,22 @@
 		# deploy/runbooks/funnel-setup.md ("Does Funnel pass the client IP?").
 	}
 
+	# Caddy's own logs (startup, and http.log.error lines, which carry the request). Filtered
+	# like the access log below (keep the two field lists in sync).
 	log {
 		output stdout
-		format json
+		format filter {
+			wrap json
+			fields {
+				request>uri regexp \?.*$ ""
+				request>headers delete
+				request>remote_ip delete
+				request>remote_port delete
+				request>client_ip delete
+				request>tls delete
+				resp_headers delete
+			}
+		}
 	}
 }
 
@@ -35,23 +51,56 @@
 	header {
 		defer
 		Strict-Transport-Security "max-age=31536000"
-		Content-Security-Policy "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'"
+		# Set only if the response has none: recs-api sends a stricter sandbox CSP with poster
+		# placeholders (SVG) and it must survive (security audit SA5-7).
+		?Content-Security-Policy "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'"
 		X-Content-Type-Options "nosniff"
 		Referrer-Policy "strict-origin-when-cross-origin"
 		-Server
 		-Via
 		-X-Powered-By
+		# The request's id (set above) on responses that lack one; recs-api sets the same.
+		?X-Request-ID "{http.request.header.X-Request-ID}"
 	}
 }
 
 :8080 {
-	# JSON access log on stdout. Caddy redacts Cookie, Set-Cookie and Authorization by default.
+	# JSON access log on stdout with only what operations needs: method, path (the query string
+	# is cut off: it may carry search terms), status, duration, size and request_id (recs-api's
+	# X-Request-ID, set below, to correlate with its own log). No request or response headers (cookies,
+	# User-Agent, ...) and no client address (security audit SA3-2, SA5-2).
 	log {
 		output stdout
-		format json
+		format filter {
+			wrap json
+			fields {
+				request>uri regexp \?.*$ ""
+				request>headers delete
+				request>remote_ip delete
+				request>remote_port delete
+				request>client_ip delete
+				request>tls delete
+				resp_headers delete
+			}
+		}
 	}
+	# One request id per request, for every response including the ones Caddy makes itself
+	# (static files, 404, 413, 502): keep the incoming X-Request-ID only when there is exactly one
+	# and it is valid (recs-api's reqid.Valid rule: 1-64 of [A-Za-z0-9._-]); otherwise replace
+	# every value with a fresh UUID, before anything is proxied. recs-api reuses a valid incoming
+	# id, so its log, Caddy's log and the response all carry the same one. The placeholder joins
+	# repeated headers with ",", which the pattern rejects; header_regexp would instead accept
+	# the header if any one value matched.
+	@no_request_id {
+		not expression `{http.request.header.X-Request-ID}.matches("^[A-Za-z0-9._-]{1,64}$")`
+	}
+	request_header @no_request_id X-Request-ID {http.request.uuid}
+	log_append request_id {http.request.header.X-Request-ID}
 
-	encode zstd gzip
+	# gzip only. Caddy 2.11.9 bundles a klauspost/compress whose zstd path is affected by
+	# GO-2026-6865 (security audit SA4-2). Put zstd back (`encode zstd gzip`) once the pinned
+	# Caddy release ships a fixed klauspost/compress (check `govulncheck -mode=binary` on it).
+	encode gzip
 
 	# Applied to every response, including proxied ones (defer = run when the response is
 	# written, after the upstream's own headers). Errors Caddy raises itself are answered by
@@ -89,13 +138,20 @@
 		}
 	}
 
+	# Hashed build assets: served when they exist and cached forever; a missing one is a plain
+	# 404 (handle_errors), never index.html with an immutable cache header (security audit
+	# SA3-3).
+	handle /assets/* {
+		root * /srv/www
+		@exists file
+		header @exists Cache-Control "public, max-age=31536000, immutable"
+		file_server
+	}
+
 	# The SPA: real files when they exist, otherwise index.html (client-side routing).
 	handle {
 		root * /srv/www
-		@hashed path /assets/*
-		header @hashed Cache-Control "public, max-age=31536000, immutable"
-		@html not path /assets/*
-		header @html Cache-Control "no-cache"
+		header Cache-Control "no-cache"
 		try_files {path} /index.html
 		file_server
 	}
@@ -106,7 +162,7 @@
 	# body_too_large), the same answer recs-api gives.
 	handle_errors {
 		import security_headers
-		header X-Request-ID {http.request.uuid}
+		header X-Request-ID {http.request.header.X-Request-ID}
 		header Cache-Control no-store
 		@too_large expression {err.status_code} == 413
 		handle @too_large {
@@ -114,6 +170,13 @@
 			# Caddy's 64KB is 64,000 bytes (recs-api's own cap is 64 KiB = 65,536 bytes).
 			respond `{"error":{"code":"body_too_large","message":"request body exceeds 64,000 bytes"}}` 413
 		}
+		# Not handled here: a request body that stalls past read_body makes reverse_proxy write
+		# its own 499 with an empty body and close (caddy v2.11.9 reverseproxy.go:735-742, the
+		# request context is cancelled). It never reaches handle_errors, so it cannot be mapped
+		# to 408 from this file; it does get the deferred security headers above (audit SA3-5).
+		# When recs-api's own 15 s ReadTimeout fires first instead, the client gets a 504 from
+		# here; telling that apart from a real upstream timeout isn't possible in this file.
+		# Tracked as open finding SA3-5b (owner decision); check_edge.sh reports it as XFAIL.
 		handle {
 			respond "" {err.status_code}
 		}
