@@ -40,6 +40,28 @@
 namespace recs::service {
 namespace {
 
+// Compile-time floor for cpp-httplib (audit SA4-6). Releases before 0.63.0 have known
+// request-parsing vulnerabilities; this stops a downgrade of the pin in cmake/deps.cmake from
+// building. The header defines CPPHTTPLIB_VERSION_NUM as a string literal such as "0x003f00"
+// (0xMMmmpp), so it is parsed here; the integer overload covers a header that switches to a number.
+[[maybe_unused]] consteval unsigned long long httplib_version_num(unsigned long long v) { return v; }
+consteval unsigned long long httplib_version_num(const char* s) {
+  if (s[0] != '0' || (s[1] != 'x' && s[1] != 'X')) return 0;
+  unsigned long long v = 0;
+  for (const char* p = s + 2; *p != '\0'; ++p) {
+    const char c = *p;
+    int d = -1;
+    if (c >= '0' && c <= '9') d = c - '0';
+    if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+    if (d < 0) return 0;
+    v = v * 16 + static_cast<unsigned long long>(d);
+  }
+  return v;
+}
+static_assert(httplib_version_num(CPPHTTPLIB_VERSION_NUM) >= 0x003f00,
+              "cpp-httplib 0.63.0 or newer is required (security fixes; audit SA4-6)");
+
 void write_response(const Response& r, httplib::Response& out) {
   out.status = r.status;
   out.set_content(r.body, r.content_type);
