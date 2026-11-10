@@ -1,1 +1,1 @@
-{ "min_tag_count": 2, "genre_weight": 1.0 }
+{ "min_tag_count": 2, "genre_weight": 1.0, "centering": "baseline", "user_damping": 100.0, "item_damping": 1000.0 }

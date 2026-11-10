@@ -31,12 +31,42 @@
 //   features at all has a zero vector and is never recommended (score -infinity).
 //
 // USER PROFILE (fold-in)
-//       mu_u = mean of the user's ratings,     p_u = sum_j (r_uj - mu_u) * v_j
-//   Mean-centering turns ratings into likes (+) and dislikes (-): a movie rated below the user's
-//   own average pushes the profile away from its features. The sum runs over the ratings in item
-//   order and is accumulated in double, then stored as float in UserState::vec.
-//   Note: if every rating equals the mean (one rating, or all ratings equal), p_u = 0 and nothing
-//   can be scored.
+//   The profile is a weighted sum of the rated movies' vectors:
+//       p_u = sum_j w_uj * v_j,     w_uj = r_uj - (m_u + b_j)
+//   Centering turns ratings into likes (w > 0) and dislikes (w < 0): a movie rated below what we
+//   expected pushes the profile away from its features. The question is what to expect.
+//
+//   Why not the user's own mean (m_u = mean of u's ratings, b_j = 0; the original spec)?
+//   The weights then sum to zero, sum_j w_uj = 0. Any feature f that every rated movie shares with
+//   the same value x gets p_u[f] = x * sum_j w_uj = 0: it cancels exactly. A user who rated only
+//   comedies, with mixed scores, gets no comedy signal at all, and the profile is driven by
+//   whatever separates their best comedies from their worst (one tag, say), which other genres
+//   share just as well. One rating, or all-equal ratings, give p_u = 0 and nothing can be scored.
+//   The user mean answers "which of these did u like more", not "what does u like".
+//
+//   Default ("baseline"): the residual of the damped baseline predictor (Koren 2010, sec. 2.1):
+//       mu  = mean of all training ratings
+//       b_i = sum_{u rated i} (r_ui - mu) / (beta_i + n_i)            (item bias, from training)
+//       b_u = sum_{j rated by u} (r_uj - mu - b_j) / (beta_u + n_u)   (user bias, at fold-in)
+//       m_u = mu + b_u
+//   so w_uj = r_uj - (mu + b_u + b_j). The user's deviation from the global mean is shrunk towards
+//   zero by beta_u "virtual ratings at mu", so a user with few ratings is compared with everybody,
+//   and the weights no longer sum to zero: rating comedies 2.5-5 when the average movie gets 3.5
+//   still says "comedy". The item bias removes what everybody thinks of the movie: a 4.0 for a
+//   film everybody rates 4.3 is mild disappointment, a 4.0 for one everybody rates 3.0 is real
+//   enthusiasm. beta_u = 100, beta_i = 1000 were chosen on the ml-latest-small validation split.
+//   The model keeps mu and b_i (centering.bin), so fold-in for a new website user uses exactly the
+//   statistics the batch path uses.
+//
+//   Other centerings (config "centering", for comparison; docs/phase-1.md has the table):
+//     "user_mean"         m_u = user mean, b_j = 0 (the original spec; fails the one-genre gate)
+//     "global_mean"       m_u = mu, b_j = 0
+//     "damped_user_mean"  m_u = (n_u * user mean + beta_u * mu) / (n_u + beta_u), b_j = 0
+//   ("damped_user_mean" is "baseline" without item biases; beta_u = 0 gives "user_mean" and
+//   beta_u -> infinity gives "global_mean".)
+//
+//   UserState::mean holds m_u. The sums run over the ratings in item order and are accumulated in
+//   double; the profile is then stored as float in UserState::vec.
 //
 // SCORE
 //       score(u, i) = cos(p_u, v_i) = (p_u . v_i) / (|p_u| |v_i|)
@@ -46,7 +76,7 @@
 //
 // EXPLANATION
 //   The score splits exactly into per-rated-movie contributions:
-//       score(u, i) = sum_j c_j,   c_j = (r_uj - mu_u) (v_j . v_i) / (|p_u| |v_i|)
+//       score(u, i) = sum_j c_j,   c_j = w_uj (v_j . v_i) / (|p_u| |v_i|)
 //   explain() cites the (at most 3) rated movies with the largest positive c_j.
 //
 // SIMILAR ITEMS
@@ -64,6 +94,10 @@
 //   indptr (u64 x (n_items + 1)), feature indices (u32 x nnz), values (f32 x nnz), then the SHA-256
 //   of everything before it. load() checks sizes against the file length before allocating and
 //   validates every invariant (also for a file with a correct checksum).
+//   centering.bin: little-endian; header {magic "RECSCTR1", u32 format version, u32 n_items,
+//   u32 centering, f64 user_damping, f64 item_damping, f64 mu, u32 has_item_bias} (48 bytes; the
+//   centering and dampings must match config.json), then b_i (f64 x n_items) for "baseline", then
+//   the SHA-256 of everything before it.
 //   config.json: the config fit() used. The training matrix is not saved, so a loaded model has no
 //   batch path (supports_trained_scoring() == false).
 //
@@ -78,6 +112,10 @@
 //     trends. In: Recommender Systems Handbook, 2011.
 //   J. Vig, S. Sen, J. Riedl. The Tag Genome: encoding community knowledge to support novel
 //     interaction. ACM TiiS 2(3), 2012.
+//   Y. Koren. Factor in the neighbors: scalable and accurate collaborative filtering. ACM TKDD
+//     4(1), 2010, sec. 2.1 (baseline predictors mu + b_u + b_i with shrunk biases).
+//   Y. Koren, R. Bell. Advances in collaborative filtering. In: Recommender Systems Handbook, 2011,
+//     sec. 5.2.1 (the same baseline estimates; why user and item effects are removed first).
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -109,21 +147,58 @@ constexpr std::uint32_t kFormatVersion = 1;
 constexpr std::uint32_t kFlagGenome = 1;
 constexpr const char* kFeaturesFile = "features.bin";
 constexpr const char* kConfigFile = "config.json";
+constexpr char kCenteringMagic[8] = {'R', 'E', 'C', 'S', 'C', 'T', 'R', '1'};
+constexpr std::uint32_t kCenteringVersion = 1;
+constexpr const char* kCenteringFile = "centering.bin";
+// Learned centering statistics are rating-scale quantities (|mu| <= 5, |b_i| <= 4.5 for MovieLens);
+// anything far outside that is a damaged file.
+constexpr double kMaxCenteringValue = 1e6;
 
 // ---------------------------------------------------------------------------------------------
 // Config
 
+/// How the profile centers a rating before weighting the movie's features (see USER PROFILE).
+enum class Centering : std::uint32_t { kUserMean = 0, kGlobalMean = 1, kDampedUserMean = 2, kBaseline = 3 };
+constexpr Centering kAllCenterings[] = {Centering::kUserMean, Centering::kGlobalMean, Centering::kDampedUserMean,
+                                        Centering::kBaseline};
+
+const char* centering_name(Centering c) {
+  switch (c) {
+    case Centering::kUserMean: return "user_mean";
+    case Centering::kGlobalMean: return "global_mean";
+    case Centering::kDampedUserMean: return "damped_user_mean";
+    case Centering::kBaseline: return "baseline";
+  }
+  return "?";
+}
+
 struct ContentConfig {
   std::int64_t min_tag_count = 2;
   double genre_weight = 1.0;
+  // Defaults chosen on the ml-latest-small validation split (docs/phase-1.md).
+  Centering centering = Centering::kBaseline;
+  double user_damping = 100.0;   // beta_u: damped_user_mean and baseline
+  double item_damping = 1000.0;  // beta_i: baseline only
 
-  Config to_json() const { return Config{{"min_tag_count", min_tag_count}, {"genre_weight", genre_weight}}; }
+  Config to_json() const {
+    return Config{{"min_tag_count", min_tag_count},
+                  {"genre_weight", genre_weight},
+                  {"centering", centering_name(centering)},
+                  {"user_damping", user_damping},
+                  {"item_damping", item_damping}};
+  }
 };
 
 ContentConfig parse_config(const Config& cfg) {
   ContentConfig c;
   if (cfg.is_null()) return c;
   if (!cfg.is_object()) throw std::invalid_argument("content config must be a JSON object");
+  const auto damping = [](const Config& value, const std::string& key) {
+    if (!value.is_number()) throw std::invalid_argument("content: " + key + " must be a number");
+    const double d = value.get<double>();
+    if (!std::isfinite(d) || d < 0.0 || d > 1e12) throw std::invalid_argument("content: " + key + " must be in [0, 1e12]");
+    return d;
+  };
   for (const auto& [key, value] : cfg.items()) {
     if (key == "min_tag_count") {
       if (!value.is_number_integer()) throw std::invalid_argument("content: min_tag_count must be an integer");
@@ -135,6 +210,20 @@ ContentConfig parse_config(const Config& cfg) {
       c.genre_weight = value.get<double>();
       if (!std::isfinite(c.genre_weight) || c.genre_weight < 0.0)
         throw std::invalid_argument("content: genre_weight must be finite and >= 0");
+    } else if (key == "centering") {
+      if (!value.is_string()) throw std::invalid_argument("content: centering must be a string");
+      const auto name = value.get<std::string>();
+      bool found = false;
+      for (Centering k : kAllCenterings)
+        if (name == centering_name(k)) {
+          c.centering = k;
+          found = true;
+        }
+      if (!found) throw std::invalid_argument("content: unknown centering '" + name + "'");
+    } else if (key == "user_damping") {
+      c.user_damping = damping(value, key);
+    } else if (key == "item_damping") {
+      c.item_damping = damping(value, key);
     } else {
       throw std::invalid_argument("content: unknown config key '" + key + "'");
     }
@@ -274,8 +363,32 @@ class ContentModel final : public Model {
       build_tfidf_features(train, c, features, n_terms, n_genres);
     }
 
+    // Centering statistics: the global mean of the training ratings and, for "baseline", damped
+    // item biases b_i = sum_u (r_ui - mu) / (item_damping + n_i). Sums run user by user (CSR
+    // order), sequentially, in double.
+    double global_mean = 0.0;
+    std::vector<double> item_bias;
+    {
+      double sum = 0.0;
+      for (float v : train.by_user.values) sum += static_cast<double>(v);
+      if (!train.by_user.values.empty()) global_mean = sum / static_cast<double>(train.by_user.values.size());
+      if (c.centering == Centering::kBaseline) {
+        std::vector<double> dev(n_items, 0.0), count(n_items, 0.0);
+        for (std::size_t k = 0; k < train.by_user.indices.size(); ++k) {
+          const auto i = train.by_user.indices[k];
+          dev[i] += static_cast<double>(train.by_user.values[k]) - global_mean;
+          count[i] += 1.0;
+        }
+        item_bias.assign(n_items, 0.0);
+        for (std::uint32_t i = 0; i < n_items; ++i)
+          if (count[i] > 0.0) item_bias[i] = dev[i] / (c.item_damping + count[i]);
+      }
+    }
+
     // Commit (fit() either succeeds completely or leaves the model as it was).
     cfg_ = c;
+    global_mean_ = global_mean;
+    item_bias_ = std::move(item_bias);
     n_items_ = n_items;
     n_terms_ = n_terms;
     n_genres_ = n_genres;
@@ -330,7 +443,7 @@ class ContentModel final : public Model {
     const auto iv = features_.row_values(item);
     for (const auto& r : u.ratings) {
       if (r.item >= n_items_) throw std::invalid_argument("content: user state cites an unknown item");
-      const double w = static_cast<double>(r.value) - u.mean;
+      const double w = static_cast<double>(r.value) - u.mean - item_bias(r.item);
       if (w == 0.0) continue;
       const double c = w * sparse_dot(features_.row_indices(r.item), features_.row_values(r.item), ii, iv) /
                        (p_norm * norms_[item]);
@@ -411,6 +524,7 @@ class ContentModel final : public Model {
     const auto digest = sha.digest();
     bytes.append(reinterpret_cast<const char*>(digest.data()), digest.size());
     write_file(dir / kFeaturesFile, bytes);
+    write_file(dir / kCenteringFile, centering_bytes());
     write_file(dir / kConfigFile, cfg_.to_json().dump());
   }
 
@@ -480,7 +594,13 @@ class ContentModel final : public Model {
     for (float v : f.values)
       if (!(v > 0.0f && v <= 1.0f)) Reader::fail("feature value out of range");
 
+    double global_mean = 0.0;
+    std::vector<double> item_bias;
+    read_centering(read_file(dir / kCenteringFile), c, n_items, global_mean, item_bias);
+
     cfg_ = c;
+    global_mean_ = global_mean;
+    item_bias_ = std::move(item_bias);
     n_items_ = n_items;
     n_features_ = n_features;
     n_terms_ = n_terms;
@@ -609,22 +729,100 @@ class ContentModel final : public Model {
     }
   }
 
-  /// p = sum_k (values[k] - mean) v_{items[k]}, in the order given, accumulated in double.
+  /// centering.bin: header {magic "RECSCTR1", u32 version, u32 n_items, u32 centering,
+  /// f64 user_damping, f64 item_damping, f64 global_mean, u32 has_item_bias} (48 bytes), then
+  /// item_bias (f64 x n_items) when has_item_bias is 1, then the SHA-256 of everything before it.
+  std::string centering_bytes() const {
+    std::string bytes;
+    bytes.append(kCenteringMagic, sizeof kCenteringMagic);
+    append_bytes(bytes, kCenteringVersion);
+    append_bytes(bytes, n_items_);
+    append_bytes(bytes, static_cast<std::uint32_t>(cfg_.centering));
+    append_bytes(bytes, cfg_.user_damping);
+    append_bytes(bytes, cfg_.item_damping);
+    append_bytes(bytes, global_mean_);
+    append_bytes(bytes, static_cast<std::uint32_t>(item_bias_.empty() ? 0 : 1));
+    append_array(bytes, item_bias_);
+    Sha256 sha;
+    sha.update(std::string_view(bytes));
+    const auto digest = sha.digest();
+    bytes.append(reinterpret_cast<const char*>(digest.data()), digest.size());
+    return bytes;
+  }
+
+  /// Parses and validates centering.bin against the config and the feature file's n_items.
+  static void read_centering(const std::string& bytes, const ContentConfig& c, std::uint32_t n_items,
+                             double& global_mean, std::vector<double>& item_bias) {
+    constexpr std::size_t kDigest = 32;
+    const auto fail = [](const std::string& why) { Reader::fail("centering.bin: " + why); };
+    if (bytes.size() < sizeof kCenteringMagic + kDigest) fail("truncated");
+    const std::size_t body = bytes.size() - kDigest;
+    Sha256 sha;
+    sha.update(std::string_view(bytes.data(), body));
+    const auto digest = sha.digest();
+    if (std::memcmp(digest.data(), bytes.data() + body, kDigest) != 0) fail("checksum mismatch");
+
+    Reader in(bytes, body);
+    const auto magic = in.get<std::array<char, 8>>();
+    if (std::memcmp(magic.data(), kCenteringMagic, sizeof kCenteringMagic) != 0) fail("bad magic");
+    if (in.get<std::uint32_t>() != kCenteringVersion) fail("unsupported format version");
+    if (in.get<std::uint32_t>() != n_items) fail("n_items does not match the feature file");
+    const auto centering = in.get<std::uint32_t>();
+    const auto user_damping = in.get<double>();
+    const auto item_damping = in.get<double>();
+    if (centering != static_cast<std::uint32_t>(c.centering) ||
+        std::bit_cast<std::uint64_t>(user_damping) != std::bit_cast<std::uint64_t>(c.user_damping) ||
+        std::bit_cast<std::uint64_t>(item_damping) != std::bit_cast<std::uint64_t>(c.item_damping))
+      fail("config.json does not match the centering file");
+    global_mean = in.get<double>();
+    if (!(std::abs(global_mean) <= kMaxCenteringValue)) fail("global mean out of range");
+    const auto has_item_bias = in.get<std::uint32_t>();
+    if (has_item_bias != (c.centering == Centering::kBaseline ? 1u : 0u)) fail("item-bias flag does not match the centering");
+    const std::uint64_t expected = has_item_bias ? static_cast<std::uint64_t>(n_items) * 8 : 0;
+    if (body - in.pos() != expected) fail("size does not match the header");
+    item_bias = has_item_bias ? in.get_array<double>(n_items) : std::vector<double>{};
+    for (double b : item_bias)
+      if (!(std::abs(b) <= kMaxCenteringValue)) fail("item bias out of range");
+  }
+
+  /// b_j for the "baseline" centering, 0 otherwise.
+  double item_bias(std::uint32_t item) const { return item_bias_.empty() ? 0.0 : item_bias_[item]; }
+
+  /// The user's reference value m_u (see USER PROFILE), from the ratings in the order given.
+  double reference(std::span<const std::uint32_t> items, std::span<const float> values) const {
+    const auto n = static_cast<double>(values.size());
+    double sum = 0.0;  // sum of r_uj (or of r_uj - mu - b_j for "baseline")
+    switch (cfg_.centering) {
+      case Centering::kUserMean:
+        for (float v : values) sum += static_cast<double>(v);
+        return values.empty() ? 0.0 : sum / n;
+      case Centering::kGlobalMean:
+        return global_mean_;
+      case Centering::kDampedUserMean:
+        for (float v : values) sum += static_cast<double>(v);
+        if (n + cfg_.user_damping == 0.0) return global_mean_;
+        return (sum + cfg_.user_damping * global_mean_) / (n + cfg_.user_damping);
+      case Centering::kBaseline:
+        for (std::size_t k = 0; k < items.size(); ++k)
+          sum += static_cast<double>(values[k]) - global_mean_ - item_bias(items[k]);
+        if (n + cfg_.user_damping == 0.0) return global_mean_;
+        return global_mean_ + sum / (n + cfg_.user_damping);
+    }
+    return 0.0;
+  }
+
+  /// p = sum_k (values[k] - m_u - b_{items[k]}) v_{items[k]}, in the order given, accumulated in
+  /// double. Sets `mean` to m_u.
   std::vector<float> build_profile(std::span<const std::uint32_t> items, std::span<const float> values,
                                    double& mean) const {
-    mean = 0.0;
+    mean = reference(items, values);
     std::vector<double> p(n_features_, 0.0);
-    if (!items.empty()) {
-      double sum = 0.0;
-      for (float v : values) sum += static_cast<double>(v);
-      mean = sum / static_cast<double>(values.size());
-      for (std::size_t k = 0; k < items.size(); ++k) {
-        const double w = static_cast<double>(values[k]) - mean;
-        if (w == 0.0) continue;
-        const auto fi = features_.row_indices(items[k]);
-        const auto fv = features_.row_values(items[k]);
-        for (std::size_t t = 0; t < fi.size(); ++t) p[fi[t]] += w * static_cast<double>(fv[t]);
-      }
+    for (std::size_t k = 0; k < items.size(); ++k) {
+      const double w = static_cast<double>(values[k]) - mean - item_bias(items[k]);
+      if (w == 0.0) continue;
+      const auto fi = features_.row_indices(items[k]);
+      const auto fv = features_.row_values(items[k]);
+      for (std::size_t t = 0; t < fi.size(); ++t) p[fi[t]] += w * static_cast<double>(fv[t]);
     }
     return std::vector<float>(p.begin(), p.end());
   }
@@ -679,6 +877,8 @@ class ContentModel final : public Model {
   }
 
   ContentConfig cfg_;
+  double global_mean_ = 0.0;       // mu, the mean training rating
+  std::vector<double> item_bias_;  // b_i ("baseline" centering only; empty otherwise)
   std::uint32_t n_items_ = 0;
   std::uint32_t n_features_ = 0;
   std::uint32_t n_terms_ = 0;

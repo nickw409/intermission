@@ -368,3 +368,77 @@ TEST_CASE("Content load: structurally invalid files with a valid checksum are re
   CHECK_NOTHROW(target->load(dir.path()));
   CHECK(bitwise_equal(scores_of(*target, state), before));
 }
+
+TEST_CASE("Content load: a damaged centering file is rejected, never trusted", "[content][persist]") {
+  // centering.bin layout, from the format comment in content.cpp: a 48-byte header
+  //   0 magic[8] | 8 u32 version | 12 u32 n_items | 16 u32 centering | 20 f64 user_damping
+  //   28 f64 item_damping | 36 f64 mu | 44 u32 has_item_bias
+  // then b_i (f64 x n_items) for "baseline", SHA-256 (32 bytes).
+  Rng rng(2718);
+  const auto ds = random_dataset(rng, 10, 40, 0.3);
+  for (const char* centering : {"baseline", "global_mean"}) {
+    INFO("centering " << centering);
+    const bool baseline = std::string_view(centering) == "baseline";
+    auto trained = make_content();
+    trained->fit(ds, Config{{"centering", centering}}, TrainContext{});
+    ScratchDir dir;
+    trained->save(dir.path());
+    const auto bin = dir.path() / "centering.bin";
+    const auto cfg = dir.path() / "config.json";
+    const std::string good = read_file(bin);
+    REQUIRE(good.size() == 48 + (baseline ? 8 * ds.n_items() : 0) + 32);
+
+    auto target = make_content();
+    target->load(dir.path());
+    const auto state = target->fold_in(user_ratings(ds, 0));
+    const auto before = scores_of(*target, state);
+
+    using Corrupt = std::function<void(std::string&)>;
+    std::vector<std::pair<std::string, Corrupt>> cases{
+        {"magic", [](std::string& b) { b[0] = 'X'; }},
+        {"format version", [](std::string& b) { put<std::uint32_t>(b, 8, 2); }},
+        {"n_items != feature file", [&](std::string& b) { put<std::uint32_t>(b, 12, ds.n_items() + 1); }},
+        {"centering != config.json", [&](std::string& b) { put<std::uint32_t>(b, 16, baseline ? 1 : 3); }},
+        {"unknown centering", [](std::string& b) { put<std::uint32_t>(b, 16, 77); }},
+        {"user_damping != config.json", [](std::string& b) { put<double>(b, 20, 3.0); }},
+        {"item_damping != config.json", [](std::string& b) { put<double>(b, 28, 3.0); }},
+        {"mu NaN", [](std::string& b) { put(b, 36, std::numeric_limits<double>::quiet_NaN()); }},
+        {"mu infinity", [](std::string& b) { put(b, 36, std::numeric_limits<double>::infinity()); }},
+        {"mu 1e300", [](std::string& b) { put(b, 36, 1e300); }},
+        {"item-bias flag flipped", [&](std::string& b) { put<std::uint32_t>(b, 44, baseline ? 0 : 1); }},
+        {"item-bias flag 2", [](std::string& b) { put<std::uint32_t>(b, 44, 2); }},
+    };
+    if (baseline) {
+      cases.push_back({"b_i NaN", [](std::string& b) { put(b, 48, std::numeric_limits<double>::quiet_NaN()); }});
+      cases.push_back({"b_i -1e300", [&](std::string& b) { put(b, 48 + 8 * (ds.n_items() - 1), -1e300); }});
+      cases.push_back({"b_i array cut short", [](std::string& b) { b.erase(48, 8); }});
+    } else {
+      cases.push_back({"unexpected b_i array", [](std::string& b) { b.insert(48, std::string(8, '\0')); }});
+    }
+    for (const auto& [what, corrupt] : cases) {
+      INFO(what);
+      std::string bad = good;
+      corrupt(bad);
+      REQUIRE(bad != good);
+      reseal(bad);
+      write_file(bin, bad);
+      CHECK_THROWS(target->load(dir.path()));
+      CHECK(bitwise_equal(scores_of(*target, state), before));
+    }
+    write_file(bin, good);
+
+    // config.json valid on its own but naming another centering or damping.
+    const std::string good_cfg = read_file(cfg);
+    auto other = Config::parse(good_cfg);
+    other["centering"] = baseline ? "global_mean" : "baseline";
+    write_file(cfg, other.dump());
+    CHECK_THROWS(target->load(dir.path()));
+    other = Config::parse(good_cfg);
+    other["user_damping"] = 7.0;
+    write_file(cfg, other.dump());
+    CHECK_THROWS(target->load(dir.path()));
+    write_file(cfg, good_cfg);
+    CHECK_NOTHROW(target->load(dir.path()));
+    CHECK(bitwise_equal(scores_of(*target, state), before));
+  }
+}
