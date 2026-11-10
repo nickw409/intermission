@@ -4,7 +4,12 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
+#include <functional>
+#include <limits>
+#include <string_view>
+#include <utility>
 #include <fstream>
 #include <iterator>
 #include <string>
@@ -17,6 +22,7 @@
 #include "content_fixtures.hpp"
 #include "property.hpp"
 #include "recs/model.hpp"
+#include "recs/sha256.hpp"
 
 using namespace recs;
 using namespace recs::testing::content;
@@ -200,15 +206,7 @@ TEST_CASE("Content load: damaged or hostile files are rejected, never trusted", 
   }
   INFO("rejected " << rejected << " of " << positions);
   CHECK(rejected > 0);
-
-  // Huge counts in the header are rejected before anything is allocated.
-  std::string huge = good;
-  for (std::size_t k = 8; k < std::min<std::size_t>(64, huge.size()); ++k) huge[k] = static_cast<char>(0xFF);
-  write_file(bin, huge);
-  {
-    auto m = make_content();
-    CHECK_THROWS(m->load(dir.path()));
-  }
+  // (Header and structure checks behind a valid checksum are tested below, with the file resealed.)
   write_file(bin, good);
   auto ok = make_content();
   CHECK_NOTHROW(ok->load(dir.path()));
@@ -228,4 +226,145 @@ TEST_CASE("Content: score_trained_user is unavailable after load (no training ma
   std::vector<float> out(loaded->n_items());
   CHECK_THROWS_AS(loaded->score_trained_user(0, out), NotImplemented);
   CHECK_THROWS_AS(trained->score_trained_user(ds.n_users(), out), std::out_of_range);
+}
+
+namespace {
+
+// features.bin layout, from the format comment in content.cpp: a 52-byte header
+//   0 magic[8] | 8 u32 version | 12 u32 n_items | 16 u32 n_features | 20 u32 n_terms
+//   24 u32 n_genres | 28 u32 flags | 32 u64 nnz | 40 u32 min_tag_count | 44 f64 genre_weight
+// then indptr (u64 x n_items+1), indices (u32 x nnz), values (f32 x nnz), SHA-256 (32 bytes).
+struct Layout {
+  std::uint32_t n_items = 0, n_features = 0, n_terms = 0, n_genres = 0;
+  std::uint64_t nnz = 0;
+  std::size_t indptr_at = 52, indices_at = 0, values_at = 0;
+};
+
+template <class T>
+T get(const std::string& b, std::size_t at) {
+  T v;
+  std::memcpy(&v, b.data() + at, sizeof(T));
+  return v;
+}
+template <class T>
+void put(std::string& b, std::size_t at, T v) {
+  std::memcpy(b.data() + at, &v, sizeof(T));
+}
+
+Layout layout_of(const std::string& b) {
+  Layout l;
+  l.n_items = get<std::uint32_t>(b, 12);
+  l.n_features = get<std::uint32_t>(b, 16);
+  l.n_terms = get<std::uint32_t>(b, 20);
+  l.n_genres = get<std::uint32_t>(b, 24);
+  l.nnz = get<std::uint64_t>(b, 32);
+  l.indices_at = l.indptr_at + (static_cast<std::size_t>(l.n_items) + 1) * 8;
+  l.values_at = l.indices_at + l.nnz * 4;
+  REQUIRE(l.values_at + l.nnz * 4 + 32 == b.size());
+  return l;
+}
+
+/// Recomputes the trailing SHA-256 so that a corruption gets past the checksum and reaches the
+/// structural checks.
+void reseal(std::string& b) {
+  Sha256 sha;
+  sha.update(std::string_view(b.data(), b.size() - 32));
+  const auto d = sha.digest();
+  std::memcpy(b.data() + b.size() - 32, d.data(), 32);
+}
+
+}  // namespace
+
+TEST_CASE("Content load: structurally invalid files with a valid checksum are rejected", "[content][persist]") {
+  Rng rng(31337);
+  const auto ds = random_dataset(rng, 10, 40, 0.3);
+  auto trained = make_content();
+  trained->fit(ds, Config::object(), TrainContext{});
+  ScratchDir dir;
+  trained->save(dir.path());
+  const auto bin = dir.path() / "features.bin";
+  const auto cfg = dir.path() / "config.json";
+  const std::string good = read_file(bin);
+  const Layout l = layout_of(good);
+  REQUIRE(l.nnz >= 2);
+  REQUIRE(l.n_genres > 0);  // the genome-flag case relies on genre features being present
+
+  // A loaded model that every failed load() below must leave untouched.
+  auto target = make_content();
+  target->load(dir.path());
+  const auto state = target->fold_in(user_ratings(ds, 0));
+  const auto before = scores_of(*target, state);
+
+  std::uint32_t max_index = 0;
+  for (std::uint64_t k = 0; k < l.nnz; ++k) max_index = std::max(max_index, get<std::uint32_t>(good, l.indices_at + 4 * k));
+  std::uint32_t row_with_two = l.n_items;
+  for (std::uint32_t r = 0; r < l.n_items && row_with_two == l.n_items; ++r)
+    if (get<std::uint64_t>(good, l.indptr_at + 8 * (r + 1)) - get<std::uint64_t>(good, l.indptr_at + 8 * r) >= 2)
+      row_with_two = r;
+  REQUIRE(row_with_two < l.n_items);
+  const auto row_begin = get<std::uint64_t>(good, l.indptr_at + 8 * row_with_two);
+  const auto row_end = get<std::uint64_t>(good, l.indptr_at + 8 * (row_with_two + 1));
+
+  using Corrupt = std::function<void(std::string&)>;
+  const std::vector<std::pair<std::string, Corrupt>> cases{
+      {"feature index == n_features", [&](std::string& b) { put<std::uint32_t>(b, l.indices_at, l.n_features); }},
+      {"feature index 0xFFFFFFFF", [&](std::string& b) { put<std::uint32_t>(b, l.indices_at + 4 * (l.nnz - 1), 0xFFFFFFFFu); }},
+      {"feature indices not increasing within a row",
+       [&](std::string& b) {
+         const auto a = get<std::uint32_t>(b, l.indices_at + 4 * row_begin);
+         const auto c = get<std::uint32_t>(b, l.indices_at + 4 * (row_begin + 1));
+         put(b, l.indices_at + 4 * row_begin, c);
+         put(b, l.indices_at + 4 * (row_begin + 1), a);
+       }},
+      {"n_features not above the largest index (n_terms + n_genres kept consistent)",
+       [&](std::string& b) {
+         const std::uint32_t nt = std::min(l.n_terms, max_index);
+         put(b, 16, max_index);
+         put(b, 20, nt);
+         put(b, 24, max_index - nt);
+       }},
+      {"n_terms + n_genres != n_features", [&](std::string& b) { put<std::uint32_t>(b, 20, l.n_terms + 1); }},
+      {"value 2.0", [&](std::string& b) { put(b, l.values_at, 2.0f); }},
+      {"value 0", [&](std::string& b) { put(b, l.values_at, 0.0f); }},
+      {"value negative", [&](std::string& b) { put(b, l.values_at, -0.25f); }},
+      {"value NaN", [&](std::string& b) { put(b, l.values_at, std::numeric_limits<float>::quiet_NaN()); }},
+      {"value infinity", [&](std::string& b) { put(b, l.values_at, std::numeric_limits<float>::infinity()); }},
+      {"value 1e30", [&](std::string& b) { put(b, l.values_at + 4 * (l.nnz - 1), 1e30f); }},
+      {"n_items + 1 (size mismatch)", [&](std::string& b) { put<std::uint32_t>(b, 12, l.n_items + 1); }},
+      {"n_items 0xFFFFFFFF", [&](std::string& b) { put<std::uint32_t>(b, 12, 0xFFFFFFFFu); }},
+      {"nnz + 1 (size mismatch)", [&](std::string& b) { put<std::uint64_t>(b, 32, l.nnz + 1); }},
+      {"nnz 2^64 - 1", [&](std::string& b) { put<std::uint64_t>(b, 32, ~std::uint64_t{0}); }},
+      {"indptr[0] != 0", [&](std::string& b) { put<std::uint64_t>(b, l.indptr_at, 1); }},
+      {"indptr past nnz", [&](std::string& b) { put<std::uint64_t>(b, l.indptr_at + 8, l.nnz + 5); }},
+      {"indptr decreasing", [&](std::string& b) { put<std::uint64_t>(b, l.indptr_at + 8 * row_with_two, row_end + 1); }},
+      {"indptr end != nnz", [&](std::string& b) { put<std::uint64_t>(b, l.indptr_at + 8 * l.n_items, l.nnz - 1); }},
+      {"unknown flag", [&](std::string& b) { put<std::uint32_t>(b, 28, 2); }},
+      {"genome flag with genre features", [&](std::string& b) { put<std::uint32_t>(b, 28, 1); }},
+      {"format version", [&](std::string& b) { put<std::uint32_t>(b, 8, 2); }},
+      {"magic", [&](std::string& b) { b[0] = 'X'; }},
+      {"header min_tag_count != config.json", [&](std::string& b) { put<std::uint32_t>(b, 40, 3); }},
+      {"header genre_weight != config.json", [&](std::string& b) { put<double>(b, 44, 0.5); }},
+  };
+  for (const auto& [what, corrupt] : cases) {
+    INFO(what);
+    std::string bad = good;
+    corrupt(bad);
+    REQUIRE(bad != good);
+    reseal(bad);
+    write_file(bin, bad);
+    CHECK_THROWS(target->load(dir.path()));
+    // Nothing from the rejected file was committed: no bad index can reach scoring.
+    CHECK(bitwise_equal(scores_of(*target, state), before));
+  }
+  write_file(bin, good);
+
+  // A config.json that is valid on its own but does not match the feature file.
+  const std::string good_cfg = read_file(cfg);
+  write_file(cfg, R"({"genre_weight":1.0,"min_tag_count":3})");
+  CHECK_THROWS(target->load(dir.path()));
+  write_file(cfg, R"({"genre_weight":2.0,"min_tag_count":2})");
+  CHECK_THROWS(target->load(dir.path()));
+  write_file(cfg, good_cfg);
+  CHECK_NOTHROW(target->load(dir.path()));
+  CHECK(bitwise_equal(scores_of(*target, state), before));
 }

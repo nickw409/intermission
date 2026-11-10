@@ -253,3 +253,62 @@ TEST_CASE("Content: fold_in rejects unknown and duplicate items; score checks th
   CHECK_THROWS_AS(model->score(state, wrong), std::invalid_argument);
   CHECK_THROWS_AS(model->explain(state, 3), std::out_of_range);
 }
+
+TEST_CASE("Content hand fixture: terms with different idf", "[content][features]") {
+  // No genres. Item 0: a, b; item 1: a; item 2: b; item 3: b. N = 4.
+  // idf(a) = ln(4/2) = 0.693147, idf(b) = ln(4/3) = 0.287682 (tf = 1 everywhere).
+  // v0 = (0.693147, 0.287682) / 0.750476 = (0.923610, 0.383333); v1 = (1, 0); v2 = v3 = (0, 1).
+  // cos(1, 0) = 0.923610; cos(2, 3) = 1; cos(2, 0) = 0.383333; cos(1, 2) = 0 (not returned).
+  auto model = make_content();
+  model->fit(catalog({movie(1, {}), movie(2, {}), movie(3, {}), movie(4, {})},
+                     {tag(1, 0, "a"), tag(1, 0, "b"), tag(1, 1, "a"), tag(1, 2, "b"), tag(1, 3, "b")}),
+             Config::object(), TrainContext{});
+  const auto s1 = model->similar(1, 5);
+  REQUIRE(s1.size() == 1);
+  CHECK(s1[0].item == 0);
+  CHECK_THAT(s1[0].score, WithinAbs(0.923610, 1e-5));
+  const auto s2 = model->similar(2, 5);
+  REQUIRE(s2.size() == 2);
+  CHECK(s2[0].item == 3);
+  CHECK_THAT(s2[0].score, WithinAbs(1.0, 1e-6));
+  CHECK(s2[1].item == 0);
+  CHECK_THAT(s2[1].score, WithinAbs(0.383333, 1e-5));
+}
+
+TEST_CASE("Content: the profile is accumulated in double precision", "[content][features]") {
+  // Item 0 has only the genre "Big" (v0 = (Big: 1)). Items 1..n have the tag "t" and genre "Big"
+  // with genre_weight g = 1e-5, so their Big weight is g / sqrt(1 + g^2) ~ 1e-5. Item n+1 has the
+  // tag "u" only (so idf(t) = ln((n+1)/n) > 0). The user rates item 0 = 5 and items 1..n = 1:
+  //   w0 = 5 - mu ~ 4,  wk = 1 - mu ~ -4/(n+1),  p[Big] = w0 + sum_k wk * Big_k.
+  // Each wk * Big_k ~ -2e-8 is below half an ulp of ~4 in float (2.4e-7), so a float accumulator
+  // would drop every one of them; their sum (~ -4e-5, about 80 float ulps) survives in double.
+  constexpr std::uint32_t n = 2000;
+  const double g = 1e-5;
+  std::vector<MovieMeta> movies{movie(0, {"Big"})};
+  std::vector<TagApplication> tags;
+  for (std::uint32_t k = 1; k <= n; ++k) {
+    movies.push_back(movie(k, {"Big"}));
+    tags.push_back(tag(1, k, "t"));
+  }
+  movies.push_back(movie(n + 1, {}));
+  tags.push_back(tag(1, n + 1, "u"));
+  auto model = make_content();
+  model->fit(catalog(std::move(movies), std::move(tags)), Config{{"min_tag_count", 1}, {"genre_weight", g}},
+             TrainContext{});
+
+  std::vector<Rating> ratings{{0, 5.0f, 1}};
+  for (std::uint32_t k = 1; k <= n; ++k) ratings.push_back({k, 1.0f, 1});
+  const auto state = model->fold_in(ratings);
+  REQUIRE(state.vec.size() == 3);  // features: t, u, Big
+
+  const double mu = (5.0 + n) / (n + 1.0);
+  const auto big_k = static_cast<float>(g / std::sqrt(1.0 + g * g));  // stored as float
+  double expected = 5.0 - mu;
+  float float_accumulated = static_cast<float>(5.0 - mu);
+  for (std::uint32_t k = 1; k <= n; ++k) {
+    expected += (1.0 - mu) * static_cast<double>(big_k);
+    float_accumulated += static_cast<float>((1.0 - mu) * static_cast<double>(big_k));
+  }
+  REQUIRE(std::abs(static_cast<double>(float_accumulated) - expected) > 1e-5);  // the test can tell them apart
+  CHECK_THAT(state.vec[2], WithinAbs(expected, 1e-6));
+}

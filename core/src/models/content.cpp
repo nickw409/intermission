@@ -59,7 +59,8 @@
 //
 // PERSISTENCE (save/load; directory contents)
 //   features.bin: little-endian; header {magic "RECSCNT1", u32 format version, u32 n_items,
-//   u32 n_features, u32 n_terms, u32 n_genres, u32 flags (bit 0 = genome), u64 nnz}, then
+//   u32 n_features, u32 n_terms, u32 n_genres, u32 flags (bit 0 = genome), u64 nnz,
+//   u32 min_tag_count, f64 genre_weight} (52 bytes; the config copy must match config.json), then
 //   indptr (u64 x (n_items + 1)), feature indices (u32 x nnz), values (f32 x nnz), then the SHA-256
 //   of everything before it. load() checks sizes against the file length before allocating and
 //   validates every invariant (also for a file with a correct checksum).
@@ -394,6 +395,8 @@ class ContentModel final : public Model {
     append_bytes(bytes, n_genres_);
     append_bytes(bytes, genome_ ? kFlagGenome : std::uint32_t{0});
     append_bytes(bytes, static_cast<std::uint64_t>(features_.indices.size()));
+    append_bytes(bytes, static_cast<std::uint32_t>(cfg_.min_tag_count));
+    append_bytes(bytes, cfg_.genre_weight);
     append_array(bytes, features_.indptr);
     append_array(bytes, features_.indices);
     append_array(bytes, features_.values);
@@ -439,6 +442,10 @@ class ContentModel final : public Model {
     const auto n_genres = in.get<std::uint32_t>();
     const auto flags = in.get<std::uint32_t>();
     const auto nnz = in.get<std::uint64_t>();
+    const auto min_tag_count = in.get<std::uint32_t>();
+    const auto genre_weight = in.get<double>();
+    if (min_tag_count != c.min_tag_count || std::bit_cast<std::uint64_t>(genre_weight) != std::bit_cast<std::uint64_t>(c.genre_weight))
+      Reader::fail("config.json does not match the feature file");
     if ((flags & ~kFlagGenome) != 0) Reader::fail("unknown flags");
     const bool genome = (flags & kFlagGenome) != 0;
     if (static_cast<std::uint64_t>(n_terms) + n_genres != n_features) Reader::fail("n_terms + n_genres != n_features");
