@@ -117,6 +117,7 @@ grep -q '"code":"body_too_large"' "$scratch/b" && [[ "$(hdr "$scratch/h" Content
   && pass "413 body is the Error shape (body_too_large)" || fail "413 body is not the Error shape: $(head -c 200 "$scratch/b")"
 [[ -n "$(hdr "$scratch/h" Content-Security-Policy)" && -z "$(hdr "$scratch/h" Server)" && -n "$(hdr "$scratch/h" X-Request-ID)" ]] \
   && pass "413 has security headers and X-Request-ID, no Server" || fail "413 headers: CSP '$(hdr "$scratch/h" Content-Security-Policy)', Server '$(hdr "$scratch/h" Server)', X-Request-ID '$(hdr "$scratch/h" X-Request-ID)'"
+[[ "$(hdr "$scratch/h" Cache-Control)" == no-store ]] && pass "413 is Cache-Control: no-store" || fail "413 Cache-Control is '$(hdr "$scratch/h" Cache-Control)'"
 head -c 65000 /dev/zero | tr '\0' 'a' > "$scratch/big"
 code="$(get /api/auth/login -X POST "${csrf[@]}" --data-binary "@$scratch/big")"
 [[ "$code" == 413 ]] && pass "65,000-byte body -> 413" || fail "65,000-byte body returned $code"
@@ -137,6 +138,14 @@ sleep 1
 logs="$(dc logs --no-color caddy 2>&1)"
 grep -q '"logger":"http.log.access' <<<"$logs" && pass "JSON access log lines" || fail "no JSON access log lines"
 grep -q 'edgetest-secret-cookie' <<<"$logs" && fail "cookie value appears in access log" || pass "cookie value not logged"
+
+echo "== errors Caddy raises itself (recs-api stopped: 502)"
+dc stop api >/dev/null 2>&1
+code="$(get /api/me)"
+[[ "$code" == 502 ]] && pass "recs-api down -> 502 from Caddy" || fail "recs-api down returned $code"
+[[ -n "$(hdr "$scratch/h" Content-Security-Policy)" && -z "$(hdr "$scratch/h" Server)" && -n "$(hdr "$scratch/h" X-Request-ID)" ]] \
+  && pass "502 has security headers and X-Request-ID, no Server" || fail "502 headers: CSP '$(hdr "$scratch/h" Content-Security-Policy)', Server '$(hdr "$scratch/h" Server)', X-Request-ID '$(hdr "$scratch/h" X-Request-ID)'"
+[[ "$(hdr "$scratch/h" Cache-Control)" == no-store ]] && pass "502 is Cache-Control: no-store" || fail "502 Cache-Control is '$(hdr "$scratch/h" Cache-Control)'"
 
 if [[ $fails -gt 0 ]]; then
   echo "FAIL: $fails edge check(s) failed" >&2
