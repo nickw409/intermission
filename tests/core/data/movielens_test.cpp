@@ -12,6 +12,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_exception.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "fixtures.hpp"
@@ -23,6 +24,7 @@
 
 namespace fs = std::filesystem;
 using Catch::Matchers::ContainsSubstring;
+using Catch::Matchers::MessageMatches;
 using recs::testing::TempDir;
 
 namespace {
@@ -267,9 +269,26 @@ TEST_CASE("ingest rejects bad ratings with file and row", "[ingest]") {
 TEST_CASE("ingest rejects bad movies, links and tags with file and row", "[ingest]") {
   SECTION("missing required files") {
     TempDir dir("ml-missing");
-    CHECK_THROWS_AS(recs::load_movielens(dir.path(), "x"), recs::DatasetError);
+    CHECK_THROWS_MATCHES(recs::load_movielens(dir.path(), "x"), recs::DatasetError,
+                         MessageMatches(ContainsSubstring("movies.csv") && ContainsSubstring("missing")));
     dir.write("movies.csv", slurp(recs::testing::tiny_dir() / "movies.csv"));
-    CHECK_THROWS_AS(recs::load_movielens(dir.path(), "x"), recs::DatasetError);
+    CHECK_THROWS_MATCHES(recs::load_movielens(dir.path(), "x"), recs::DatasetError,
+                         MessageMatches(ContainsSubstring("ratings.csv") && ContainsSubstring("missing")));
+  }
+  SECTION("empty genre tokens") {
+    for (const char* genres : {"Action||Drama", "|Action", "Action|"}) {
+      INFO(genres);
+      TempDir dir("ml-genres");
+      dir.write("movies.csv", std::string("movieId,title,genres\n1,A,Drama\n2,B,") + genres + "\n");
+      dir.write("ratings.csv", "userId,movieId,rating,timestamp\n1,1,4.0,100\n");
+      require_load_error(dir, "movies.csv", 3);
+    }
+  }
+  SECTION("a blank line is reported as an empty record") {
+    TempDir dir("ml-blank");
+    write_small_dir(dir, "1,1,4.0,100\n\n1,2,4.0,101\n");
+    CHECK_THROWS_MATCHES(recs::load_movielens(dir.path(), "x"), recs::CsvError,
+                         MessageMatches(ContainsSubstring("ratings.csv:3:") && ContainsSubstring("empty record")));
   }
   SECTION("duplicate movieId in movies.csv") {
     TempDir dir("ml-dupmovie");
@@ -322,7 +341,7 @@ TEST_CASE("title and year parsing", "[ingest]") {
   CHECK_FALSE(ds.movies[4].year.has_value());
   CHECK(ds.movies[5].title == "Year Inside (1999) Later");
   CHECK_FALSE(ds.movies[5].year.has_value());
-  CHECK(ds.movies[6].title.empty());
+  CHECK(ds.movies[6].title == "(2010)");  // stripping the year would leave nothing: keep the raw title
   CHECK(ds.movies[6].year == 2010);
 }
 
@@ -353,7 +372,8 @@ TEST_CASE("tag genome is loaded when both genome files are present", "[ingest]")
   }
   SECTION("only one genome file present is an error") {
     fs::remove(dir / "genome-tags.csv");
-    CHECK_THROWS_AS(recs::load_movielens(dir.path(), "g"), recs::DatasetError);
+    CHECK_THROWS_MATCHES(recs::load_movielens(dir.path(), "g"), recs::DatasetError,
+                         MessageMatches(ContainsSubstring("genome-tags.csv") && ContainsSubstring("genome-scores.csv")));
   }
 }
 

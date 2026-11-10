@@ -178,6 +178,16 @@ TEST_CASE("csv inline cases", "[csv]") {
     CHECK_THROWS_AS(recs::parse_csv("a,b\nc\n", "<s>", 2), recs::CsvError);
     CHECK_THROWS_AS(recs::parse_csv("a,b,c\n", "<s>", 2), recs::CsvError);
   }
+  SECTION("a blank line is an empty record with a clear error when fields are expected") {
+    CHECK(recs::parse_csv("a\n\nb\n") == Records{{"a"}, {""}, {"b"}});
+    try {
+      recs::parse_csv("a,b\n\nc,d\n", "<s>", 2);
+      FAIL("expected CsvError");
+    } catch (const recs::CsvError& e) {
+      CHECK(e.row() == 2);
+      CHECK(std::string(e.what()).find("empty record") != std::string::npos);
+    }
+  }
 }
 
 TEST_CASE("CsvReader reuses the caller's field vector across records", "[csv]") {

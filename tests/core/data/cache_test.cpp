@@ -1,18 +1,24 @@
 // Gate tests for the binary dataset cache (spec Data, ingest step 5): exact round-trip, and every
 // corruption (any flipped byte, any truncation, a version change) is detected.
 //
-// The test relies only on the layout promised in recs/dataset.hpp: the file starts with the
+// Most tests rely only on the layout promised in recs/dataset.hpp: the file starts with the
 // 8-byte magic "RECSDS01" followed by the format version as a little-endian uint32, and ends with
-// the SHA-256 of everything before it.
+// the SHA-256 of everything before it. The "resealed" tests further down also use field offsets of
+// format version 2 (documented in core/src/data/cache.cpp) and check them first.
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_exception.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "dataset_eq.hpp"
 #include "fixtures.hpp"
@@ -21,6 +27,8 @@
 #include "temp_dir.hpp"
 
 namespace fs = std::filesystem;
+using Catch::Matchers::ContainsSubstring;
+using Catch::Matchers::MessageMatches;
 using recs::testing::TempDir;
 
 namespace {
@@ -193,33 +201,238 @@ TEST_CASE("cache: missing file is a DatasetError", "[cache]") {
   require_cache_error(dir / "nope.bin");
 }
 
+// --- Resealed edits ------------------------------------------------------------------------------
+// The tests below edit one value inside the payload and then recompute the trailing SHA-256, so the
+// checksum cannot be what rejects the file: the loader's own checks must. They rely on the field
+// offsets of format version 2 for the `synthetic` dataset (see core/src/data/cache.cpp); a separate
+// test checks the expected value sits at each offset, so a layout change fails loudly.
+namespace {
+
+constexpr std::size_t kOffNUsers = 16;   // u32
+constexpr std::size_t kOffNnz = 24;      // u64
+constexpr std::size_t kOffNTags = 32;    // u64 (tag applications)
+constexpr std::size_t kOffNameLen = 40;  // u64, then "synthetic" (9 bytes)
+constexpr std::size_t kOffSources = 57;  // u64 count of raw-file fingerprints (0 from save_cache)
+constexpr std::size_t kOffValues = 65 + 4 * 8 + 5 * 8 + 5 * 8 + 6 * 4;  // after users, items, indptr, indices
+
+template <class T>
+T peek(const std::string& bytes, std::size_t off) {
+  T v{};
+  REQUIRE(off + sizeof v <= bytes.size());
+  std::memcpy(&v, bytes.data() + off, sizeof v);
+  return v;
+}
+
+template <class T>
+std::string patched(std::string bytes, std::size_t off, T v) {
+  REQUIRE(off + sizeof v <= bytes.size());
+  std::memcpy(bytes.data() + off, &v, sizeof v);
+  return reseal(bytes);
+}
+
+recs::Dataset synthetic_genome_without_tags() {
+  auto ds = synthetic(false);
+  recs::GenomeMatrix g;
+  g.n_items = 5;
+  g.n_tags = 0;
+  ds.genome = g;
+  return ds;
+}
+
+void require_resealed_error(const TempDir& dir, const std::string& bytes, const std::string& what) {
+  write_bytes(dir / "bad.bin", bytes);
+  CHECK_THROWS_MATCHES(recs::load_cache(dir / "bad.bin"), recs::DatasetError, MessageMatches(ContainsSubstring(what)));
+}
+
+void copy_tiny(const fs::path& to) {
+  fs::create_directories(to);
+  for (const char* f : {"movies.csv", "links.csv", "ratings.csv", "tags.csv"}) {
+    fs::copy_file(recs::testing::tiny_dir() / f, to / f);
+  }
+}
+
+}  // namespace
+
+TEST_CASE("cache: the layout offsets used by the resealed tests are right", "[cache]") {
+  TempDir dir("cache-layout");
+  recs::save_cache(synthetic(true), dir / "a.bin");
+  const auto good = read_bytes(dir / "a.bin");
+  CHECK(peek<std::uint32_t>(good, kOffNUsers) == 4);
+  CHECK(peek<std::uint64_t>(good, kOffNnz) == 6);
+  CHECK(peek<std::uint64_t>(good, kOffNTags) == 3);
+  CHECK(peek<std::uint64_t>(good, kOffNameLen) == 9);
+  CHECK(good.substr(kOffNameLen + 8, 9) == "synthetic");
+  CHECK(peek<std::uint64_t>(good, kOffSources) == 0);
+  CHECK(peek<float>(good, kOffValues) == 4.5f);
+  CHECK(peek<float>(good, kOffValues + 4) == 0.5f);
+  CHECK(reseal(good) == good);  // resealing an unmodified file reproduces it exactly
+}
+
+TEST_CASE("cache: genome dimensions must match the item count", "[cache]") {
+  TempDir dir("cache-genome-dims");
+  SECTION("load rejects a resealed genome n_items") {
+    recs::save_cache(synthetic_genome_without_tags(), dir / "a.bin");
+    const auto good = read_bytes(dir / "a.bin");
+    const std::size_t off = good.size() - 32 - 8;  // genome block: u32 n_items, u32 n_tags (= 0)
+    REQUIRE(peek<std::uint32_t>(good, off) == 5);
+    REQUIRE(peek<std::uint32_t>(good, off + 4) == 0);
+    for (std::uint32_t n : {4u, 6u, 1000000u}) {
+      INFO("genome n_items " << n);
+      require_resealed_error(dir, patched(good, off, n), "genome");
+    }
+  }
+  SECTION("save rejects inconsistent genomes and leaves no file behind") {
+    auto ds = synthetic(true);
+    ds.genome->n_items = 6;
+    ds.genome->relevance.resize(18, 0.0f);
+    CHECK_THROWS_AS(recs::save_cache(ds, dir / "x.bin"), recs::DatasetError);
+    ds = synthetic(true);
+    ds.genome->tag_names.pop_back();
+    CHECK_THROWS_AS(recs::save_cache(ds, dir / "x.bin"), recs::DatasetError);
+    ds = synthetic(true);
+    ds.genome->relevance.pop_back();
+    CHECK_THROWS_AS(recs::save_cache(ds, dir / "x.bin"), recs::DatasetError);
+    CHECK(fs::is_empty(dir.path()));
+  }
+}
+
+TEST_CASE("cache: out-of-range ratings and relevance are rejected", "[cache]") {
+  TempDir dir("cache-ranges");
+  recs::save_cache(synthetic(true), dir / "a.bin");
+  const auto good = read_bytes(dir / "a.bin");
+  REQUIRE(peek<float>(good, kOffValues) == 4.5f);
+  for (float v : {0.0f, 0.25f, 5.5f, 3.25f, -1.0f, std::numeric_limits<float>::quiet_NaN(),
+                  std::numeric_limits<float>::infinity()}) {
+    INFO("rating " << v);
+    require_resealed_error(dir, patched(good, kOffValues, v), "rating");
+  }
+  const std::size_t rel = good.size() - 32 - 15 * 4;  // relevance is the last array of the payload
+  REQUIRE(peek<float>(good, rel) == 0.001f);
+  for (float v : {1.5f, -0.1f, std::numeric_limits<float>::quiet_NaN()}) {
+    INFO("relevance " << v);
+    require_resealed_error(dir, patched(good, rel, v), "relevance");
+  }
+}
+
+TEST_CASE("cache: hostile lengths are rejected without huge allocations", "[cache]") {
+  TempDir dir("cache-hostile");
+  recs::save_cache(synthetic(true), dir / "a.bin");
+  const auto good = read_bytes(dir / "a.bin");
+  for (std::uint64_t n : {std::uint64_t{1} << 40, std::uint64_t{1} << 62, ~std::uint64_t{0}}) {
+    INFO("length " << n);
+    require_resealed_error(dir, patched(good, kOffNameLen, n), "invalid dataset cache");
+    require_resealed_error(dir, patched(good, kOffNnz, n), "invalid dataset cache");
+    require_resealed_error(dir, patched(good, kOffNTags, n), "invalid dataset cache");
+    require_resealed_error(dir, patched(good, kOffSources, n), "invalid dataset cache");
+  }
+  require_resealed_error(dir, patched(good, kOffNUsers, std::uint32_t{0xFFFFFFFF}), "invalid dataset cache");
+}
+
+TEST_CASE("save_cache validates before writing anything", "[cache]") {
+  TempDir dir("cache-save-validate");
+  auto bad_rating = synthetic(false);
+  bad_rating.by_user.values[0] = 7.0f;
+  CHECK_THROWS_AS(recs::save_cache(bad_rating, dir / "a.bin"), recs::DatasetError);
+  auto bad_csr = synthetic(false);
+  bad_csr.by_user.indices[1] = bad_csr.by_user.indices[0];
+  CHECK_THROWS_AS(recs::save_cache(bad_csr, dir / "a.bin"), recs::DatasetError);
+  auto bad_movie = synthetic(false);
+  bad_movie.movies[1].movie_id = 4242;
+  CHECK_THROWS_AS(recs::save_cache(bad_movie, dir / "a.bin"), recs::DatasetError);
+  auto bad_tag = synthetic(false);
+  bad_tag.tags[0].item = 5;
+  CHECK_THROWS_AS(recs::save_cache(bad_tag, dir / "a.bin"), recs::DatasetError);
+  CHECK(fs::is_empty(dir.path()));
+
+  // A failed save never clobbers an existing good cache or leaves a temp file behind.
+  recs::save_cache(synthetic(false), dir / "a.bin");
+  const auto before = read_bytes(dir / "a.bin");
+  CHECK_THROWS_AS(recs::save_cache(bad_rating, dir / "a.bin"), recs::DatasetError);
+  CHECK(read_bytes(dir / "a.bin") == before);
+  CHECK(std::distance(fs::directory_iterator(dir.path()), fs::directory_iterator()) == 1);
+}
+
 TEST_CASE("load_or_build builds, reuses a valid cache and rebuilds a corrupt one", "[cache]") {
   TempDir dir("cache-lob");
+  const auto raw = dir / "raw";
+  copy_tiny(raw);
   const auto cache = dir / "sub" / "tiny.bin";
-  const auto expected = recs::load_movielens(recs::testing::tiny_dir(), "tiny");
+  const auto expected = recs::load_movielens(raw, "tiny");
 
-  // 1. No cache yet: parses the raw files and writes the cache.
+  // 1. No cache yet: parses the raw files and writes the cache; a second call reuses it.
   REQUIRE_FALSE(fs::exists(cache));
-  recs::testing::check_dataset_equal(recs::load_or_build(recs::testing::tiny_dir(), cache, "tiny"), expected);
+  recs::testing::check_dataset_equal(recs::load_or_build(raw, cache, "tiny"), expected);
   REQUIRE(fs::exists(cache));
   recs::testing::check_dataset_equal(recs::load_cache(cache), expected);
+  recs::testing::check_dataset_equal(recs::load_or_build(raw, cache, "tiny"), expected);
 
-  // 2. Valid cache: used as is. The raw directory does not exist, so parsing would throw.
-  recs::testing::check_dataset_equal(recs::load_or_build(dir / "no-raw-here", cache, "tiny"), expected);
-
-  // 3. Corrupt cache: rebuilt from the raw files and rewritten.
+  // 2. Corrupt cache: rebuilt from the raw files and rewritten.
   auto bytes = read_bytes(cache);
   bytes[bytes.size() / 2] = static_cast<char>(bytes[bytes.size() / 2] ^ 0x10);
   write_bytes(cache, bytes);
   require_cache_error(cache);
-  recs::testing::check_dataset_equal(recs::load_or_build(recs::testing::tiny_dir(), cache, "tiny"), expected);
+  recs::testing::check_dataset_equal(recs::load_or_build(raw, cache, "tiny"), expected);
   recs::testing::check_dataset_equal(recs::load_cache(cache), expected);
 
-  // 4. Corrupt cache and no raw data: the parse error surfaces instead of the bad cache.
+  // 3. Corrupt cache and no raw data: the parse error surfaces instead of the bad cache.
   write_bytes(cache, "garbage");
-  CHECK_THROWS(recs::load_or_build(dir / "no-raw-here", cache, "tiny"));
+  CHECK_THROWS_MATCHES(recs::load_or_build(dir / "no-raw-here", cache, "tiny"), recs::DatasetError,
+                       MessageMatches(ContainsSubstring("movies.csv")));
 
-  // 5. A cache built under another dataset name is not reused.
+  // 4. A cache built under another dataset name is not reused.
   recs::save_cache(recs::make_dataset("other", 1, 1, {{0, 0, 3.0f, 1}}), cache);
-  recs::testing::check_dataset_equal(recs::load_or_build(recs::testing::tiny_dir(), cache, "tiny"), expected);
+  recs::testing::check_dataset_equal(recs::load_or_build(raw, cache, "tiny"), expected);
+
+  // 5. A cache written by plain save_cache records no raw files, so load_or_build rebuilds it.
+  recs::save_cache(expected, cache);
+  const auto plain = read_bytes(cache);
+  recs::testing::check_dataset_equal(recs::load_or_build(raw, cache, "tiny"), expected);
+  CHECK(read_bytes(cache) != plain);
+}
+
+TEST_CASE("load_or_build rebuilds when a raw file changes under the same name", "[cache]") {
+  TempDir dir("cache-stale");
+  const auto raw = dir / "raw";
+  copy_tiny(raw);
+  const auto cache = dir / "tiny.bin";
+  const auto ratings = raw / "ratings.csv";
+  // User 1's first ratings.csv row is "1,10,0.5,..."; read that rating back from a dataset.
+  const auto user1_movie10 = [](const recs::Dataset& ds) {
+    const auto u = *ds.users.find(1);
+    const auto i = *ds.items.find(10);
+    const auto cols = ds.by_user.row_indices(u);
+    for (std::size_t k = 0; k < cols.size(); ++k) {
+      if (cols[k] == i) return ds.by_user.row_values(u)[k];
+    }
+    FAIL("rating (1, 10) missing");
+    return 0.0f;
+  };
+  REQUIRE(user1_movie10(recs::load_or_build(raw, cache, "tiny")) == 0.5f);
+  const auto original_mtime = fs::last_write_time(ratings);
+
+  // Same size and same mtime: the cache is trusted (proved by an edit the cache cannot know about).
+  auto text = read_bytes(ratings);
+  const auto at = text.find("1,10,0.5,");
+  REQUIRE(at != std::string::npos);
+  text.replace(at, 9, "1,10,1.0,");
+  write_bytes(ratings, text);
+  fs::last_write_time(ratings, original_mtime);
+  CHECK(user1_movie10(recs::load_or_build(raw, cache, "tiny")) == 0.5f);
+
+  // Same size, different mtime: rebuilt, and the new cache is then reused.
+  fs::last_write_time(ratings, original_mtime + std::chrono::seconds(1));
+  CHECK(user1_movie10(recs::load_or_build(raw, cache, "tiny")) == 1.0f);
+  CHECK(user1_movie10(recs::load_or_build(raw, cache, "tiny")) == 1.0f);
+
+  // Different size with the mtime forced back: rebuilt.
+  const auto mtime = fs::last_write_time(ratings);
+  write_bytes(ratings, text + "21,1,4.0,5\n");
+  fs::last_write_time(ratings, mtime);
+  CHECK(recs::load_or_build(raw, cache, "tiny").n_ratings() == 246);
+
+  // An optional file disappearing or appearing is a change too.
+  fs::remove(raw / "tags.csv");
+  CHECK(recs::load_or_build(raw, cache, "tiny").tags.empty());
+  fs::copy_file(recs::testing::tiny_dir() / "tags.csv", raw / "tags.csv");
+  CHECK(recs::load_or_build(raw, cache, "tiny").tags.size() == 11);
 }
