@@ -17,7 +17,7 @@ export function RequireSession({ action, children }: RequireSessionProps) {
     case 'loading':
       return <Loading>Checking your sign-in…</Loading>;
     case 'error':
-      return <ErrorMessage message="Couldn't check your sign-in." onRetry={retry} />;
+      return <ErrorMessage message="We couldn't check whether you're signed in." onRetry={retry} />;
     case 'anonymous':
       return (
         <p className="card sign-in-prompt">

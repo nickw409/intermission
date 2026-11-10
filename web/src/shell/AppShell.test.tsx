@@ -152,10 +152,15 @@ describe('auth state', () => {
     });
     server.use(
       handlerFor('getMe', 'unauthorized'),
-      http.get('/api/ratings', async () => {
-        await gate;
-        return HttpResponse.json({ error: { code: 'unauthorized', message: 'not logged in' } }, { status: 401 });
-      }),
+      // once: only the stale request gets the 401; pages loaded after login get the fixture.
+      http.get(
+        '/api/ratings',
+        async () => {
+          await gate;
+          return HttpResponse.json({ error: { code: 'unauthorized', message: 'not logged in' } }, { status: 401 });
+        },
+        { once: true },
+      ),
     );
     renderApp('/login');
     await screen.findByRole('link', { name: 'Log in' });
@@ -232,24 +237,27 @@ describe('model-unavailable banner', () => {
   it('appears on any 503 model_unavailable response, can be dismissed, and other pages keep working', async () => {
     const user = userEvent.setup();
     server.use(handlerFor('recommend', 'model_unavailable'));
-    renderApp('/');
+    renderApp('/how-it-works'); // a page that doesn't ask for recommendations itself
     await screen.findByRole('button', { name: /alice/ });
     expect(screen.queryByText(BANNER, { exact: false })).not.toBeInTheDocument();
     // The live region is mounted (empty) before the error, so screen readers announce the change.
-    const region = screen.getByRole('status');
+    // It comes before <main>, so it is the first status region (pages may add their own).
+    const bannerRegion = () => screen.getAllByRole('status')[0];
+    const region = bannerRegion();
     expect(region).toBeEmptyDOMElement();
 
     await act(async () => {
       await api.get('/api/recommend').catch(() => undefined);
     });
-    const banner = await screen.findByRole('status');
-    expect(banner).toBe(region);
-    expect(banner).toHaveTextContent(BANNER);
+    const banner = await screen.findByText(BANNER, { exact: false });
+    expect(region).toContainElement(banner);
+    expect(region).toHaveTextContent(BANNER);
 
     // Navigation and the rest of the site still work while the banner is up.
-    await user.click(within(screen.getByRole('navigation', { name: 'Main' })).getByRole('link', { name: 'How it works' }));
-    expect(screen.getByRole('heading', { level: 1, name: 'How it works' })).toBeInTheDocument();
-    expect(screen.getByRole('status')).toHaveTextContent(BANNER);
+    await user.click(within(screen.getByRole('navigation', { name: 'Main' })).getByRole('link', { name: 'My ratings' }));
+    expect(screen.getByRole('heading', { level: 1, name: 'My ratings' })).toBeInTheDocument();
+    expect(await screen.findByRole('table')).toBeInTheDocument();
+    expect(bannerRegion()).toHaveTextContent(BANNER);
 
     await user.click(screen.getByRole('button', { name: 'Dismiss' }));
     expect(screen.queryByText(BANNER, { exact: false })).not.toBeInTheDocument();
