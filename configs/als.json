@@ -1,0 +1,1 @@
+{ "k": 64, "lambda": 0.05, "alpha": 40, "iters": 15, "interaction_threshold": 3.5, "init_sd": 0.01 }

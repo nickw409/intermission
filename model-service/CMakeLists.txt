@@ -1,0 +1,21 @@
+# recs-model. Owned by workstream H. The library target lets tests and fuzzers reuse the handlers.
+file(GLOB_RECURSE RECS_MODEL_LIB_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
+add_library(recs_model_service STATIC ${RECS_MODEL_LIB_SOURCES})
+target_include_directories(recs_model_service PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(recs_model_service PUBLIC recs_core httplib::httplib)
+recs_set_warnings(recs_model_service)
+
+add_executable(recs-model ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp)
+target_link_libraries(recs-model PRIVATE recs_model_service CLI11::CLI11)
+recs_set_warnings(recs-model)
+
+if(RECS_FUZZ)
+  file(GLOB RECS_FUZZERS CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tests/fuzz/model/*.cpp)
+  foreach(f ${RECS_FUZZERS})
+    get_filename_component(n ${f} NAME_WE)
+    add_executable(fuzz_${n} ${f})
+    target_compile_options(fuzz_${n} PRIVATE -fsanitize=fuzzer)
+    target_link_options(fuzz_${n} PRIVATE -fsanitize=fuzzer)
+    target_link_libraries(fuzz_${n} PRIVATE recs_model_service)
+  endforeach()
+endif()

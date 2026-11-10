@@ -1,0 +1,173 @@
+{
+  "aggregates": {
+    "coverage@10": 0.0218
+  },
+  "cold_item_share": 0.0123,
+  "config": {
+    "min_support": 20,
+    "neighbors": 100,
+    "shrinkage": 100
+  },
+  "counts": {
+    "n_items": 87585,
+    "n_train_ratings": 30411630,
+    "n_users": 200948,
+    "users_evaluated": 183412,
+    "users_without_relevant": 17536
+  },
+  "created_at": "2026-11-09T21:10:00Z",
+  "dataset": "ml-32m",
+  "eval_seconds": 177.1,
+  "evaluated_on": "test",
+  "foldin_jaccard@10": null,
+  "git_sha": "0288606",
+  "metrics": {
+    "map@10": {
+      "ci95": [
+        0.0526,
+        0.054
+      ],
+      "mean": 0.0533
+    },
+    "mean_pop_rank@10": {
+      "ci95": [
+        279.4,
+        297.4
+      ],
+      "mean": 288.4
+    },
+    "ndcg@10": {
+      "ci95": [
+        0.0712,
+        0.073
+      ],
+      "mean": 0.0721
+    },
+    "precision@10": {
+      "ci95": [
+        0.0506,
+        0.0518
+      ],
+      "mean": 0.0512
+    },
+    "recall@10": {
+      "ci95": [
+        0.0687,
+        0.0709
+      ],
+      "mean": 0.0698
+    },
+    "recall@50": {
+      "ci95": [
+        0.1788,
+        0.1816
+      ],
+      "mean": 0.1802
+    }
+  },
+  "model": "knn",
+  "peak_rss_bytes": null,
+  "per_k": {
+    "ndcg": [
+      [
+        1,
+        0.0429
+      ],
+      [
+        5,
+        0.0559
+      ],
+      [
+        10,
+        0.0721
+      ],
+      [
+        20,
+        0.0829
+      ],
+      [
+        50,
+        0.0829
+      ]
+    ],
+    "precision": [
+      [
+        1,
+        0.1146
+      ],
+      [
+        5,
+        0.0653
+      ],
+      [
+        10,
+        0.0512
+      ],
+      [
+        20,
+        0.0402
+      ],
+      [
+        50,
+        0.0291
+      ]
+    ],
+    "recall": [
+      [
+        1,
+        0.021
+      ],
+      [
+        5,
+        0.0508
+      ],
+      [
+        10,
+        0.0744
+      ],
+      [
+        20,
+        0.1089
+      ],
+      [
+        50,
+        0.1802
+      ]
+    ]
+  },
+  "rating_baselines": null,
+  "rating_metrics": null,
+  "run_id": "2026-11-09T21-10-00Z_knn",
+  "schema_version": 1,
+  "seeds": {
+    "bootstrap": 42,
+    "model": 42,
+    "parity": 42,
+    "split": 42
+  },
+  "slices": {
+    "cold_users": {
+      "ndcg@10": {
+        "ci95": [
+          0.0581,
+          0.0623
+        ],
+        "mean": 0.0602
+      },
+      "train_ratings_lt": 20,
+      "users": 41203
+    }
+  },
+  "split": {
+    "min_ratings": 10,
+    "seed": 42,
+    "test_fraction": 0.2,
+    "test_max": 10,
+    "test_min": 1,
+    "val_fraction": 0.2
+  },
+  "split_hash": "3f1c00000000000000000000000000000000000000000000000000000000a9e2",
+  "train_seconds": 412.7,
+  "training_curve": [],
+  "training_curve_metric": ""
+}

@@ -1,0 +1,91 @@
+{
+  "operationId": "getReport",
+  "cases": [
+    {
+      "name": "ok",
+      "request": {
+        "method": "GET",
+        "path": "/api/reports/2026-11-09T21-14-03Z_als",
+        "query": {},
+        "headers": {}
+      },
+      "response": {
+        "status": 200,
+        "headers": {},
+        "body": {
+          "$fixtureRef": "reports/als.json"
+        }
+      }
+    },
+    {
+      "name": "ok_pop",
+      "request": {
+        "method": "GET",
+        "path": "/api/reports/2026-11-09T21-00-00Z_pop",
+        "query": {},
+        "headers": {}
+      },
+      "response": {
+        "status": 200,
+        "headers": {},
+        "body": {
+          "$fixtureRef": "reports/pop.json"
+        }
+      }
+    },
+    {
+      "name": "ok_unknown_major",
+      "request": {
+        "method": "GET",
+        "path": "/api/reports/2026-12-01T00-00-00Z_pop_v2",
+        "query": {},
+        "headers": {}
+      },
+      "response": {
+        "status": 200,
+        "headers": {},
+        "body": {
+          "$fixtureRef": "reports/unknown_major.json"
+        }
+      }
+    },
+    {
+      "name": "bad_run_id",
+      "request": {
+        "method": "GET",
+        "path": "/api/reports/bad%20id",
+        "query": {},
+        "headers": {}
+      },
+      "response": {
+        "status": 400,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "bad_request",
+            "message": "invalid run id"
+          }
+        }
+      }
+    },
+    {
+      "name": "not_found",
+      "request": {
+        "method": "GET",
+        "path": "/api/reports/2026-01-01T00-00-00Z_nope",
+        "query": {},
+        "headers": {}
+      },
+      "response": {
+        "status": 404,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "not_found",
+            "message": "report not found"
+          }
+        }
+      }
+    }
+  ]
+}

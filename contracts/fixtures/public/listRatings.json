@@ -1,0 +1,78 @@
+{
+  "operationId": "listRatings",
+  "cases": [
+    {
+      "name": "ok",
+      "request": {
+        "method": "GET",
+        "path": "/api/ratings",
+        "query": {},
+        "headers": {
+          "Cookie": "session=fixture-session-token"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {},
+        "body": {
+          "items": [
+            {
+              "movieId": 260,
+              "title": "Star Wars: Episode IV - A New Hope",
+              "year": 1977,
+              "rating": 5,
+              "updated_at": 1794256872
+            },
+            {
+              "movieId": 2571,
+              "title": "Matrix, The",
+              "year": 1999,
+              "rating": 4.5,
+              "updated_at": 1794256855
+            },
+            {
+              "movieId": 296,
+              "title": "Pulp Fiction",
+              "year": 1994,
+              "rating": 4.5,
+              "updated_at": 1794256831
+            },
+            {
+              "movieId": 1,
+              "title": "Toy Story",
+              "year": 1995,
+              "rating": 4,
+              "updated_at": 1794256802
+            },
+            {
+              "movieId": 318,
+              "title": "Shawshank Redemption, The",
+              "year": 1994,
+              "rating": 4,
+              "updated_at": 1794256787
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "unauthorized",
+      "request": {
+        "method": "GET",
+        "path": "/api/ratings",
+        "query": {},
+        "headers": {}
+      },
+      "response": {
+        "status": 401,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "unauthorized",
+            "message": "not logged in"
+          }
+        }
+      }
+    }
+  ]
+}

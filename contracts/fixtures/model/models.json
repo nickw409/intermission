@@ -1,0 +1,54 @@
+{
+  "operationId": "models",
+  "cases": [
+    {
+      "name": "ok",
+      "request": {
+        "method": "GET",
+        "path": "/v1/models",
+        "query": {},
+        "headers": {}
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "artifact_version": "2026-11-09T21-14-03Z",
+          "trained_at": "2026-11-09T21:14:03Z",
+          "default_model": "als",
+          "models": [
+            "pop",
+            "pop_count",
+            "knn",
+            "content",
+            "mf",
+            "als"
+          ]
+        }
+      }
+    },
+    {
+      "name": "model_unavailable",
+      "request": {
+        "method": "GET",
+        "path": "/v1/models",
+        "query": {},
+        "headers": {}
+      },
+      "response": {
+        "status": 503,
+        "headers": {
+          "X-Model-Version": "none"
+        },
+        "body": {
+          "error": {
+            "code": "model_unavailable",
+            "message": "no verified artifact is loaded"
+          }
+        }
+      }
+    }
+  ]
+}

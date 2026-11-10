@@ -68,16 +68,17 @@ data/           gitignored: raw/, artifacts/, reports/, exports/, app.db, backup
 
 ## Commands
 
-These are the planned commands; they work once Wave 0 lands.
+Build, test and contract commands work now. `ingest`, `train`, `eval` and `compare` land in Wave 1.
 
 ```bash
 tools/download_movielens.sh ml-latest-small        # also: ml-32m (large, run in background)
 cmake --preset debug && cmake --build --preset debug && ctest --preset debug   # ASan+UBSan
 cmake --preset release && cmake --build --preset release
 build/release/recs-train ingest --dataset ml-latest-small
-build/release/recs-train eval --model pop --config configs/pop.json
+build/release/recs-train eval --dataset ml-latest-small --model pop --config configs/pop.json
 make -C api check            # go vet, staticcheck, govulncheck, go test -race
-npm --prefix web run check   # typecheck (fails on stale generated API types), test, build
+npm --prefix web run check   # stale-API-types check, typecheck, lint, test, build
+(cd tools/contracts && npm ci && npm run validate)   # every fixture vs its contract
 docker compose -f deploy/compose.yaml -f deploy/compose.dev.yaml up
 ```
 

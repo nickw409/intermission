@@ -1,0 +1,35 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base", "hidden": true, "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}"
+    },
+    {
+      "name": "debug", "inherits": "base", "displayName": "Debug + ASan + UBSan",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "RECS_SANITIZE": "ON" }
+    },
+    {
+      "name": "release", "inherits": "base", "displayName": "Release (used for ml-32m runs)",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "fuzz", "inherits": "base", "displayName": "libFuzzer + ASan + UBSan (clang)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo", "CMAKE_CXX_COMPILER": "clang++",
+        "RECS_SANITIZE": "ON", "RECS_FUZZ": "ON", "RECS_BUILD_TESTS": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "debug", "configurePreset": "debug" },
+    { "name": "release", "configurePreset": "release" },
+    { "name": "fuzz", "configurePreset": "fuzz" }
+  ],
+  "testPresets": [
+    { "name": "debug", "configurePreset": "debug", "output": { "outputOnFailure": true },
+      "environment": { "OMP_NUM_THREADS": "2", "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=1" } },
+    { "name": "release", "configurePreset": "release", "output": { "outputOnFailure": true } }
+  ]
+}

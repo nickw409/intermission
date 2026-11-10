@@ -1,0 +1,294 @@
+{
+  "operationId": "compare",
+  "cases": [
+    {
+      "name": "ok",
+      "request": {
+        "method": "POST",
+        "path": "/v1/compare",
+        "query": {},
+        "headers": {},
+        "body": {
+          "models": [
+            "pop",
+            "knn",
+            "als"
+          ],
+          "ratings": [
+            {
+              "movie_id": 260,
+              "rating": 5
+            },
+            {
+              "movie_id": 2571,
+              "rating": 4.5
+            },
+            {
+              "movie_id": 296,
+              "rating": 4.5
+            },
+            {
+              "movie_id": 1,
+              "rating": 4
+            },
+            {
+              "movie_id": 318,
+              "rating": 4
+            }
+          ],
+          "k": 3,
+          "exclude": [
+            260,
+            2571,
+            296,
+            1,
+            318
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "results": [
+            {
+              "model": "pop",
+              "items": [
+                {
+                  "movie_id": 356,
+                  "score": 4.12,
+                  "because": []
+                },
+                {
+                  "movie_id": 593,
+                  "score": 4.08,
+                  "because": []
+                },
+                {
+                  "movie_id": 2959,
+                  "score": 4.05,
+                  "because": []
+                }
+              ]
+            },
+            {
+              "model": "knn",
+              "items": [
+                {
+                  "movie_id": 1196,
+                  "score": 0.68,
+                  "because": [
+                    {
+                      "movie_id": 260,
+                      "weight": 0.62
+                    }
+                  ]
+                },
+                {
+                  "movie_id": 1210,
+                  "score": 0.61,
+                  "because": [
+                    {
+                      "movie_id": 260,
+                      "weight": 0.55
+                    }
+                  ]
+                },
+                {
+                  "movie_id": 4993,
+                  "score": 0.44,
+                  "because": [
+                    {
+                      "movie_id": 260,
+                      "weight": 0.24
+                    },
+                    {
+                      "movie_id": 1,
+                      "weight": 0.12
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "model": "als",
+              "items": [
+                {
+                  "movie_id": 4993,
+                  "score": 0.83,
+                  "because": [
+                    {
+                      "movie_id": 260,
+                      "weight": 0.41
+                    },
+                    {
+                      "movie_id": 2571,
+                      "weight": 0.22
+                    }
+                  ]
+                },
+                {
+                  "movie_id": 1196,
+                  "score": 0.79,
+                  "because": [
+                    {
+                      "movie_id": 260,
+                      "weight": 0.52
+                    }
+                  ]
+                },
+                {
+                  "movie_id": 2959,
+                  "score": 0.71,
+                  "because": [
+                    {
+                      "movie_id": 2571,
+                      "weight": 0.38
+                    },
+                    {
+                      "movie_id": 296,
+                      "weight": 0.3
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "ignored": 0
+        }
+      }
+    },
+    {
+      "name": "invalid_json",
+      "request": {
+        "method": "POST",
+        "path": "/v1/compare",
+        "query": {},
+        "headers": {},
+        "rawBody": "{not json"
+      },
+      "response": {
+        "status": 400,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "error": {
+            "code": "invalid_json",
+            "message": "request body is not valid JSON"
+          }
+        }
+      }
+    },
+    {
+      "name": "unknown_model",
+      "request": {
+        "method": "POST",
+        "path": "/v1/compare",
+        "query": {},
+        "headers": {},
+        "body": {
+          "models": [
+            "pop",
+            "svd"
+          ],
+          "ratings": [
+            {
+              "movie_id": 260,
+              "rating": 5
+            },
+            {
+              "movie_id": 2571,
+              "rating": 4.5
+            },
+            {
+              "movie_id": 296,
+              "rating": 4.5
+            },
+            {
+              "movie_id": 1,
+              "rating": 4
+            },
+            {
+              "movie_id": 318,
+              "rating": 4
+            }
+          ],
+          "k": 3
+        }
+      },
+      "response": {
+        "status": 400,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "error": {
+            "code": "unknown_model",
+            "message": "unknown model \"svd\""
+          }
+        }
+      }
+    },
+    {
+      "name": "model_unavailable",
+      "request": {
+        "method": "POST",
+        "path": "/v1/compare",
+        "query": {},
+        "headers": {},
+        "body": {
+          "models": [
+            "pop",
+            "knn",
+            "als"
+          ],
+          "ratings": [
+            {
+              "movie_id": 260,
+              "rating": 5
+            },
+            {
+              "movie_id": 2571,
+              "rating": 4.5
+            },
+            {
+              "movie_id": 296,
+              "rating": 4.5
+            },
+            {
+              "movie_id": 1,
+              "rating": 4
+            },
+            {
+              "movie_id": 318,
+              "rating": 4
+            }
+          ],
+          "k": 3,
+          "exclude": [
+            260,
+            2571,
+            296,
+            1,
+            318
+          ]
+        }
+      },
+      "response": {
+        "status": 503,
+        "headers": {
+          "X-Model-Version": "none"
+        },
+        "body": {
+          "error": {
+            "code": "model_unavailable",
+            "message": "no verified artifact is loaded"
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,266 @@
+openapi: 3.1.0
+info:
+  title: Intermission internal model API (recs-model)
+  version: 1.0.0
+  description: |
+    HTTP/1.1 JSON on the Unix socket /run/recs/model.sock (dev fallback 127.0.0.1:8090). Only
+    recs-api calls it. Stateless: every call carries the ratings it needs; it never sees usernames,
+    sessions or cookies. FROZEN after Wave 0.
+
+    Rules:
+    - Every response (including errors) carries `X-Model-Version: <artifact version>`.
+    - `X-Request-ID` from the caller is echoed back and logged; generated if absent.
+    - Inputs are validated again: ≤ 5,000 ratings, k ≤ 100 (n ≤ 100), ratings in [0.5, 5] in 0.5
+      steps, ≤ 200 ids per batch, body ≤ 1 MiB. Violations → 400 with the Error shape.
+    - Unknown movie IDs in `ratings` are skipped and counted in `ignored`; unknown IDs in `exclude`
+      are skipped silently. A duplicate movie_id in `ratings` → 400.
+    - Rating payloads are never logged.
+    - 503 `model_unavailable` until a verified artifact is loaded. Before then `X-Model-Version` is `none`.
+    - Cache freshness: recs-api calls `GET /v1/version` (sub-millisecond) before every
+      recommendation-cache lookup and keys the cache on the returned version, so after a hot swap
+      it never serves a response computed by an older model.
+    - `hybrid` and `mmr` are reserved model names (phase 6); until loaded they return 400 `unknown_model`.
+servers:
+  - url: http://localhost
+paths:
+  /v1/recommend:
+    post:
+      operationId: recommend
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RecommendRequest' } } } }
+      responses:
+        '200': { description: Top-k., headers: { X-Model-Version: { $ref: '#/components/headers/ModelVersion' } }, content: { application/json: { schema: { $ref: '#/components/schemas/RecommendResponse' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /v1/compare:
+    post:
+      operationId: compare
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CompareRequest' } } } }
+      responses:
+        '200': { description: "One list per model, in request order.", headers: { X-Model-Version: { $ref: '#/components/headers/ModelVersion' } }, content: { application/json: { schema: { $ref: '#/components/schemas/CompareResponse' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /v1/similar/{movie_id}:
+    get:
+      operationId: similar
+      parameters:
+        - { name: movie_id, in: path, required: true, schema: { type: integer, minimum: 1, maximum: 2147483647 } }
+        - { name: model, in: query, schema: { type: string, enum: [knn, content], default: knn } }
+        - { name: k, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+      responses:
+        '200': { description: Neighbours., headers: { X-Model-Version: { $ref: '#/components/headers/ModelVersion' } }, content: { application/json: { schema: { $ref: '#/components/schemas/SimilarResponse' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /v1/onboarding:
+    post:
+      operationId: onboarding
+      summary: Popular, genre-diverse movies not in `exclude`.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/OnboardingRequest' } } } }
+      responses:
+        '200': { description: Movie IDs., headers: { X-Model-Version: { $ref: '#/components/headers/ModelVersion' } }, content: { application/json: { schema: { $ref: '#/components/schemas/IdList' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /v1/movies/search:
+    get:
+      operationId: search
+      summary: Case- and accent-insensitive title prefix and substring match; prefix matches first, then by popularity.
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 100 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 20 } }
+      responses:
+        '200': { description: Movie IDs., headers: { X-Model-Version: { $ref: '#/components/headers/ModelVersion' } }, content: { application/json: { schema: { $ref: '#/components/schemas/IdList' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /v1/movies/batch:
+    post:
+      operationId: moviesBatch
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/BatchRequest' } } } }
+      responses:
+        '200': { description: Metadata for known IDs (request order); unknown IDs listed in `missing`., headers: { X-Model-Version: { $ref: '#/components/headers/ModelVersion' } }, content: { application/json: { schema: { $ref: '#/components/schemas/BatchResponse' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /v1/version:
+    get:
+      operationId: version
+      summary: The artifact version currently serving (cheap; used by recs-api before every cache lookup).
+      responses:
+        '200': { description: Version., headers: { X-Model-Version: { $ref: '#/components/headers/ModelVersion' } }, content: { application/json: { schema: { $ref: '#/components/schemas/Version' } } } }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /v1/models:
+    get:
+      operationId: models
+      responses:
+        '200': { description: Loaded models., headers: { X-Model-Version: { $ref: '#/components/headers/ModelVersion' } }, content: { application/json: { schema: { $ref: '#/components/schemas/ModelsResponse' } } } }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /healthz:
+    get:
+      operationId: healthz
+      responses:
+        '200': { description: A verified artifact is loaded., content: { application/json: { schema: { $ref: '#/components/schemas/Health' } } } }
+        '503': { description: No verified artifact., content: { application/json: { schema: { $ref: '#/components/schemas/Health' } } } }
+  /metrics:
+    get:
+      operationId: metrics
+      responses:
+        '200': { description: Prometheus text exposition., content: { text/plain: { schema: { type: string } } } }
+components:
+  headers:
+    ModelVersion: { schema: { type: string } }
+  responses:
+    BadRequest: { description: bad_request / invalid_json / unknown_model / body_too_large., content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    NotFound: { description: not_found., content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    Unavailable: { description: model_unavailable., content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+  schemas:
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code: { type: string, enum: [bad_request, invalid_json, body_too_large, not_found, unknown_model, model_unavailable, internal] }
+            message: { type: string }
+    ModelName: { type: string, enum: [pop, pop_count, knn, content, mf, als, hybrid, mmr] }
+    RatingIn:
+      type: object
+      additionalProperties: false
+      required: [movie_id, rating]
+      properties:
+        movie_id: { type: integer, minimum: 1, maximum: 2147483647 }
+        rating: { type: number, minimum: 0.5, maximum: 5.0, multipleOf: 0.5 }
+    Ratings: { type: array, maxItems: 5000, items: { $ref: '#/components/schemas/RatingIn' } }
+    Exclude: { type: array, maxItems: 10000, items: { type: integer, minimum: 1, maximum: 2147483647 } }
+    RecommendRequest:
+      type: object
+      additionalProperties: false
+      required: [model, ratings, k]
+      properties:
+        model: { $ref: '#/components/schemas/ModelName' }
+        ratings: { $ref: '#/components/schemas/Ratings' }
+        k: { type: integer, minimum: 1, maximum: 100 }
+        exclude: { $ref: '#/components/schemas/Exclude' }
+    CompareRequest:
+      type: object
+      additionalProperties: false
+      required: [models, ratings, k]
+      properties:
+        models: { type: array, minItems: 1, maxItems: 5, uniqueItems: true, items: { $ref: '#/components/schemas/ModelName' } }
+        ratings: { $ref: '#/components/schemas/Ratings' }
+        k: { type: integer, minimum: 1, maximum: 100 }
+        exclude: { $ref: '#/components/schemas/Exclude' }
+    Because:
+      type: object
+      additionalProperties: false
+      required: [movie_id, weight]
+      properties:
+        movie_id: { type: integer }
+        weight: { type: number }
+    Item:
+      type: object
+      additionalProperties: false
+      required: [movie_id, score, because]
+      properties:
+        movie_id: { type: integer }
+        score: { type: number }
+        because: { type: array, maxItems: 3, items: { $ref: '#/components/schemas/Because' } }
+    RecommendResponse:
+      type: object
+      additionalProperties: false
+      required: [model, items, ignored]
+      properties:
+        model: { $ref: '#/components/schemas/ModelName' }
+        items: { type: array, items: { $ref: '#/components/schemas/Item' } }
+        ignored: { type: integer, minimum: 0 }
+    CompareResponse:
+      type: object
+      additionalProperties: false
+      required: [results, ignored]
+      properties:
+        results:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [model, items]
+            properties:
+              model: { $ref: '#/components/schemas/ModelName' }
+              items: { type: array, items: { $ref: '#/components/schemas/Item' } }
+        ignored: { type: integer, minimum: 0 }
+    SimilarResponse:
+      type: object
+      additionalProperties: false
+      required: [model, movie_id, items]
+      properties:
+        model: { type: string, enum: [knn, content] }
+        movie_id: { type: integer }
+        items:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [movie_id, similarity]
+            properties:
+              movie_id: { type: integer }
+              similarity: { type: number }
+    OnboardingRequest:
+      type: object
+      additionalProperties: false
+      required: [n]
+      properties:
+        n: { type: integer, minimum: 1, maximum: 100 }
+        exclude: { $ref: '#/components/schemas/Exclude' }
+    IdList:
+      type: object
+      additionalProperties: false
+      required: [movie_ids]
+      properties:
+        movie_ids: { type: array, items: { type: integer } }
+    BatchRequest:
+      type: object
+      additionalProperties: false
+      required: [ids]
+      properties:
+        ids: { type: array, minItems: 1, maxItems: 200, items: { type: integer, minimum: 1, maximum: 2147483647 } }
+    MovieMeta:
+      type: object
+      additionalProperties: false
+      required: [movie_id, title, year, genres, tmdb_id, rating_count, mean_rating]
+      properties:
+        movie_id: { type: integer }
+        title: { type: string }
+        year: { type: [integer, 'null'] }
+        genres: { type: array, items: { type: string } }
+        tmdb_id: { type: [integer, 'null'] }
+        rating_count: { type: integer, minimum: 0 }
+        mean_rating: { type: [number, 'null'] }
+    BatchResponse:
+      type: object
+      additionalProperties: false
+      required: [movies, missing]
+      properties:
+        movies: { type: array, items: { $ref: '#/components/schemas/MovieMeta' } }
+        missing: { type: array, items: { type: integer } }
+    ModelsResponse:
+      type: object
+      additionalProperties: false
+      required: [artifact_version, trained_at, models, default_model]
+      properties:
+        artifact_version: { type: string }
+        trained_at: { type: string, format: date-time }
+        default_model: { $ref: '#/components/schemas/ModelName' }
+        models: { type: array, items: { $ref: '#/components/schemas/ModelName' } }
+    Version:
+      type: object
+      additionalProperties: false
+      required: [artifact_version]
+      properties:
+        artifact_version: { type: string }
+    Health:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: { type: string, enum: [ok, unavailable] }

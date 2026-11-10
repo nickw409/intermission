@@ -1,0 +1,77 @@
+{
+  "operationId": "search",
+  "cases": [
+    {
+      "name": "ok",
+      "request": {
+        "method": "GET",
+        "path": "/v1/movies/search",
+        "query": {
+          "q": "star",
+          "limit": "3"
+        },
+        "headers": {}
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "movie_ids": [
+            260,
+            1196,
+            1210
+          ]
+        }
+      }
+    },
+    {
+      "name": "empty_query",
+      "request": {
+        "method": "GET",
+        "path": "/v1/movies/search",
+        "query": {
+          "q": ""
+        },
+        "headers": {}
+      },
+      "response": {
+        "status": 400,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "error": {
+            "code": "bad_request",
+            "message": "q must be 1-100 characters"
+          }
+        }
+      }
+    },
+    {
+      "name": "model_unavailable",
+      "request": {
+        "method": "GET",
+        "path": "/v1/movies/search",
+        "query": {
+          "q": "star",
+          "limit": "3"
+        },
+        "headers": {}
+      },
+      "response": {
+        "status": 503,
+        "headers": {
+          "X-Model-Version": "none"
+        },
+        "body": {
+          "error": {
+            "code": "model_unavailable",
+            "message": "no verified artifact is loaded"
+          }
+        }
+      }
+    }
+  ]
+}

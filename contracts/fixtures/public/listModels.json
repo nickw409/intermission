@@ -1,0 +1,50 @@
+{
+  "operationId": "listModels",
+  "cases": [
+    {
+      "name": "ok",
+      "request": {
+        "method": "GET",
+        "path": "/api/models",
+        "query": {},
+        "headers": {}
+      },
+      "response": {
+        "status": 200,
+        "headers": {},
+        "body": {
+          "artifact_version": "2026-11-09T21-14-03Z",
+          "trained_at": "2026-11-09T21:14:03Z",
+          "default_model": "als",
+          "models": [
+            "pop",
+            "pop_count",
+            "knn",
+            "content",
+            "mf",
+            "als"
+          ]
+        }
+      }
+    },
+    {
+      "name": "model_unavailable",
+      "request": {
+        "method": "GET",
+        "path": "/api/models",
+        "query": {},
+        "headers": {}
+      },
+      "response": {
+        "status": 503,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "model_unavailable",
+            "message": "the recommendation service is unavailable"
+          }
+        }
+      }
+    }
+  ]
+}

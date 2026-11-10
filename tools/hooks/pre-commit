@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Blocks commits that contain secrets. Install with: tools/hooks/install.sh
+set -euo pipefail
+if command -v gitleaks >/dev/null 2>&1; then
+  gitleaks git --pre-commit --staged --redact --config .gitleaks.toml --exit-code 1 .
+else
+  echo "pre-commit: gitleaks not installed — secret scan skipped (CI still scans). See CONTRIBUTING notes in CLAUDE.md." >&2
+fi

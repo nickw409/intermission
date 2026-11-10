@@ -1,0 +1,383 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://intermission.local/contracts/report.schema.json",
+  "title": "Intermission run report",
+  "description": "Written by `recs-train eval` to data/reports/<run_id>.json and charted by the web UI. schema_version is the major version: the UI must reject any value it does not know. Determinism: two runs with the same code, data, config and seeds must produce byte-identical files after removing exactly these fields: run_id, created_at, train_seconds, eval_seconds, peak_rss_bytes. Per-user results are never in this file: they go to data/reports-private/<run_id>.per_user.json (contracts/per_user.schema.json), which is never served. Metric scope: ranking metrics (ndcg, recall, precision, map) average over evaluated users with at least one relevant held-out item; mean_pop_rank@10 and coverage@10 use every evaluated user's list. coverage@10's denominator is the whole catalog, including movies with no ratings. FROZEN after Wave 0.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "created_at",
+    "git_sha",
+    "dataset",
+    "split_hash",
+    "split",
+    "evaluated_on",
+    "model",
+    "config",
+    "seeds",
+    "train_seconds",
+    "eval_seconds",
+    "peak_rss_bytes",
+    "counts",
+    "cold_item_share",
+    "metrics",
+    "aggregates",
+    "per_k",
+    "slices",
+    "rating_metrics",
+    "rating_baselines",
+    "training_curve",
+    "training_curve_metric",
+    "foldin_jaccard@10"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,100}$"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "git_sha": {
+      "type": "string"
+    },
+    "dataset": {
+      "type": "string"
+    },
+    "split_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "split": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "min_ratings",
+        "test_fraction",
+        "val_fraction",
+        "test_min",
+        "test_max",
+        "seed"
+      ],
+      "properties": {
+        "min_ratings": {
+          "type": "integer"
+        },
+        "test_fraction": {
+          "type": "number"
+        },
+        "val_fraction": {
+          "type": "number"
+        },
+        "test_min": {
+          "type": "integer"
+        },
+        "test_max": {
+          "type": "integer"
+        },
+        "seed": {
+          "type": "integer"
+        }
+      }
+    },
+    "evaluated_on": {
+      "enum": [
+        "test",
+        "validation"
+      ]
+    },
+    "model": {
+      "type": "string"
+    },
+    "config": {
+      "type": "object"
+    },
+    "seeds": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991
+      }
+    },
+    "train_seconds": {
+      "type": "number",
+      "minimum": 0
+    },
+    "eval_seconds": {
+      "type": "number",
+      "minimum": 0
+    },
+    "peak_rss_bytes": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "users_evaluated",
+        "users_without_relevant",
+        "n_users",
+        "n_items",
+        "n_train_ratings"
+      ],
+      "properties": {
+        "users_evaluated": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "users_without_relevant": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "n_users": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "n_items": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "n_train_ratings": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "cold_item_share": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ndcg@10",
+        "recall@10",
+        "recall@50",
+        "precision@10",
+        "map@10",
+        "mean_pop_rank@10"
+      ],
+      "properties": {
+        "ndcg@10": {
+          "$ref": "#/$defs/estimate"
+        },
+        "recall@10": {
+          "$ref": "#/$defs/estimate"
+        },
+        "recall@50": {
+          "$ref": "#/$defs/estimate"
+        },
+        "precision@10": {
+          "$ref": "#/$defs/estimate"
+        },
+        "map@10": {
+          "$ref": "#/$defs/estimate"
+        },
+        "mean_pop_rank@10": {
+          "$ref": "#/$defs/estimate"
+        }
+      }
+    },
+    "aggregates": {
+      "type": "object",
+      "description": "Whole-population metrics with no per-user decomposition, so no CI.",
+      "additionalProperties": false,
+      "required": [
+        "coverage@10"
+      ],
+      "properties": {
+        "coverage@10": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "per_k": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ndcg",
+        "recall",
+        "precision"
+      ],
+      "properties": {
+        "ndcg": {
+          "$ref": "#/$defs/curve"
+        },
+        "recall": {
+          "$ref": "#/$defs/curve"
+        },
+        "precision": {
+          "$ref": "#/$defs/curve"
+        }
+      }
+    },
+    "slices": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cold_users"
+      ],
+      "properties": {
+        "cold_users": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "train_ratings_lt",
+            "users",
+            "ndcg@10"
+          ],
+          "properties": {
+            "train_ratings_lt": {
+              "type": "integer",
+              "description": "Users with fewer than this many training ratings."
+            },
+            "users": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "ndcg@10": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/estimate"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "rating_metrics": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/rating_errors"
+        }
+      ]
+    },
+    "rating_baselines": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "global_mean",
+            "user_bias",
+            "item_bias",
+            "user_item_bias"
+          ],
+          "properties": {
+            "global_mean": {
+              "$ref": "#/$defs/rating_errors"
+            },
+            "user_bias": {
+              "$ref": "#/$defs/rating_errors"
+            },
+            "item_bias": {
+              "$ref": "#/$defs/rating_errors"
+            },
+            "user_item_bias": {
+              "$ref": "#/$defs/rating_errors"
+            }
+          }
+        }
+      ]
+    },
+    "training_curve": {
+      "$ref": "#/$defs/curve"
+    },
+    "training_curve_metric": {
+      "type": "string"
+    },
+    "foldin_jaccard@10": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 1
+    }
+  },
+  "$defs": {
+    "estimate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mean",
+        "ci95"
+      ],
+      "properties": {
+        "mean": {
+          "type": "number"
+        },
+        "ci95": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    "curve": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "minItems": 2,
+        "maxItems": 2,
+        "prefixItems": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "number"
+          }
+        ]
+      }
+    },
+    "rating_errors": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rmse",
+        "mae",
+        "n"
+      ],
+      "properties": {
+        "rmse": {
+          "$ref": "#/$defs/estimate"
+        },
+        "mae": {
+          "$ref": "#/$defs/estimate"
+        },
+        "n": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

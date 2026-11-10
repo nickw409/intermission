@@ -1,0 +1,40 @@
+{
+  "operationId": "getPoster",
+  "cases": [
+    {
+      "name": "ok_placeholder",
+      "request": {
+        "method": "GET",
+        "path": "/api/posters/4993",
+        "query": {},
+        "headers": {}
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "image/svg+xml"
+        },
+        "body": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"342\" height=\"513\" viewBox=\"0 0 342 513\"><rect width=\"342\" height=\"513\" fill=\"#2b2b2b\"/></svg>"
+      }
+    },
+    {
+      "name": "bad_movie_id",
+      "request": {
+        "method": "GET",
+        "path": "/api/posters/abc",
+        "query": {},
+        "headers": {}
+      },
+      "response": {
+        "status": 400,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "bad_request",
+            "message": "movieId must be a positive integer"
+          }
+        }
+      }
+    }
+  ]
+}

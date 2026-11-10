@@ -1,0 +1,37 @@
+{
+  "operationId": "healthz",
+  "cases": [
+    {
+      "name": "ok",
+      "request": {
+        "method": "GET",
+        "path": "/healthz",
+        "query": {},
+        "headers": {}
+      },
+      "response": {
+        "status": 200,
+        "headers": {},
+        "body": {
+          "status": "ok"
+        }
+      }
+    },
+    {
+      "name": "degraded",
+      "request": {
+        "method": "GET",
+        "path": "/healthz",
+        "query": {},
+        "headers": {}
+      },
+      "response": {
+        "status": 503,
+        "headers": {},
+        "body": {
+          "status": "degraded"
+        }
+      }
+    }
+  ]
+}

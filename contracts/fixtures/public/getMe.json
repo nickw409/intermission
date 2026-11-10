@@ -1,0 +1,44 @@
+{
+  "operationId": "getMe",
+  "cases": [
+    {
+      "name": "ok",
+      "request": {
+        "method": "GET",
+        "path": "/api/me",
+        "query": {},
+        "headers": {
+          "Cookie": "session=fixture-session-token"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {},
+        "body": {
+          "username": "alice",
+          "rating_count": 5,
+          "created_at": 1794256680
+        }
+      }
+    },
+    {
+      "name": "unauthorized",
+      "request": {
+        "method": "GET",
+        "path": "/api/me",
+        "query": {},
+        "headers": {}
+      },
+      "response": {
+        "status": 401,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "unauthorized",
+            "message": "not logged in"
+          }
+        }
+      }
+    }
+  ]
+}

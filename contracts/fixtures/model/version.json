@@ -1,0 +1,44 @@
+{
+  "operationId": "version",
+  "cases": [
+    {
+      "name": "ok",
+      "request": {
+        "method": "GET",
+        "path": "/v1/version",
+        "query": {},
+        "headers": {}
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "artifact_version": "2026-11-09T21-14-03Z"
+        }
+      }
+    },
+    {
+      "name": "model_unavailable",
+      "request": {
+        "method": "GET",
+        "path": "/v1/version",
+        "query": {},
+        "headers": {}
+      },
+      "response": {
+        "status": 503,
+        "headers": {
+          "X-Model-Version": "none"
+        },
+        "body": {
+          "error": {
+            "code": "model_unavailable",
+            "message": "no verified artifact is loaded"
+          }
+        }
+      }
+    }
+  ]
+}

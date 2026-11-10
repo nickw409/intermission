@@ -1,0 +1,134 @@
+{
+  "operationId": "getOnboarding",
+  "cases": [
+    {
+      "name": "ok",
+      "request": {
+        "method": "GET",
+        "path": "/api/onboarding",
+        "query": {
+          "n": "4"
+        },
+        "headers": {
+          "Cookie": "session=fixture-session-token"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {},
+        "body": {
+          "items": [
+            {
+              "movieId": 356,
+              "title": "Forrest Gump",
+              "year": 1994,
+              "genres": [
+                "Comedy",
+                "Drama",
+                "Romance",
+                "War"
+              ]
+            },
+            {
+              "movieId": 4993,
+              "title": "Lord of the Rings: The Fellowship of the Ring, The",
+              "year": 2001,
+              "genres": [
+                "Adventure",
+                "Fantasy"
+              ]
+            },
+            {
+              "movieId": 593,
+              "title": "Silence of the Lambs, The",
+              "year": 1991,
+              "genres": [
+                "Crime",
+                "Horror",
+                "Thriller"
+              ]
+            },
+            {
+              "movieId": 480,
+              "title": "Jurassic Park",
+              "year": 1993,
+              "genres": [
+                "Action",
+                "Adventure",
+                "Sci-Fi",
+                "Thriller"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "bad_n",
+      "request": {
+        "method": "GET",
+        "path": "/api/onboarding",
+        "query": {
+          "n": "0"
+        },
+        "headers": {
+          "Cookie": "session=fixture-session-token"
+        }
+      },
+      "response": {
+        "status": 400,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "bad_request",
+            "message": "n must be between 1 and 60"
+          }
+        }
+      }
+    },
+    {
+      "name": "unauthorized",
+      "request": {
+        "method": "GET",
+        "path": "/api/onboarding",
+        "query": {
+          "n": "4"
+        },
+        "headers": {}
+      },
+      "response": {
+        "status": 401,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "unauthorized",
+            "message": "not logged in"
+          }
+        }
+      }
+    },
+    {
+      "name": "model_unavailable",
+      "request": {
+        "method": "GET",
+        "path": "/api/onboarding",
+        "query": {
+          "n": "4"
+        },
+        "headers": {
+          "Cookie": "session=fixture-session-token"
+        }
+      },
+      "response": {
+        "status": 503,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "model_unavailable",
+            "message": "the recommendation service is unavailable"
+          }
+        }
+      }
+    }
+  ]
+}

@@ -49,7 +49,7 @@ These steps will work once the first build wave lands. Prerequisites: CMake 3.25
 tools/download_movielens.sh ml-latest-small
 cmake --preset debug && cmake --build --preset debug && ctest --preset debug
 build/debug/recs-train ingest --dataset ml-latest-small
-build/debug/recs-train eval --model pop --config configs/pop.json
+build/debug/recs-train eval --dataset ml-latest-small --model pop --config configs/pop.json
 docker compose -f deploy/compose.yaml -f deploy/compose.dev.yaml up
 ```
 

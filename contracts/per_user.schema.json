@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://intermission.local/contracts/per_user.schema.json",
+  "title": "Per-user evaluation results (private)",
+  "description": "Written by `recs-train eval --keep-per-user` to data/reports-private/<run_id>.per_user.json. Never served by recs-api (contains dense user indices, and website users after a retrain). Used by `recs-train compare` for paired bootstraps. Arrays are aligned with `users` (ascending UserIdx; all evaluated users). Ranking metrics are null for users without a relevant held-out item. FROZEN after Wave 0.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "model",
+    "dataset",
+    "split_hash",
+    "evaluated_on",
+    "users",
+    "n_relevant",
+    "metrics"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,100}$"
+    },
+    "model": {
+      "type": "string"
+    },
+    "dataset": {
+      "type": "string"
+    },
+    "split_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "evaluated_on": {
+      "enum": [
+        "test",
+        "validation"
+      ]
+    },
+    "users": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "n_relevant": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ndcg@10",
+        "recall@10",
+        "recall@50",
+        "precision@10",
+        "map@10",
+        "pop_rank@10"
+      ],
+      "properties": {
+        "ndcg@10": {
+          "type": "array",
+          "items": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "recall@10": {
+          "type": "array",
+          "items": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "recall@50": {
+          "type": "array",
+          "items": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "precision@10": {
+          "type": "array",
+          "items": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "map@10": {
+          "type": "array",
+          "items": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "pop_rank@10": {
+          "type": "array",
+          "items": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "rating": {
+      "description": "Present only for models that predict ratings: per-user sum of squared errors, sum of absolute errors, and count.",
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "sq_err",
+        "abs_err",
+        "count"
+      ],
+      "properties": {
+        "sq_err": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        },
+        "abs_err": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        },
+        "count": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        }
+      }
+    }
+  }
+}

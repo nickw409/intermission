@@ -1,0 +1,137 @@
+{
+  "operationId": "similar",
+  "cases": [
+    {
+      "name": "ok",
+      "request": {
+        "method": "GET",
+        "path": "/v1/similar/260",
+        "query": {
+          "model": "knn",
+          "k": "3"
+        },
+        "headers": {}
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "model": "knn",
+          "movie_id": 260,
+          "items": [
+            {
+              "movie_id": 1196,
+              "similarity": 0.62
+            },
+            {
+              "movie_id": 1210,
+              "similarity": 0.55
+            },
+            {
+              "movie_id": 2571,
+              "similarity": 0.31
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "bad_movie_id",
+      "request": {
+        "method": "GET",
+        "path": "/v1/similar/0",
+        "query": {
+          "model": "knn",
+          "k": "3"
+        },
+        "headers": {}
+      },
+      "response": {
+        "status": 400,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "error": {
+            "code": "bad_request",
+            "message": "movie_id must be a positive integer"
+          }
+        }
+      }
+    },
+    {
+      "name": "unknown_model",
+      "request": {
+        "method": "GET",
+        "path": "/v1/similar/260",
+        "query": {
+          "model": "als",
+          "k": "3"
+        },
+        "headers": {}
+      },
+      "response": {
+        "status": 400,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "error": {
+            "code": "unknown_model",
+            "message": "similar supports knn and content"
+          }
+        }
+      }
+    },
+    {
+      "name": "not_found",
+      "request": {
+        "method": "GET",
+        "path": "/v1/similar/999999999",
+        "query": {
+          "model": "knn",
+          "k": "3"
+        },
+        "headers": {}
+      },
+      "response": {
+        "status": 404,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "error": {
+            "code": "not_found",
+            "message": "movie 999999999 not found"
+          }
+        }
+      }
+    },
+    {
+      "name": "model_unavailable",
+      "request": {
+        "method": "GET",
+        "path": "/v1/similar/260",
+        "query": {
+          "model": "knn",
+          "k": "3"
+        },
+        "headers": {}
+      },
+      "response": {
+        "status": 503,
+        "headers": {
+          "X-Model-Version": "none"
+        },
+        "body": {
+          "error": {
+            "code": "model_unavailable",
+            "message": "no verified artifact is loaded"
+          }
+        }
+      }
+    }
+  ]
+}
