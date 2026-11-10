@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/nickw409/intermission/api/internal/app"
@@ -230,19 +231,31 @@ func newestFirst(a, b Summary) int {
 	return strings.Compare(b.RunID, a.RunID)
 }
 
-// readReport opens path, refusing anything but a regular file no larger
-// than MaxReportBytes. The name is checked with Lstat (a symlink is not a
-// regular file) and the opened file must be that same file, so a symlink
-// swapped in between is refused too.
-func readReport(path string) ([]byte, error) {
-	before, err := os.Lstat(path)
+// openRegular opens path for reading only if its last component is not a
+// symlink (O_NOFOLLOW) and the opened file is a regular file (checked on the
+// open descriptor, so nothing can be swapped in between). O_NONBLOCK keeps
+// a FIFO from blocking the open; it is then refused as not regular.
+func openRegular(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
-	if !before.Mode().IsRegular() {
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		f.Close()
 		return nil, errors.New("not a regular file")
 	}
-	f, err := os.Open(path)
+	return f, nil
+}
+
+// readReport reads path with openRegular, refusing files over
+// MaxReportBytes.
+func readReport(path string) ([]byte, error) {
+	f, err := openRegular(path)
 	if err != nil {
 		return nil, err
 	}
@@ -250,9 +263,6 @@ func readReport(path string) ([]byte, error) {
 	after, err := f.Stat()
 	if err != nil {
 		return nil, err
-	}
-	if !os.SameFile(before, after) {
-		return nil, errors.New("file changed while opening")
 	}
 	if after.Size() > MaxReportBytes {
 		return nil, errors.New("report too large")
