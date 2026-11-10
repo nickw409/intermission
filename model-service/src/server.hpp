@@ -4,18 +4,17 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 
 #include "service.hpp"
 
-namespace httplib {
-class Server;
-}
-
 namespace recs::service {
+
+class ServiceServer;  // httplib::Server subclass, defined in server.cpp
 
 struct ListenOptions {
   std::string unix_socket;  // e.g. /run/recs/model.sock; used when non-empty
-  std::string tcp_host;     // dev fallback; must be a loopback address
+  std::string tcp_host;     // dev fallback; must be 127.0.0.1 or ::1
   int tcp_port = 0;         // 0 = pick a free port (tests)
   int threads = 16;         // worker threads (each keep-alive connection holds one while open)
   unsigned socket_mode = 0660;  // permissions of the Unix socket file
@@ -39,9 +38,14 @@ class HttpServer {
   /// Blocks until run() is accepting connections.
   void wait_until_ready() const;
 
+  /// Runs raw bytes received on one connection through the full HTTP stack (httplib parsing,
+  /// framing checks, routing, Service) in memory and returns the bytes written back. No socket or
+  /// thread is involved; used by the raw-HTTP fuzzer and tests.
+  std::string process_raw(std::string_view bytes);
+
  private:
   Service& service_;
-  std::unique_ptr<httplib::Server> svr_;
+  std::unique_ptr<ServiceServer> svr_;
   std::string socket_path_;
   int port_ = 0;
 };

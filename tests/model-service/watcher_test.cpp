@@ -59,7 +59,7 @@ void publish(const fs::path& root, const std::string& version, double m, bool po
 
 }  // namespace
 
-TEST_CASE("watcher: loads CURRENT, ignores unchanged, rejects corrupted and partial artifacts", "[model-service][swap]") {
+TEST_CASE("recs-model: watcher: loads CURRENT, ignores unchanged, rejects corrupted and partial artifacts", "[model-service][swap]") {
   TempDir tmp;
   const fs::path root = tmp.path / "artifacts";
   recs::service::BundleHolder holder;
@@ -115,7 +115,7 @@ TEST_CASE("watcher: loads CURRENT, ignores unchanged, rejects corrupted and part
   CHECK(holder.get()->version == "v6");
 }
 
-TEST_CASE("no artifact: 503 model_unavailable everywhere except /metrics; healthz 503", "[model-service][swap]") {
+TEST_CASE("recs-model: no artifact: 503 model_unavailable everywhere except /metrics; healthz 503", "[model-service][swap]") {
   recs::service::BundleHolder holder;
   recs::service::Metrics metrics;
   recs::service::Service svc(holder, metrics, [](std::string_view) {});
@@ -142,7 +142,7 @@ TEST_CASE("no artifact: 503 model_unavailable everywhere except /metrics; health
   CHECK(svc.handle({"GET", "/metrics", {}, "", ""}).status == 200);
 }
 
-TEST_CASE("hot swap under 8 concurrent clients: zero failed requests, one version header each", "[model-service][swap]") {
+TEST_CASE("recs-model: hot swap under 8 concurrent clients: zero failed requests, one version header each", "[model-service][swap]") {
   TempDir tmp;
   const fs::path root = tmp.path / "artifacts";
   publish(root, "v1", 10);
@@ -214,4 +214,35 @@ TEST_CASE("hot swap under 8 concurrent clients: zero failed requests, one versio
   CHECK(served.load() >= 150);
   CHECK(seen.count("v3") == 1);
   for (const auto& v : seen) CHECK((v == "v1" || v == "v2" || v == "v3"));
+}
+
+TEST_CASE("recs-model: watcher rejects CURRENT escaping the root and symlinked version directories", "[model-service][swap]") {
+  TempDir tmp;
+  const fs::path root = tmp.path / "artifacts";
+  publish(root, "v1", 10);
+  recs::service::BundleHolder holder;
+  recs::service::Metrics metrics;
+  recs::service::Service svc(holder, metrics, [](std::string_view) {});
+  recs::service::ArtifactWatcher w(root, holder, metrics, svc);
+  REQUIRE(w.poll_once() == Poll::swapped);
+
+  // An artifact outside the root that would verify on its own.
+  const fs::path outside = tmp.path / "outside";
+  publish(outside, "x", 3, false);
+  for (const std::string& current : {std::string("../outside/x"), std::string("/abs"), (outside / "x").string(),
+                                    std::string("."), std::string("..")}) {
+    INFO(current);
+    std::ofstream(root / "CURRENT", std::ios::trunc) << current << "\n";
+    CHECK(w.poll_once() == Poll::failed);
+    CHECK(holder.get()->version == "v1");
+    CHECK_THROWS_AS(recs::service::load_current_bundle(root), recs::ArtifactError);
+  }
+
+  // A version directory that is a symlink to a valid artifact elsewhere.
+  publish(outside, "v9", 3, false);
+  fs::create_directory_symlink(outside / "v9", root / "v9");
+  recs::write_current(root, "v9");
+  CHECK(w.poll_once() == Poll::failed);
+  CHECK(holder.get()->version == "v1");
+  CHECK_THROWS_AS(recs::service::load_current_bundle(root), recs::ArtifactError);
 }

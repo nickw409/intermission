@@ -40,6 +40,9 @@ struct Bundle {
 /// ArtifactError otherwise, so an inconsistent artifact is never served.
 std::shared_ptr<const Bundle> make_bundle(LoadedArtifact&& artifact);
 
+/// root/<version> after checking it is a real directory, not a symlink. Throws ArtifactError.
+std::filesystem::path version_dir(const std::filesystem::path& root, const std::string& version);
+
 /// Reads root/CURRENT, verifies and loads that artifact, and builds a Bundle. Throws ArtifactError
 /// if CURRENT is missing or the artifact fails verification.
 std::shared_ptr<const Bundle> load_current_bundle(const std::filesystem::path& root);

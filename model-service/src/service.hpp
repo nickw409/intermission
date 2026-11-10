@@ -52,6 +52,11 @@ class Service {
   /// request line, ...). `http_status` is the status the HTTP layer chose. Never throws.
   Response transport_error(int http_status, std::string_view request_id) noexcept;
 
+  /// A contract Error response (`code`, `message`) for a request refused before routing, e.g. by
+  /// the HTTP layer's framing checks. Logged and counted under route "other". Never throws.
+  Response error_response(int status, std::string_view code, std::string_view message,
+                          std::string_view request_id) noexcept;
+
   /// Writes a log line through the configured sink (used by the HTTP layer and main()).
   void log_event(std::string_view level, std::string_view msg) noexcept;
 

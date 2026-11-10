@@ -28,7 +28,7 @@ ArtifactWatcher::Poll ArtifactWatcher::poll_once() noexcept {
 
     const auto t0 = std::chrono::steady_clock::now();
     try {
-      auto bundle = make_bundle(load_artifact(root_ / *version));
+      auto bundle = make_bundle(load_artifact(version_dir(root_, *version)));
       if (bundle->version != *version) throw ArtifactError("manifest version does not match CURRENT");
       metrics_.set_artifact_load_seconds(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
       holder_.store(std::move(bundle));

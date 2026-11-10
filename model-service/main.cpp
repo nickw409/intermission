@@ -7,6 +7,7 @@
 // artifact named by data/artifacts/CURRENT and hot-swaps in each new one as it appears.
 #include <signal.h>
 
+#include <charconv>
 #include <chrono>
 #include <iostream>
 #include <string>
@@ -29,7 +30,7 @@ int main(int argc, char** argv) {
   int poll_seconds = 2;
   app.add_option("--artifacts", artifacts, "Artifact root holding CURRENT")->capture_default_str();
   app.add_option("--socket", socket_path, "Unix socket path")->capture_default_str();
-  app.add_option("--addr", listen, "Dev fallback instead of the socket: loopback HOST:PORT, e.g. 127.0.0.1:8090");
+  app.add_option("--addr", listen, "Dev fallback instead of the socket: 127.0.0.1:PORT or ::1:PORT, e.g. 127.0.0.1:8090");
   app.add_option("--threads", threads, "Worker threads")->check(CLI::Range(1, 64))->capture_default_str();
   app.add_option("--poll-seconds", poll_seconds, "Seconds between checks of CURRENT")
       ->check(CLI::Range(1, 3600))
@@ -59,15 +60,15 @@ int main(int argc, char** argv) {
       return 2;
     }
     opts.tcp_host = listen.substr(0, colon);
-    try {
-      opts.tcp_port = std::stoi(listen.substr(colon + 1));
-    } catch (const std::exception&) {
-      opts.tcp_port = -1;
-    }
-    if (opts.tcp_port < 1 || opts.tcp_port > 65535) {
+    const std::string port = listen.substr(colon + 1);
+    int p = 0;
+    const auto r = std::from_chars(port.data(), port.data() + port.size(), p);
+    if (port.empty() || port.size() > 5 || r.ec != std::errc() || r.ptr != port.data() + port.size() || p < 1 ||
+        p > 65535) {
       std::cerr << recs::service::service_name() << ": invalid port in --addr\n";
       return 2;
     }
+    opts.tcp_port = p;
   }
 
   recs::service::HttpServer server(service);

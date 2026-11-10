@@ -23,7 +23,7 @@ std::vector<std::int64_t> search_ids(const recs::service::Bundle& b, std::string
 
 }  // namespace
 
-TEST_CASE("normalize_text folds case, accents and punctuation", "[model-service][search]") {
+TEST_CASE("recs-model: normalize_text folds case, accents and punctuation", "[model-service][search]") {
   CHECK(normalize_text("Star Wars: Episode IV") == "star wars episode iv");
   CHECK(normalize_text("Amélie") == "amelie");
   CHECK(normalize_text("AME\xCC\x81LIE") == "amelie");  // decomposed: E + combining acute
@@ -40,7 +40,7 @@ TEST_CASE("normalize_text folds case, accents and punctuation", "[model-service]
   CHECK(normalize_text("Кино") == "Кино");                // non-Latin text kept as is
 }
 
-TEST_CASE("article_first_title moves MovieLens trailing articles", "[model-service][search]") {
+TEST_CASE("recs-model: article_first_title moves MovieLens trailing articles", "[model-service][search]") {
   using recs::service::article_first_title;
   CHECK(article_first_title("Matrix, The") == "The Matrix");
   CHECK(article_first_title("Lord of the Rings: The Fellowship of the Ring, The") ==
@@ -53,7 +53,7 @@ TEST_CASE("article_first_title moves MovieLens trailing articles", "[model-servi
   CHECK(article_first_title("Fight Club") == std::nullopt);
 }
 
-TEST_CASE("search: prefix matches first, then substring, each by popularity", "[model-service][search]") {
+TEST_CASE("recs-model: search: prefix matches first, then substring, each by popularity", "[model-service][search]") {
   const auto b = recs::testing::fixture_bundle();
   // Prefix "star": the three Star Wars films by rating count (251, 211, 196); then "Lone Star" (a
   // substring match).
@@ -74,7 +74,7 @@ TEST_CASE("search: prefix matches first, then substring, each by popularity", "[
   CHECK(search_ids(*b, "   ").empty());
 }
 
-TEST_CASE("onboarding: popular, genre-diverse, never excluded or unrated", "[model-service][onboarding]") {
+TEST_CASE("recs-model: onboarding: popular, genre-diverse, never excluded or unrated", "[model-service][onboarding]") {
   const auto b = recs::testing::fixture_bundle();
   const auto ext = [&](const std::vector<recs::ItemIdx>& v) {
     std::vector<std::int64_t> out;

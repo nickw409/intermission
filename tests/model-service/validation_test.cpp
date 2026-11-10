@@ -46,7 +46,7 @@ json rec(json r, json k = 10) { return {{"model", "pop"}, {"ratings", std::move(
 
 }  // namespace
 
-TEST_CASE("recommend: ratings count limit is 5,000", "[model-service][validation]") {
+TEST_CASE("recs-model: recommend: ratings count limit is 5,000", "[model-service][validation]") {
   Fixture f;
   auto ok = f.post("/v1/recommend", rec(ratings(5000)));
   CHECK(ok.status == 200);
@@ -56,7 +56,7 @@ TEST_CASE("recommend: ratings count limit is 5,000", "[model-service][validation
   CHECK(code_of(bad) == "bad_request");
 }
 
-TEST_CASE("recommend: k must be an integer in [1, 100]", "[model-service][validation]") {
+TEST_CASE("recs-model: recommend: k must be an integer in [1, 100]", "[model-service][validation]") {
   Fixture f;
   CHECK(f.post("/v1/recommend", rec(json::array(), 1)).status == 200);
   CHECK(f.post("/v1/recommend", rec(json::array(), 100)).status == 200);
@@ -72,7 +72,7 @@ TEST_CASE("recommend: k must be an integer in [1, 100]", "[model-service][valida
   CHECK(f.post("/v1/recommend", missing_k).status == 400);
 }
 
-TEST_CASE("recommend: ratings must be in [0.5, 5] in 0.5 steps", "[model-service][validation]") {
+TEST_CASE("recs-model: recommend: ratings must be in [0.5, 5] in 0.5 steps", "[model-service][validation]") {
   Fixture f;
   for (double v : {0.5, 1.0, 2.5, 5.0}) {
     CHECK(f.post("/v1/recommend", rec(json::array({{{"movie_id", 260}, {"rating", v}}}))).status == 200);
@@ -87,7 +87,7 @@ TEST_CASE("recommend: ratings must be in [0.5, 5] in 0.5 steps", "[model-service
   }
 }
 
-TEST_CASE("recommend: movie ids must be integers in [1, 2^31-1]", "[model-service][validation]") {
+TEST_CASE("recs-model: recommend: movie ids must be integers in [1, 2^31-1]", "[model-service][validation]") {
   Fixture f;
   CHECK(f.post("/v1/recommend", rec(json::array({{{"movie_id", 2147483647}, {"rating", 3}}}))).status == 200);
   for (const json& id : {json(0), json(-1), json(2147483648LL), json(1.5), json("260"), json(nullptr),
@@ -100,7 +100,7 @@ TEST_CASE("recommend: movie ids must be integers in [1, 2^31-1]", "[model-servic
   }
 }
 
-TEST_CASE("recommend: object shapes are strict", "[model-service][validation]") {
+TEST_CASE("recs-model: recommend: object shapes are strict", "[model-service][validation]") {
   Fixture f;
   json extra = rec(json::array());
   extra["user"] = "alice";
@@ -119,7 +119,7 @@ TEST_CASE("recommend: object shapes are strict", "[model-service][validation]") 
   CHECK(code_of(f.post("/v1/recommend", model_not_string)) == "bad_request");
 }
 
-TEST_CASE("recommend: duplicates, unknown ids, exclude", "[model-service][validation]") {
+TEST_CASE("recs-model: recommend: duplicates, unknown ids, exclude", "[model-service][validation]") {
   Fixture f;
   // A duplicate movie_id is rejected even when the id is unknown to the catalog.
   auto dup = f.post("/v1/recommend", rec(json::array({{{"movie_id", 999999}, {"rating", 3}}, {{"movie_id", 999999}, {"rating", 4}}})));
@@ -146,7 +146,7 @@ TEST_CASE("recommend: duplicates, unknown ids, exclude", "[model-service][valida
   CHECK(code_of(f.post("/v1/recommend", big)) == "bad_request");
 }
 
-TEST_CASE("model names: unknown, reserved and not loaded", "[model-service][validation]") {
+TEST_CASE("recs-model: model names: unknown, reserved and not loaded", "[model-service][validation]") {
   Fixture f;
   for (const char* m : {"svd", "hybrid", "mmr", "", "POP"}) {
     json body = rec(json::array());
@@ -171,7 +171,7 @@ TEST_CASE("model names: unknown, reserved and not loaded", "[model-service][vali
   CHECK(code_of(svc.handle({"GET", "/v1/similar/260", {{"model", "knn"}}, "", ""})) == "unknown_model");
 }
 
-TEST_CASE("compare: models list rules", "[model-service][validation]") {
+TEST_CASE("recs-model: compare: models list rules", "[model-service][validation]") {
   Fixture f;
   const auto cmp = [&](json models) {
     return f.post("/v1/compare", json{{"models", std::move(models)}, {"ratings", json::array()}, {"k", 5}});
@@ -188,7 +188,7 @@ TEST_CASE("compare: models list rules", "[model-service][validation]") {
   CHECK(ok["results"][1]["model"] == "pop");
 }
 
-TEST_CASE("similar: path and query validation", "[model-service][validation]") {
+TEST_CASE("recs-model: similar: path and query validation", "[model-service][validation]") {
   Fixture f;
   CHECK(f.get("/v1/similar/260").status == 200);
   CHECK(json::parse(f.get("/v1/similar/260").body)["items"].size() == 16);  // default k = 20, 17 movies
@@ -210,7 +210,7 @@ TEST_CASE("similar: path and query validation", "[model-service][validation]") {
   CHECK(f.get("/v1/similar/260/extra").status == 404);
 }
 
-TEST_CASE("search: q and limit validation", "[model-service][validation]") {
+TEST_CASE("recs-model: search: q and limit validation", "[model-service][validation]") {
   Fixture f;
   CHECK(code_of(f.get("/v1/movies/search")) == "bad_request");
   CHECK(code_of(f.get("/v1/movies/search", {{"q", ""}})) == "bad_request");
@@ -230,7 +230,7 @@ TEST_CASE("search: q and limit validation", "[model-service][validation]") {
   CHECK(f.get("/v1/movies/search", {{"q", "a"}, {"limit", "50"}}).status == 200);
 }
 
-TEST_CASE("movies/batch and onboarding limits", "[model-service][validation]") {
+TEST_CASE("recs-model: movies/batch and onboarding limits", "[model-service][validation]") {
   Fixture f;
   json ids = json::array();
   for (int i = 1; i <= 200; ++i) ids.push_back(i);
@@ -247,13 +247,16 @@ TEST_CASE("movies/batch and onboarding limits", "[model-service][validation]") {
   CHECK(code_of(f.post("/v1/onboarding", json{{"n", 4}, {"exclude", {-4}}})) == "bad_request");
 }
 
-TEST_CASE("hostile bodies are rejected cleanly", "[model-service][validation]") {
+TEST_CASE("recs-model: hostile bodies are rejected cleanly", "[model-service][validation]") {
   Fixture f;
   // Deep nesting would overflow the stack of a recursive parser.
   const std::string deep = std::string(500000, '[') + std::string(500000, ']');
   CHECK(code_of(f.post("/v1/recommend", deep)) == "invalid_json");
   const std::string deep_obj = "{\"model\":" + std::string(100000, '[');
   CHECK(code_of(f.post("/v1/compare", deep_obj)) == "invalid_json");
+  // More closers than openers is malformed, not "depth -1".
+  CHECK(code_of(f.post("/v1/recommend", std::string(1000, ']') + "{}")) == "invalid_json");
+  CHECK(code_of(f.post("/v1/recommend", std::string("}{\"model\":\"pop\"}"))) == "invalid_json");
   // Nesting inside a string does not count.
   json s = rec(json::array());
   s["model"] = std::string(1000, '[');
@@ -269,7 +272,7 @@ TEST_CASE("hostile bodies are rejected cleanly", "[model-service][validation]") 
   CHECK(code_of(f.post("/v1/recommend", std::string(R"({"model":"pop","ratings":null,"k":1})"))) == "bad_request");
 }
 
-TEST_CASE("routing: unknown paths and methods", "[model-service][validation]") {
+TEST_CASE("recs-model: routing: unknown paths and methods", "[model-service][validation]") {
   Fixture f;
   auto r = f.get("/v2/recommend");
   CHECK(r.status == 404);

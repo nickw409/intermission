@@ -1,0 +1,7 @@
+POST /v1/movies/batch HTTP/1.1
+Host: x
+X-Request-ID: r1
+Content-Type: application/json
+Content-Length: 15
+
+{"ids":[260,1]}

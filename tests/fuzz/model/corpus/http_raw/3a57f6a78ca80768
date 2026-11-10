@@ -1,0 +1,4 @@
+GET /v1/similar/260?model=knn&k=3 HTTP/1.1
+Host: x
+Connection: keep-alive
+

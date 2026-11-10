@@ -15,6 +15,9 @@ target_link_libraries(recs-model PRIVATE recs_model_service CLI11::CLI11)
 recs_set_warnings(recs-model)
 
 if(RECS_FUZZ)
+  # Coverage-instrument the service library (handlers, search, and the httplib code it
+  # instantiates) so libFuzzer is guided through it, not only through the harness files.
+  target_compile_options(recs_model_service PRIVATE -fsanitize=fuzzer-no-link)
   file(GLOB RECS_FUZZERS CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tests/fuzz/model/*.cpp)
   foreach(f ${RECS_FUZZERS})
     get_filename_component(n ${f} NAME_WE)

@@ -1,6 +1,7 @@
 // Cross-cutting service behaviour: X-Model-Version and X-Request-ID on every response, logs that
 // never contain rating payloads, /metrics, and bundle snapshots across a swap.
 #include <atomic>
+#include <stdexcept>
 #include <mutex>
 #include <set>
 #include <string>
@@ -31,7 +32,7 @@ struct Captured {
 
 }  // namespace
 
-TEST_CASE("every response carries X-Model-Version and X-Request-ID", "[model-service][headers]") {
+TEST_CASE("recs-model: every response carries X-Model-Version and X-Request-ID", "[model-service][headers]") {
   recs::service::BundleHolder holder;
   recs::service::Metrics metrics;
   recs::service::Service svc(holder, metrics, [](std::string_view) {});
@@ -62,7 +63,7 @@ TEST_CASE("every response carries X-Model-Version and X-Request-ID", "[model-ser
   CHECK(svc.handle({"GET", "/v1/version", {}, std::string(128, 'a'), ""}).request_id == std::string(128, 'a'));
 }
 
-TEST_CASE("logs never contain rating payloads", "[model-service][logging]") {
+TEST_CASE("recs-model: logs never contain rating payloads", "[model-service][logging]") {
   recs::service::BundleHolder holder;
   holder.store(recs::testing::fixture_bundle());
   recs::service::Metrics metrics;
@@ -111,7 +112,7 @@ TEST_CASE("logs never contain rating payloads", "[model-service][logging]") {
   CHECK(json::parse(cap.lines[2])["status"] == 400);
 }
 
-TEST_CASE("/metrics exposes request, latency, fold-in and model version series", "[model-service][metrics]") {
+TEST_CASE("recs-model: /metrics exposes request, latency, fold-in and model version series", "[model-service][metrics]") {
   recs::service::BundleHolder holder;
   holder.store(recs::testing::fixture_bundle());
   recs::service::Metrics metrics;
@@ -139,7 +140,7 @@ TEST_CASE("/metrics exposes request, latency, fold-in and model version series",
   CHECK(m.find("recs_model_artifact_loaded 1\n") != std::string::npos);
 }
 
-TEST_CASE("a swap mid-traffic never mixes versions inside one response", "[model-service][swap]") {
+TEST_CASE("recs-model: a swap mid-traffic never mixes versions inside one response", "[model-service][swap]") {
   recs::service::BundleHolder holder;
   const auto v1 = recs::testing::fixture_bundle(std::vector<std::string>{"pop", "pop_count", "knn", "content", "mf", "als"}, "v1");
   const auto v2 = recs::testing::fixture_bundle(std::vector<std::string>{"pop", "knn"}, "v2");
@@ -170,4 +171,48 @@ TEST_CASE("a swap mid-traffic never mixes versions inside one response", "[model
   stop = true;
   for (auto& c : clients) c.join();
   CHECK(failures.load() == 0);
+}
+
+namespace {
+
+// A model whose fold_in always throws, as a bug in model code would.
+class ThrowingModel final : public recs::Model {
+ public:
+  explicit ThrowingModel(std::uint32_t n) : n_(n) {}
+  std::string_view name() const override { return "als"; }
+  void fit(const recs::Dataset&, const recs::Config&, const recs::TrainContext&) override {}
+  recs::UserState fold_in(std::span<const recs::Rating>) const override { throw std::runtime_error("factor solve failed"); }
+  void score(const recs::UserState&, std::span<float>) const override {}
+  recs::Explanation explain(const recs::UserState&, recs::ItemIdx) const override { return {}; }
+  void save(const recs::fs::path&) const override {}
+  void load(const recs::fs::path&) override {}
+  std::uint32_t n_items() const override { return n_; }
+  recs::Config config() const override { return recs::Config::object(); }
+
+ private:
+  std::uint32_t n_;
+};
+
+}  // namespace
+
+TEST_CASE("recs-model: a model exception is a 500 internal with exactly one error log line", "[model-service][logging]") {
+  auto artifact = recs::testing::fixture_artifact();
+  artifact.models["als"] = std::make_unique<ThrowingModel>(artifact.catalog.items.size());
+  recs::service::BundleHolder holder;
+  holder.store(recs::service::make_bundle(std::move(artifact)));
+  recs::service::Metrics metrics;
+  Captured cap;
+  recs::service::Service svc(holder, metrics, cap.sink());
+
+  const auto r = svc.handle({"POST", "/v1/recommend", {}, "boom-1", R"({"model":"als","ratings":[{"movie_id":260,"rating":5}],"k":3})"});
+  CHECK(r.status == 500);
+  CHECK(json::parse(r.body) == json{{"error", {{"code", "internal"}, {"message", "internal error"}}}});
+  CHECK(r.model_version == recs::testing::kFixtureVersion);
+  REQUIRE(cap.lines.size() == 1);
+  const json line = json::parse(cap.lines[0]);
+  CHECK(line["level"] == "error");
+  CHECK(line["status"] == 500);
+  CHECK(line["request_id"] == "boom-1");
+  CHECK(line["error"] == "factor solve failed");
+  CHECK(cap.lines[0].find("260") == std::string::npos);  // the payload is still not logged
 }

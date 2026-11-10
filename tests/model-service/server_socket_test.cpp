@@ -84,7 +84,7 @@ httplib::Client unix_client(const fs::path& sock) {
 
 }  // namespace
 
-TEST_CASE("recs-model serves the tiny popularity artifact over a Unix socket", "[model-service][server]") {
+TEST_CASE("recs-model: serves the tiny popularity artifact over a Unix socket", "[model-service][server]") {
   TempDir tmp;
   const fs::path root = tmp.path / "artifacts";
   build_tiny_artifact(root);
@@ -203,7 +203,7 @@ TEST_CASE("recs-model serves the tiny popularity artifact over a Unix socket", "
   }
 }
 
-TEST_CASE("load_current_bundle rejects a corrupted artifact", "[model-service][server]") {
+TEST_CASE("recs-model: load_current_bundle rejects a corrupted artifact", "[model-service][server]") {
   TempDir tmp;
   const fs::path root = tmp.path / "artifacts";
   build_tiny_artifact(root);
@@ -216,7 +216,7 @@ TEST_CASE("load_current_bundle rejects a corrupted artifact", "[model-service][s
   CHECK_THROWS_AS(recs::service::load_current_bundle(tmp.path / "nothing-here"), recs::ArtifactError);
 }
 
-TEST_CASE("TCP fallback binds loopback only; stale sockets are replaced, other files are not", "[model-service][server]") {
+TEST_CASE("recs-model: TCP fallback binds loopback only; stale sockets are replaced, other files are not", "[model-service][server]") {
   recs::service::BundleHolder holder;
   recs::service::Metrics metrics;
   recs::service::Service svc(holder, metrics, [](std::string_view) {});

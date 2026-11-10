@@ -154,7 +154,7 @@ void check_case(Harness& h, const std::string& op, const json& c) {
 
 }  // namespace
 
-TEST_CASE("recs-model produces every contracts/fixtures/model response", "[model-service][contract]") {
+TEST_CASE("recs-model: produces every contracts/fixtures/model response", "[model-service][contract]") {
   Harness h;
   const auto dir = recs::testing::contracts_dir() / "fixtures" / "model";
   std::size_t files = 0;
@@ -178,7 +178,7 @@ TEST_CASE("recs-model produces every contracts/fixtures/model response", "[model
   CHECK(cases >= 40);
 }
 
-TEST_CASE("fixture responses validate against the transcribed schemas", "[model-service][contract]") {
+TEST_CASE("recs-model: fixture responses validate against the transcribed schemas", "[model-service][contract]") {
   // Guards the schema transcription in schema.hpp: the fixtures are validated against model.yaml
   // in CI (tools/contracts), so they must also pass here.
   const auto dir = recs::testing::contracts_dir() / "fixtures" / "model";
@@ -195,7 +195,7 @@ TEST_CASE("fixture responses validate against the transcribed schemas", "[model-
   }
 }
 
-TEST_CASE("transcribed schemas match model.yaml's required lists", "[model-service][contract]") {
+TEST_CASE("recs-model: transcribed schemas match model.yaml's required lists", "[model-service][contract]") {
   const std::string yaml = read_text(recs::testing::contracts_dir() / "model.yaml");
   std::size_t checked = 0;
   const auto check_required = [&](const json& schema, const auto& self) -> void {

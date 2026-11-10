@@ -44,6 +44,18 @@ std::shared_ptr<const Bundle> make_bundle(LoadedArtifact&& artifact) {
   return b;
 }
 
+std::filesystem::path version_dir(const std::filesystem::path& root, const std::string& version) {
+  // read_current() already restricts `version` to one safe path component ("../x" and "/abs" are
+  // rejected). The directory itself must be a real directory: a symlink could point the service at
+  // files outside the artifact root.
+  const std::filesystem::path dir = root / version;
+  std::error_code ec;
+  const auto st = std::filesystem::symlink_status(dir, ec);
+  if (ec || std::filesystem::is_symlink(st)) throw ArtifactError("artifact " + version + " is a symlink or unreadable");
+  if (!std::filesystem::is_directory(st)) throw ArtifactError("artifact directory not found: " + dir.string());
+  return dir;
+}
+
 std::shared_ptr<const Bundle> load_current_bundle(const std::filesystem::path& root) {
   std::optional<std::string> version;
   try {
@@ -54,7 +66,7 @@ std::shared_ptr<const Bundle> load_current_bundle(const std::filesystem::path& r
     throw ArtifactError(std::string("cannot read CURRENT: ") + e.what());
   }
   if (!version) throw ArtifactError("no CURRENT pointer in " + root.string());
-  return make_bundle(load_artifact(root / *version));
+  return make_bundle(load_artifact(version_dir(root, *version)));
 }
 
 }  // namespace recs::service

@@ -182,7 +182,7 @@ bool nesting_ok(std::string_view s) {
     } else if (c == '[' || c == '{') {
       if (++depth > Limits::kMaxJsonDepth) return false;
     } else if (c == ']' || c == '}') {
-      --depth;
+      if (--depth < 0) return false;  // more closers than openers: malformed
     }
   }
   return true;
@@ -545,6 +545,7 @@ Response Service::handle(const Request& req) noexcept {
   const auto t0 = std::chrono::steady_clock::now();
   Response res;
   std::string_view route_template = "other";
+  std::string internal_error;  // what() of an unexpected exception, for the single error log line
   try {
     try {
       res.request_id = valid_request_id(req.request_id) ? req.request_id : generate_request_id();
@@ -588,7 +589,12 @@ Response Service::handle(const Request& req) noexcept {
       res.content_type = "application/json";
       res.body = error_body("internal", "internal error");
       // The exception text comes from librecs (model or artifact code), never from request data.
-      log_event("error", std::string("unhandled exception: ") + e.what());
+      internal_error = e.what();
+    } catch (...) {
+      res.status = 500;
+      res.content_type = "application/json";
+      res.body = error_body("internal", "internal error");
+      internal_error = "unknown exception";
     }
     if (res.model_version.empty()) res.model_version = "none";
     if (res.request_id.empty()) res.request_id = generate_request_id();
@@ -596,15 +602,17 @@ Response Service::handle(const Request& req) noexcept {
     const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     metrics_.observe_request(route_template, res.status, secs);
     if (log_) {
-      log_(dump(json{{"ts", utc_now_ms()},
-                     {"level", res.status >= 500 ? "error" : "info"},
-                     {"msg", "request"},
-                     {"request_id", res.request_id},
-                     {"method", safe_method(req.method)},
-                     {"route", route_template},
-                     {"status", res.status},
-                     {"latency_ms", std::round(secs * 1e6) / 1e3},
-                     {"model_version", res.model_version}}));
+      json line = {{"ts", utc_now_ms()},
+                   {"level", res.status >= 500 ? "error" : "info"},
+                   {"msg", "request"},
+                   {"request_id", res.request_id},
+                   {"method", safe_method(req.method)},
+                   {"route", route_template},
+                   {"status", res.status},
+                   {"latency_ms", std::round(secs * 1e6) / 1e3},
+                   {"model_version", res.model_version}};
+      if (!internal_error.empty()) line["error"] = internal_error;
+      log_(dump(line));
     }
   } catch (...) {
     // Only reachable on allocation failure or a throwing log sink.
@@ -617,28 +625,37 @@ Response Service::handle(const Request& req) noexcept {
 }
 
 Response Service::transport_error(int http_status, std::string_view request_id) noexcept {
+  int status = http_status >= 400 && http_status < 600 ? http_status : 400;
+  std::string_view code = "bad_request";
+  std::string_view message = "malformed HTTP request";
+  if (http_status == 413) {
+    status = 400;
+    code = "body_too_large";
+    message = "request body exceeds 1 MiB";
+  } else if (http_status == 414) {
+    status = 400;
+    message = "request URI too long";
+  } else if (http_status == 431) {
+    status = 400;
+    message = "request headers too large";
+  } else if (http_status >= 500) {
+    code = "internal";
+    message = "internal error";
+  } else if (http_status == 404) {
+    code = "not_found";
+    message = "no such route";
+  }
+  return error_response(status, code, message, request_id);
+}
+
+Response Service::error_response(int status, std::string_view code, std::string_view message,
+                                 std::string_view request_id) noexcept {
   Response res;
   try {
     res.request_id = valid_request_id(request_id) ? std::string(request_id) : generate_request_id();
     const auto bundle = holder_.get();
     res.model_version = bundle ? bundle->version : "none";
-    std::string_view code = "bad_request";
-    std::string_view message = "malformed HTTP request";
-    res.status = http_status >= 400 && http_status < 600 ? http_status : 400;
-    if (http_status == 413) {
-      res.status = 400;
-      code = "body_too_large";
-      message = "request body exceeds 1 MiB";
-    } else if (http_status == 414) {
-      res.status = 400;
-      message = "request URI too long";
-    } else if (http_status >= 500) {
-      code = "internal";
-      message = "internal error";
-    } else if (http_status == 404) {
-      code = "not_found";
-      message = "no such route";
-    }
+    res.status = status;
     res.body = error_body(code, message);
     metrics_.observe_request("other", res.status, 0.0);
     if (log_) {
