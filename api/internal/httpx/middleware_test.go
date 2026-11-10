@@ -156,6 +156,11 @@ func TestDecodeJSON(t *testing.T) {
 		{"unknown field", `{"name":"a","admin":true}`, 400, apperr.CodeBadRequest, "request body has an unknown field"},
 		{"wrong type", `{"name":5}`, 400, apperr.CodeBadRequest, "request body has a field of the wrong type"},
 		{"not an object", `[1,2]`, 400, apperr.CodeBadRequest, "request body has a field of the wrong type"},
+		{"duplicate key", `{"name":"a","name":"b"}`, 400, apperr.CodeBadRequest, "request body has a duplicate field"},
+		{"case-variant duplicate", `{"name":"a","NAME":"b"}`, 400, apperr.CodeBadRequest, "request body has a duplicate field"},
+		{"case-variant key", `{"Name":"a"}`, 400, apperr.CodeBadRequest, "request body has an unknown field"},
+		{"escaped key is the same key", `{"name":"a","name":"b"}`, 400, apperr.CodeBadRequest, "request body has a duplicate field"},
+		{"nested values fine", `{"name":"a","n":1}`, 204, "", ""},
 		{"too large", `{"name":"` + strings.Repeat("a", 64<<10) + `"}`, 413, apperr.CodeBodyTooLarge, "request body exceeds 64 KB"},
 	}
 	for _, c := range cases {

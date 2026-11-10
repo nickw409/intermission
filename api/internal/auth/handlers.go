@@ -148,13 +148,10 @@ func noStore(w http.ResponseWriter) { w.Header().Set("Cache-Control", "no-store"
 //  4. one transaction: consume the invite (re-checked atomically), create the
 //     user, create the session.
 //
-// A global cap (429) runs before everything.
+// The global cap (429) is charged once the body is well formed, so junk
+// requests can't spend the budget of real signups.
 func (s *service) signup(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
-	if ok, retry := s.signupGlobal.Allow(); !ok {
-		ratelimit.WriteLimited(w, retry)
-		return
-	}
 	data, err := httpx.ReadBody(r)
 	if err != nil {
 		s.fail(w, r, err)
@@ -163,6 +160,10 @@ func (s *service) signup(w http.ResponseWriter, r *http.Request) {
 	in, err := parseSignup(data)
 	if err != nil {
 		s.fail(w, r, err)
+		return
+	}
+	if ok, retry := s.signupGlobal.Allow(); !ok {
+		ratelimit.WriteLimited(w, retry)
 		return
 	}
 	ctx := r.Context()
@@ -257,16 +258,12 @@ func (s *service) usernameTaken(ctx context.Context, q queryer, username string)
 	return err == nil, err
 }
 
-// login: global cap → body → per-account cap (keyed on the case-folded
+// login: body → global cap → per-account cap (keyed on the case-folded
 // submitted name, existing or not) → exactly one Argon2id verification
 // (against a dummy hash for unknown users) → new session, replacing the one
 // presented, if any.
 func (s *service) login(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
-	if ok, retry := s.loginGlobal.Allow(); !ok {
-		ratelimit.WriteLimited(w, retry)
-		return
-	}
 	data, err := httpx.ReadBody(r)
 	if err != nil {
 		s.fail(w, r, err)
@@ -275,6 +272,10 @@ func (s *service) login(w http.ResponseWriter, r *http.Request) {
 	in, err := parseLogin(data)
 	if err != nil {
 		s.fail(w, r, err)
+		return
+	}
+	if ok, retry := s.loginGlobal.Allow(); !ok {
+		ratelimit.WriteLimited(w, retry)
 		return
 	}
 	if ok, retry := s.loginPerAccount.Allow(rateKey(in.username)); !ok {
@@ -296,6 +297,14 @@ func (s *service) login(w http.ResponseWriter, r *http.Request) {
 		stored = s.dummyHash
 	}
 	match, err := s.hasher.Verify(ctx, in.password, stored)
+	if errors.Is(err, errBadHash) {
+		// A corrupt row: log it (never the hash or password) and answer like
+		// any failed login, after the same single hash of work.
+		s.logger.ErrorContext(ctx, "auth: stored password hash is malformed",
+			"request_id", reqid.FromContext(ctx), "user_id", uid)
+		_, _ = s.hasher.Verify(ctx, in.password, s.dummyHash)
+		match, err = false, nil
+	}
 	if err != nil {
 		s.fail(w, r, err)
 		return

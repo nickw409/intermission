@@ -12,8 +12,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/url"
+	"os"
 	"runtime"
 	"strings"
 
@@ -40,10 +42,15 @@ const BusyTimeoutMS = 5000
 // transactions start with BEGIN IMMEDIATE so a transaction that reads and
 // then writes can never fail half-way on a lock upgrade.
 //
-// The parent directory must already exist.
+// The parent directory must already exist. A new database file is created
+// with mode 0600 (SQLite gives its -wal and -shm files the same mode); an
+// existing file's mode is left alone.
 func Open(ctx context.Context, path string) (*DB, error) {
 	if path == "" || strings.ContainsAny(path, "?#") || strings.HasPrefix(path, "file:") || path == ":memory:" {
 		return nil, fmt.Errorf("db: unsupported database path %q", path)
+	}
+	if err := createPrivate(path); err != nil {
+		return nil, fmt.Errorf("db: create %s: %w", path, err)
 	}
 	common := []string{
 		"busy_timeout(5000)",
@@ -68,6 +75,18 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	reader.SetMaxOpenConns(n)
 	reader.SetMaxIdleConns(n)
 	return &DB{Writer: writer, Reader: reader, path: path}, nil
+}
+
+// createPrivate creates an empty file at path with mode 0600 unless one exists.
+func createPrivate(path string) error {
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, fs.ErrExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return f.Close()
 }
 
 func openPool(ctx context.Context, path string, pragmas []string, txlock string) (*sql.DB, error) {

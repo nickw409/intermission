@@ -413,6 +413,8 @@ func TestAuthBodiesAndJSON(t *testing.T) {
 			{`{"username":"alice","password":"` + goodPass + `","is_admin":true}`, 400, apperr.CodeBadRequest},
 			{`{"username":["alice"],"password":"` + goodPass + `"}`, 400, apperr.CodeBadRequest},
 			{`"alice"`, 400, apperr.CodeBadRequest},
+			{`{"USERNAME":"alice","password":"` + goodPass + `"}`, 400, apperr.CodeBadRequest},
+			{`{"username":"mallory","username":"alice","password":"` + goodPass + `"}`, 400, apperr.CodeBadRequest},
 		} {
 			rec := h.do("POST", path, c.body, "")
 			if rec.Code != c.status || errOf(t, rec).Code != c.code {

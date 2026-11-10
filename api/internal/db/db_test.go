@@ -191,6 +191,9 @@ func TestMigrateBacksUpNonEmptyDB(t *testing.T) {
 	if !strings.Contains(logs.String(), "backup") {
 		t.Errorf("backup not logged: %s", logs.String())
 	}
+	// Backups hold password hashes: owner-only.
+	assertMode(t, filepath.Dir(backups[0]), 0o700)
+	assertMode(t, backups[0], 0o600)
 	// The backup is the pre-migration database.
 	bk, err := Open(ctx, backups[0])
 	if err != nil {
@@ -207,6 +210,66 @@ func TestMigrateBacksUpNonEmptyDB(t *testing.T) {
 	if _, err := bk.Reader.Exec("SELECT * FROM b"); err == nil {
 		t.Fatal("backup already has table b")
 	}
+}
+
+func assertMode(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Mode().Perm(); got != want {
+		t.Errorf("%s mode %o, want %o", filepath.Base(path), got, want)
+	}
+}
+
+// A pre-existing, too-open backups directory is tightened too.
+func TestBackupDirTightened(t *testing.T) {
+	d, path := openTemp(t)
+	ctx := context.Background()
+	dir := filepath.Join(filepath.Dir(path), "backups")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.migrate(ctx, quietLogger(), fstest.MapFS{"0001_a.sql": {Data: []byte("CREATE TABLE a (x INTEGER);")}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Writer.Exec("INSERT INTO a VALUES (1)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.backup(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	assertMode(t, dir, 0o700)
+}
+
+// Open creates a new app.db readable by the owner only.
+func TestNewDatabaseFileIsOwnerOnly(t *testing.T) {
+	d, path := openTemp(t)
+	if _, err := d.Writer.Exec("CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (1);"); err != nil {
+		t.Fatal(err)
+	}
+	assertMode(t, path, 0o600)
+	if _, err := os.Stat(path + "-wal"); err == nil {
+		assertMode(t, path+"-wal", 0o600)
+	}
+	// An existing file's mode is left as the operator set it.
+	other := filepath.Join(t.TempDir(), "existing.db")
+	if err := os.WriteFile(other, nil, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(other, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	d2, err := Open(context.Background(), other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = d2.Close()
+	assertMode(t, other, 0o640)
 }
 
 func TestMigrateAllOrNothing(t *testing.T) {

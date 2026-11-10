@@ -177,20 +177,31 @@ func (s *sessions) require(next http.Handler) http.Handler {
 		w.Header().Set("Cache-Control", "private, no-store")
 		hash, ok := tokenFromRequest(r)
 		if !ok {
-			apperr.Write(w, errNoSession)
+			unauthorized(w, r)
 			return
 		}
 		sess, err := s.lookup(r.Context(), hash)
+		if errors.Is(err, errNoSession) {
+			unauthorized(w, r)
+			return
+		}
 		if err != nil {
-			if !errors.Is(err, errNoSession) {
-				s.logger.ErrorContext(r.Context(), "session lookup failed", "request_id", reqid.FromContext(r.Context()), "err", err)
-			}
+			s.logger.ErrorContext(r.Context(), "session lookup failed", "request_id", reqid.FromContext(r.Context()), "err", err)
 			apperr.Write(w, err)
 			return
 		}
 		httpx.SetUserID(r.Context(), sess.UserID)
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), sessionKey{}, sess)))
 	})
+}
+
+// unauthorized writes 401 and, if the request presented a session cookie
+// (expired, logged out or malformed), tells the browser to drop it.
+func unauthorized(w http.ResponseWriter, r *http.Request) {
+	if _, err := r.Cookie(CookieName); err == nil {
+		http.SetCookie(w, clearedCookie())
+	}
+	apperr.Write(w, errNoSession)
 }
 
 // RequireSession returns middleware for routes marked with the `session`

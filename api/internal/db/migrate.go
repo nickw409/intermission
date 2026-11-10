@@ -128,15 +128,31 @@ func (d *DB) isEmpty(ctx context.Context) (bool, error) {
 }
 
 // backup writes a consistent copy of the database with VACUUM INTO and
-// returns its path.
+// returns its path. Backups contain password hashes, so the directory is
+// forced to 0700 and the file is created 0600 before SQLite writes to it
+// (VACUUM INTO accepts an existing empty file), then re-checked as 0600.
 func (d *DB) backup(ctx context.Context, version int) (string, error) {
 	dir := filepath.Join(filepath.Dir(d.path), "backups")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return "", err
+	}
 	stamp := time.Now().UTC().Format("20060102T150405.000000000Z")
 	path := filepath.Join(dir, "app-pre-migrate-v"+strconv.Itoa(version)+"-"+stamp+".db")
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		return "", err
+	}
 	if _, err := d.Writer.ExecContext(ctx, "VACUUM INTO ?", path); err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
 		return "", err
 	}
 	return path, nil

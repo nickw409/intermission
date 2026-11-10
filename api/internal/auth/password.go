@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"golang.org/x/crypto/argon2"
@@ -128,8 +129,7 @@ func parsePHC(phc string) (Params, []byte, []byte, error) {
 	if len(parts) != 6 || parts[0] != "" || parts[1] != "argon2id" {
 		return Params{}, nil, nil, errBadHash
 	}
-	var version int
-	if _, err := fmt.Sscanf(parts[2], "v=%d", &version); err != nil || version != argon2.Version {
+	if parts[2] != "v="+strconv.Itoa(argon2.Version) {
 		return Params{}, nil, nil, errBadHash
 	}
 	var m, t, p uint32
