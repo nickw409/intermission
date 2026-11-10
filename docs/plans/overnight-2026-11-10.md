@@ -18,6 +18,11 @@ Stop conditions (only the affected task stops; the others keep going):
 - PR #1 (Wave 0 spine) passed all 7 CI jobs and was merged; tagged `spine-v1`. Branch protection on `main`: 7 required checks, no force-pushes, no deletions.
 - Wave 1 started: A1 (ingest), B1 (split + metrics), C1 (popularity + evaluator), I1 (Go auth). K1 and L1 (web) start as slots free up (4-agent limit).
 
+- Merged: #4 spine fixups, #5 AUC clarification, #6 B1 (split, metrics, bootstrap), #3 A1 (ingest, cache v2). Each had an independent code review and test validation; every finding was fixed before merge. ml-32m ingest: exact counts, parse ~11–14 s, cache load ~5.5 s.
+- I1 (auth) security audit: no critical/high findings; mediums being fixed (global rate-limit buckets charged only after a request parses; backup file modes). Test validation: 16/17 mutations caught (the survivor — `==` vs constant-time compare — gets a source-scan guard).
+- K1 review: browser security clean; accessibility blocker (unrated slider missing aria-valuenow) and a login race fixed.
+- Wave 2 started early (Pipelined): D (item-KNN).
+
 ## Decisions made without the owner (please review)
 
 | # | Decision | Why | Easy to change? |
@@ -48,5 +53,14 @@ Stop conditions (only the affected task stops; the others keep going):
 ## Open questions for the owner
 
 1. **gitleaks locally.** I wasn't allowed to install the gitleaks binary on your machine without asking (it's external code). CI scans every push regardless. To also scan before each commit, install it yourself (e.g. `go install github.com/zricethezav/gitleaks/v8@v8.30.1`); the pre-commit hook (`tools/hooks/pre-commit`, already enabled) uses it automatically.
+
+## Carry-forward for the Wave 3b security audit (from I1)
+
+1. Login lockout: anyone can burn a user's 5/min login budget, and the 60/min global login cap lets one attacker block all logins. Inherent to the spec's design until per-IP limits (pending the Funnel client-IP check).
+2. CrossOriginProtection runs with no trusted origins: Caddy must preserve `Host`, and `RECS_SITE_ORIGIN` must equal the public origin exactly. Dev proxy must not use changeOrigin.
+3. With a valid invite, free vs taken usernames are distinguishable (accepted by the frozen contract).
+4. No cap on sessions per user; no "log out everywhere"; expired sessions are only swept on login/signup.
+5. Pre-migration backups (`<db dir>/backups/`, mode 0700) contain password hashes — treat as sensitive in backup runbooks.
+6. Raising Argon2 parameters later would make unknown-user vs old-account timing drift until rehash-on-login exists.
 
 ## Gate status
