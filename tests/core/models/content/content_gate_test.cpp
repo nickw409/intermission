@@ -103,9 +103,9 @@ TEST_CASE("Content gate: a user who rated only one genre gets >= 7 of 10 recomme
     // Why the ratings vary with "how much comedy": the profile is mean-centered,
     // p = sum_j (r_j - mu) v_j, so any feature that every rated movie shares to the same degree
     // cancels out. A user who rated only comedies with ratings unrelated to their comedy-ness
-    // therefore has no comedy signal left in p at all (see the report for E: with such ratings
-    // this fixture gives 0-6 comedies in the top 10). The gate is about a user whose taste is the
-    // genre, so the ratings here express that taste.
+    // therefore has no comedy signal left in p at all: rating 8 random comedies 2.5-5 on this
+    // fixture gives 0 comedies in the top 10 for 13 of the 20 seeds, and >= 7 for only 2. The gate
+    // is about a user whose taste is the genre, so the ratings here express that taste.
     std::vector<ItemIdx> straight, hybrid;
     for (ItemIdx i = 0; i < ds.n_items(); ++i) {
       if (!has_genre(ds.movies[i], "Comedy")) continue;
