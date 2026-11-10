@@ -178,8 +178,8 @@ Also report a pure count-based variant. Both are baselines that every other mode
 ### Item-KNN
 
 - Similarity: adjusted cosine on mean-centered ratings, with shrinkage sᵢⱼ · nᵢⱼ / (nᵢⱼ + λ), where nᵢⱼ is the number of users who rated both movies.
-- Keep the top M neighbors per movie (start M = 100). Only movies with at least `min_support` ratings (start 20) get neighbor lists.
-- Score: Σ sim(i, j)·(rᵤⱼ − μᵤ) / Σ |sim(i, j)| over the user's rated movies j in i's neighbor list.
+- Keep the top M neighbors per movie. Only movies with at least `min_support` ratings (start 20) get neighbor lists. Choose M and λ on the validation split, per dataset (on ml-32m: M = 50, λ = 30,000).
+- Score: Σ sim(i, j)·(rᵤⱼ − μᵤ) over the user's rated movies j in i's neighbor list with sim(i, j) > 0. This is the top-N form (Cremonesi et al. 2010). The rating-prediction form, which divides by Σ |sim(i, j)| and keeps negative neighbors, is kept as a config option (`normalize`, `positive_only`) for comparison only. As a ranker it promotes obscure movies with a single neighbor, and on ml-32m it loses to popularity (NDCG@10 0.0039 against 0.0440). Amended 2026-11-10 by owner decision; see `docs/phase-1.md`.
 - Explanation: the rated movies with the largest sim × rating contributions ("because you rated X").
 
 ### Matrix factorization (SGD, explicit ratings)
