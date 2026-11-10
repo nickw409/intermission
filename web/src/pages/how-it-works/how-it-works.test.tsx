@@ -1,7 +1,7 @@
 import { screen, within } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { describe, expect, it } from 'vitest';
-import { errorBody } from '../../lib/test-helpers';
+import { errorBody, gate } from '../../lib/test-helpers';
 import { axeViolations } from '../../test/axe';
 import { renderApp } from '../../test/render';
 import { server } from '../../test/setup';
@@ -35,6 +35,22 @@ describe('How it works page', () => {
     expect(await within(section('Implicit ALS')).findByText(/NDCG@10 0\.090/)).toBeInTheDocument();
     expect(within(section('Implicit ALS')).getByText(/ml-32m/)).toBeInTheDocument();
     expect(within(section('Popularity')).getByText(/NDCG@10 0\.0/)).toBeInTheDocument();
+  });
+
+  it('shows the explanations at once and a loading note for each result while the reports load', async () => {
+    const { wait, release } = gate();
+    server.use(
+      http.get('/api/reports', async () => {
+        await wait;
+        return HttpResponse.json({ items: [] });
+      }),
+    );
+    renderApp('/how-it-works');
+    expect(section('Item-KNN')).toHaveTextContent(/same users/);
+    for (const name of MODELS) expect(within(section(name)).getByText('Loading results…')).toBeInTheDocument();
+    release();
+    expect(await within(section('Implicit ALS')).findByText('Not evaluated yet.')).toBeInTheDocument();
+    expect(screen.queryByText('Loading results…')).not.toBeInTheDocument();
   });
 
   it('says when a model has not been evaluated yet', async () => {

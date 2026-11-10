@@ -2,7 +2,7 @@
 // image is meaningful on its own (spec: alt text on posters). The proxy always answers 200 with an
 // image (a placeholder when TMDB has none), so there is no broken-image state to handle.
 import { titleWithYear } from '../lib/format';
-import { posterUrl } from '../lib/poster';
+import { isMovieId, posterUrl } from '../lib/poster';
 
 interface PosterProps {
   movieId: number;
@@ -12,6 +12,9 @@ interface PosterProps {
 }
 
 export function Poster({ movieId, title, year, size = 'medium' }: PosterProps) {
+  if (!isMovieId(movieId)) {
+    return <span className={`poster poster--${size} poster--placeholder`} role="img" aria-label={titleWithYear(title, year)} />;
+  }
   return (
     <img
       className={`poster poster--${size}`}

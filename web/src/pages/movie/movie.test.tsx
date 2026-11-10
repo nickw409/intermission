@@ -1,8 +1,8 @@
-import { screen, waitFor, within } from '@testing-library/react';
+import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { describe, expect, it } from 'vitest';
-import { queryOf, rateWithKeyboard, recordRequests } from '../../lib/test-helpers';
+import { modelServiceDown, queryOf, rateWithKeyboard, recordRequests } from '../../lib/test-helpers';
 import { fixtureFor, handlerFor } from '../../mocks/handlers';
 import { axeViolations } from '../../test/axe';
 import { renderApp } from '../../test/render';
@@ -45,6 +45,22 @@ describe('Movie page', () => {
     expect(slider).toHaveAttribute('aria-valuetext', '3 stars');
     await waitFor(() => expect(puts).toHaveLength(1));
     expect(await puts[0]!.json()).toEqual({ rating: 3 });
+  });
+
+  it('still saves a rating while the model service is down (similar row failing)', async () => {
+    server.use(http.get('/api/movies/:movieId', () => HttpResponse.json(matrix)));
+    const puts = recordRequests('/api/ratings/2571', 'PUT');
+    await openMovie(2571, 'The Matrix');
+    modelServiceDown();
+    // Switching the similar row now hits the dead model service.
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Similar content' }));
+    expect(await within(similarRow()).findByRole('alert')).toHaveTextContent('Recommendations are temporarily unavailable');
+    const slider = screen.getByRole('slider', { name: 'Your rating for The Matrix' });
+    rateWithKeyboard(slider, 2);
+    await waitFor(() => expect(puts).toHaveLength(1));
+    await act(async () => {});
+    expect(slider).toHaveAttribute('aria-valuetext', '2 stars');
+    expect(screen.queryByText(/Couldn't save your rating/)).not.toBeInTheDocument();
   });
 
   it('rolls the rating back when saving fails', async () => {

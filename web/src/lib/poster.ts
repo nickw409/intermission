@@ -3,8 +3,13 @@
 
 const MAX_MOVIE_ID = 2147483647; // contracts/public.yaml MovieId maximum
 
+/** True for an id the poster endpoint accepts (a positive 32-bit integer). */
+export function isMovieId(movieId: number): boolean {
+  return Number.isInteger(movieId) && movieId >= 1 && movieId <= MAX_MOVIE_ID;
+}
+
 export function posterUrl(movieId: number): string {
-  if (!Number.isInteger(movieId) || movieId < 1 || movieId > MAX_MOVIE_ID) {
+  if (!isMovieId(movieId)) {
     throw new Error(`invalid movie id ${movieId}`);
   }
   return `/api/posters/${movieId}`;

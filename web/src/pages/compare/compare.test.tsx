@@ -2,8 +2,8 @@ import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { describe, expect, it } from 'vitest';
-import { queryOf, recordRequests } from '../../lib/test-helpers';
-import { handlerFor } from '../../mocks/handlers';
+import { gate, queryOf, recordRequests } from '../../lib/test-helpers';
+import { fixtureFor, handlerFor, responseFor } from '../../mocks/handlers';
 import { axeViolations } from '../../test/axe';
 import { renderApp } from '../../test/render';
 import { server } from '../../test/setup';
@@ -26,6 +26,29 @@ function entry(columnName: string, title: string): HTMLElement {
 }
 
 describe('Compare page', () => {
+  it('shows loading states while the model list and then the columns load', async () => {
+    const models = gate();
+    const lists = gate();
+    server.use(
+      http.get('/api/models', async () => {
+        await models.wait;
+        return responseFor(fixtureFor('listModels').cases[0]!);
+      }),
+      http.get('/api/recommend/compare', async () => {
+        await lists.wait;
+        return responseFor(fixtureFor('compare').cases[0]!);
+      }),
+    );
+    renderApp('/compare');
+    expect(await screen.findByText('Loading models…')).toBeInTheDocument();
+    models.release();
+    expect(await screen.findByText('Loading recommendations…')).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: 'Models to compare' })).toBeInTheDocument();
+    lists.release();
+    expect(await screen.findByRole('region', { name: 'Implicit ALS' })).toBeInTheDocument();
+    expect(screen.queryByText('Loading recommendations…')).not.toBeInTheDocument();
+  });
+
   it('compares popularity, item-KNN and the default model at first, one column each', async () => {
     const compare = recordRequests('/api/recommend/compare');
     renderApp('/compare');
@@ -108,7 +131,8 @@ describe('Compare page', () => {
     expect(screen.getByRole('link', { name: 'Rate more movies' })).toHaveAttribute('href', '/onboarding');
     expect(screen.getByRole('region', { name: 'Popularity' })).toBeInTheDocument();
     expect(screen.queryByRole('region', { name: 'Implicit ALS' })).not.toBeInTheDocument();
-    expect(screen.queryByText(/more than one list/)).not.toBeInTheDocument();    expect(await axeViolations()).toEqual([]);
+    expect(screen.queryByText(/more than one list/)).not.toBeInTheDocument();
+    expect(await axeViolations()).toEqual([]);
   });
 
   it('says when a column has no movies', async () => {

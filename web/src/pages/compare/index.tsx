@@ -9,7 +9,6 @@ import { RequireSession } from '../../components/RequireSession';
 import { ErrorMessage, Loading } from '../../components/Status';
 import { displayTitle, joinTitles } from '../../lib/format';
 import { defaultComparison, modelLabel, type ModelName, type ModelsResponse } from '../../lib/models';
-import { useRefetchAfterRating } from '../../lib/ratings';
 import { useAsync } from '../../lib/useAsync';
 import '../../components/components.css';
 
@@ -49,7 +48,6 @@ function Comparison({ models }: { models: ModelsResponse }) {
     [key],
   );
   const { state, reload } = useAsync(load);
-  useRefetchAfterRating(() => reload({ quiet: true }));
 
   const toggle = (model: ModelName) =>
     setSelected((current) =>
@@ -62,7 +60,7 @@ function Comparison({ models }: { models: ModelsResponse }) {
       <ModelPicker available={available} selected={selected} onToggle={toggle} />
       {state.status === 'loading' && <Loading>Loading recommendations…</Loading>}
       {state.status === 'error' && <ErrorMessage message={state.message} onRetry={() => reload()} />}
-      {state.status === 'ready' && <Columns data={state.data} busy={state.refreshing} />}
+      {state.status === 'ready' && <Columns data={state.data} />}
     </>
   );
 }
@@ -107,7 +105,7 @@ function ModelPicker({
   );
 }
 
-function Columns({ data, busy }: { data: CompareResponse; busy: boolean }) {
+function Columns({ data }: { data: CompareResponse }) {
   // movieId → the models whose list contains it.
   const listsFor = new Map<number, ModelName[]>();
   for (const result of data.results) {
@@ -136,7 +134,7 @@ function Columns({ data, busy }: { data: CompareResponse; busy: boolean }) {
           : `${shared} ${shared === 1 ? 'movie appears' : 'movies appear'} in more than one list.`}
         </p>
       )}
-      <div className="compare-columns" aria-busy={busy || undefined}>
+      <div className="compare-columns">
         {data.results.map((result) => (
           <Column key={result.model} model={result.model} items={result.items} listsFor={listsFor} />
         ))}

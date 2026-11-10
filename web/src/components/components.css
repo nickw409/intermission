@@ -86,6 +86,10 @@
   background: var(--star-empty);
 }
 
+.poster--placeholder {
+  display: block;
+}
+
 .poster--small {
   width: 3rem;
   flex: none;

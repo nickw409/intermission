@@ -1,8 +1,8 @@
 import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
-import { describe, expect, it } from 'vitest';
-import { errorBody, queryOf, rateWithKeyboard, recordRequests } from '../../lib/test-helpers';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { errorBody, gate, modelServiceDown, queryOf, rateWithKeyboard, recordRequests } from '../../lib/test-helpers';
 import { handlerFor } from '../../mocks/handlers';
 import { axeViolations } from '../../test/axe';
 import { renderApp } from '../../test/render';
@@ -39,7 +39,72 @@ function card(title: string): HTMLElement {
   return article;
 }
 
+/**
+ * Fake timers from here on (call after the page has loaded), so the search debounce is driven
+ * explicitly. Testing Library only advances fake timers while it waits if it sees a `jest` global.
+ */
+function fakeClock() {
+  vi.useFakeTimers();
+  vi.stubGlobal('jest', { advanceTimersByTime: (ms: number) => vi.advanceTimersByTime(ms) });
+  return userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+}
+
+function realClock() {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+}
+
 describe('Onboarding page', () => {
+  afterEach(realClock);
+
+  it('shows loading states while the suggestions load', async () => {
+    const { wait, release } = gate();
+    server.use(
+      http.get('/api/onboarding', async () => {
+        await wait;
+        return HttpResponse.json({ items: [] });
+      }),
+    );
+    renderApp('/onboarding');
+    expect(await screen.findByText('Loading movies to rate…')).toBeInTheDocument();
+    expect(screen.getByRole('searchbox', { name: 'Search for any movie' })).toBeInTheDocument();
+    release();
+    expect(await screen.findByText(/rated everything we'd suggest/)).toBeInTheDocument();
+    expect(screen.queryByText('Loading movies to rate…')).not.toBeInTheDocument();
+  });
+
+  it('shows "Searching…" while a search is in flight', async () => {
+    const { wait, release } = gate();
+    server.use(
+      http.get('/api/movies/search', async () => {
+        await wait;
+        return HttpResponse.json({ items: [] });
+      }),
+    );
+    await openPage();
+    const user = fakeClock();
+    await user.type(screen.getByRole('searchbox', { name: 'Search for any movie' }), 'x');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(await screen.findByText('Searching…')).toBeInTheDocument();
+    release();
+    expect(await screen.findByText('No movies match “x”.')).toBeInTheDocument();
+  });
+
+  it('still saves ratings after the model service goes down', async () => {
+    const puts = recordRequests('/api/ratings/4993', 'PUT');
+    await openPage();
+    modelServiceDown();
+    const slider = within(card(LOTR)).getByRole('slider');
+    rateWithKeyboard(slider, 4);
+    await waitFor(() => expect(puts).toHaveLength(1));
+    await act(async () => {});
+    expect(slider).toHaveAttribute('aria-valuetext', '4 stars');
+    expect(within(card(LOTR)).queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByText('6 of 10 rated')).toBeInTheDocument();
+  });
+
   it('asks for ~30 popular movies and shows each as a poster card with a rating control', async () => {
     const onboarding = recordRequests('/api/onboarding');
     renderApp('/onboarding');
@@ -106,11 +171,19 @@ describe('Onboarding page', () => {
     expect(await screen.findByText('9 of 10 rated')).toBeInTheDocument();
   });
 
-  it('searches as you type (debounced, one request) and lets you rate a result', async () => {
-    const user = userEvent.setup();
+  it('searches as you type (debounced 300 ms, one request) and lets you rate a result', async () => {
     const searches = recordRequests('/api/movies/search');
     await openPage();
+    const user = fakeClock();
     await user.type(screen.getByRole('searchbox', { name: 'Search for any movie' }), 'star');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(299);
+    });
+    expect(searches).toHaveLength(0);
+    expect(screen.queryByRole('region', { name: 'Search results' })).not.toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
     const results = await screen.findByRole('region', { name: 'Search results' });
     await within(results).findByRole('heading', { name: 'Star Wars: Episode V - The Empire Strikes Back' });
     expect(searches).toHaveLength(1);
@@ -127,14 +200,20 @@ describe('Onboarding page', () => {
   });
 
   it('says when a search finds nothing, and when it fails', async () => {
-    const user = userEvent.setup();
     server.use(http.get('/api/movies/search', () => HttpResponse.json({ items: [] })));
     await openPage();
+    const user = fakeClock();
     const box = screen.getByRole('searchbox', { name: 'Search for any movie' });
     await user.type(box, 'zzzz');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
     expect(await screen.findByText('No movies match “zzzz”.')).toBeInTheDocument();
     server.use(handlerFor('searchMovies', 'model_unavailable'));
     await user.type(box, 'q');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
     await waitFor(() =>
       expect(within(screen.getByRole('region', { name: 'Search results' })).getByRole('alert')).toHaveTextContent(
         'Recommendations are temporarily unavailable',
@@ -173,12 +252,16 @@ describe('Onboarding page', () => {
     expect(await screen.findByRole('link', { name: /Log in to rate movies/ })).toBeInTheDocument();
   });
 
-  it('has no axe violations (loaded, searching, failed)', async () => {
-    const user = userEvent.setup();
+  it('has no axe violations (loaded, searching)', async () => {
     await openPage();
     expect(await axeViolations()).toEqual([]);
+    const user = fakeClock();
     await user.type(screen.getByRole('searchbox', { name: 'Search for any movie' }), 'star');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
     await screen.findByRole('heading', { name: 'Star Wars: Episode V - The Empire Strikes Back' });
+    realClock();
     expect(await axeViolations()).toEqual([]);
   });
 

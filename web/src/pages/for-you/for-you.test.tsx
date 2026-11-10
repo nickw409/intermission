@@ -4,7 +4,7 @@ import { http, HttpResponse } from 'msw';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { feedbackHook } from '../../lib/feedback';
 import { errorBody, gate, queryOf, rateWithKeyboard, recordRequests } from '../../lib/test-helpers';
-import { fixtureFor, handlerFor } from '../../mocks/handlers';
+import { fixtureFor, handlerFor, responseFor } from '../../mocks/handlers';
 import { axeViolations } from '../../test/axe';
 import { renderApp } from '../../test/render';
 import { server } from '../../test/setup';
@@ -156,9 +156,25 @@ describe('For you page', () => {
     expect(slider).toHaveAttribute('aria-valuetext', 'Not rated');
   });
 
-  it('refetches recommendations once, 500 ms after rating changes settle', async () => {
+  it('refetches recommendations once, 500 ms after rating changes settle, keeping the cards up meanwhile', async () => {
     await openPage();
     const recommend = recordRequests('/api/recommend');
+    // Hold the refetch open so the page can be checked while it is in flight.
+    const refetch = gate();
+    server.use(
+      http.get('/api/recommend', async () => {
+        await refetch.wait;
+        return responseFor(fixtureFor('recommend').cases[0]!);
+      }),
+    );
+    const flush = async (until: () => boolean, what: string) => {
+      for (let i = 0; i < 50 && !until(); i++) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(0);
+        });
+      }
+      if (!until()) throw new Error(`timed out waiting for ${what}`);
+    };
     const puts = recordRequests(/^\/api\/ratings\//, 'PUT');
     let saved = 0;
     server.events.on('response:mocked', ({ request }) => {
@@ -169,13 +185,8 @@ describe('For you page', () => {
     rateWithKeyboard(within(card(LOTR)).getByRole('slider'), 4);
     rateWithKeyboard(within(card('Fight Club')).getByRole('slider'), 3);
     // Let both PUTs finish without moving the clock.
-    for (let i = 0; i < 50 && saved < 2; i++) {
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
-    }
+    await flush(() => saved >= 2, `both rating PUTs to finish (finished: ${saved})`);
     expect(puts).toHaveLength(2);
-    expect(saved).toBe(2);
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(499);
@@ -184,12 +195,16 @@ describe('For you page', () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1);
     });
-    for (let i = 0; i < 20 && recommend.length === 0; i++) {
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
-    }
+    await flush(() => recommend.length > 0, 'the refetch to start');
     expect(recommend).toHaveLength(1);
+    // A quiet refresh: the cards stay on screen, marked busy, while the request is in flight.
+    const list = screen.getByRole('list', { name: 'Recommendations' });
+    expect(list).toHaveAttribute('aria-busy', 'true');
+    expect(screen.getAllByRole('article')).toHaveLength(3);
+    expect(screen.queryByText(/Loading your recommendations/)).not.toBeInTheDocument();
+    refetch.release();
+    await flush(() => !list.hasAttribute('aria-busy'), 'the refetch to finish');
+    expect(screen.getAllByRole('article')).toHaveLength(3);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5000);
     });
@@ -222,6 +237,30 @@ describe('For you page', () => {
     expect(await screen.findByRole('heading', { level: 2, name: LOTR })).toBeInTheDocument();
   });
 
+  it('shows a placeholder poster for a malformed movie id instead of failing the page', async () => {
+    server.use(
+      http.get('/api/recommend', () =>
+        HttpResponse.json({
+          model: 'als',
+          model_version: 'v',
+          cold_start: false,
+          items: [
+            { movieId: 0, title: 'Broken', year: 2000, score: 1, because: [] },
+            { movieId: 2959, title: 'Fight Club', year: 1999, score: 0.9, because: [] },
+          ],
+        }),
+      ),
+    );
+    renderApp('/');
+    await screen.findByRole('heading', { level: 2, name: 'Fight Club' });
+    const broken = within(card('Broken')).getByRole('img', { name: 'Broken (2000)' });
+    expect(broken.tagName).not.toBe('IMG');
+    expect(within(card('Fight Club')).getByRole('img', { name: 'Fight Club (1999)' })).toHaveAttribute(
+      'src',
+      '/api/posters/2959',
+    );
+  });
+
   it('asks a signed-out visitor to log in', async () => {
     server.use(handlerFor('getMe', 'unauthorized'));
     const recommend = recordRequests('/api/recommend');
@@ -231,7 +270,7 @@ describe('For you page', () => {
     expect(recommend).toHaveLength(0);
   });
 
-  it('has no axe violations when loaded, cold, failed or signed out', async () => {
+  it('has no axe violations when loaded and after rating a movie', async () => {
     await openPage();
     rateWithKeyboard(within(card(LOTR)).getByRole('slider'), 4);
     expect(await axeViolations()).toEqual([]);
