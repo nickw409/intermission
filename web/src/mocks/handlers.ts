@@ -1,5 +1,6 @@
 // MSW handlers built from the shared contract fixtures (contracts/fixtures/public/*.json).
-// Each operation answers with its first success case, so the UI runs without recs-api.
+// Each operation answers with its first success case, so the UI runs without recs-api, except
+// getReport, which answers by run id (see reportHandler).
 import { http, HttpResponse, type HttpHandler } from 'msw';
 import { operations, type OperationId } from '../api/operations';
 
@@ -74,4 +75,37 @@ export function handlerFor(operationId: OperationId, caseName?: string): HttpHan
   return register(toMswPath(path), () => responseFor(chosen));
 }
 
-export const handlers: HttpHandler[] = (Object.keys(operations) as OperationId[]).map((id) => handlerFor(id));
+/**
+ * GET /api/reports/{runId} answers by run id, like recs-api: a fixture case for exactly that path
+ * wins, then any report fixture with that run_id, then the 404 case. Malformed ids get the 400 case.
+ */
+export function reportHandler(): HttpHandler {
+  const fixture = fixtureFor('getReport');
+  const caseFor = (name: string) => {
+    const found = fixture.cases.find((c) => c.name === name);
+    if (!found) throw new Error(`no getReport case ${name}`);
+    return found;
+  };
+  const reportsById = new Map<string, unknown>();
+  for (const report of Object.values(referencedFiles)) {
+    if (report !== null && typeof report === 'object' && 'run_id' in report && typeof report.run_id === 'string') {
+      reportsById.set(report.run_id, report);
+    }
+  }
+  return http.get(toMswPath(operations.getReport.path), ({ params }) => {
+    const runId = String(params.runId);
+    if (!RUN_ID.test(runId)) return responseFor(caseFor('bad_run_id'));
+    const exact = fixture.cases.find((c) => c.request.path === `/api/reports/${runId}` && c.response.status === 200);
+    if (exact) return responseFor(exact);
+    const report = reportsById.get(runId);
+    if (report !== undefined) return HttpResponse.json(report as Record<string, unknown>);
+    return responseFor(caseFor('not_found'));
+  });
+}
+
+// Same pattern as contracts/public.yaml getReport runId.
+const RUN_ID = /^[A-Za-z0-9_-]{1,100}$/;
+
+export const handlers: HttpHandler[] = (Object.keys(operations) as OperationId[]).map((id) =>
+  id === 'getReport' ? reportHandler() : handlerFor(id),
+);
