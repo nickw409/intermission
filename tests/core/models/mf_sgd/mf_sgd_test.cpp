@@ -215,12 +215,14 @@ Biased add_biases(const recs::synthetic::ExplicitLowRank& s, std::uint64_t seed,
 // The configuration for the synthetic gates.
 //  - k = 5: the true rank (the gate is about recovering a known structure, not choosing k).
 //  - lambda = 0.005: chosen on an independent draw (same sizes, seed 32, never the gate's seed 31)
-//    by held-out RMSE over {0.002, 0.005, 0.01, 0.02, 0.05} -> {0.113, 0.114, 0.117, 0.128, 0.186}.
+//    by best-epoch RMSE on that draw's held-out set (used as the validation set), other settings
+//    as below. Re-run on 2026-11-10 against this code (release build):
+//      lambda 0.002 / 0.005 / 0.01 / 0.02 / 0.05 -> 0.1129 / 0.1136 / 0.1167 / 0.1283 / 0.1862.
 //    The regulariser is per rating (lambda * n per user), and the factor entries here are small
 //    (sd 5^-1/4 ~ 0.67), so the ml-scale default 0.05 over-shrinks them. 0.005 sits in the flat
 //    region while keeping some ridge for the fold-in solve.
 //  - lr = 0.02 with 0.98 decay, early stopping on a validation set carved from training
-//    (patience 5): converges in ~100 epochs.
+//    (patience 5): stops after roughly 100-150 epochs.
 recs::Config synthetic_config() {
   return {{"k", 5},            {"lambda", 0.005}, {"lr", 0.02},  {"lr_decay", 0.98},
           {"max_epochs", 300}, {"patience", 5},   {"init_sd", 0.1}};
