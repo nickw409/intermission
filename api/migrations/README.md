@@ -14,7 +14,9 @@ Numbered SQLite migrations for `app.db`, applied by `internal/db` at startup (an
   exactly as it was. Before migrating a non-empty database, a consistent copy is written
   with `VACUUM INTO` to `<db dir>/backups/app-pre-migrate-v<N>-<UTC timestamp>.db`;
   they hold deleted accounts' data, so one is deleted once it is beyond the newest 3 or
-  older than 35 days, but never while it is younger than 1 day.
+  35 days old (or dated more than a day ahead, or undatable), but never while it is younger
+  than 1 day or when it is the one just written. Retention runs on every `migrate`/startup
+  and on every nightly `export-ratings`.
 - Foreign key enforcement is OFF while the migration transaction runs (SQLite's
   documented table-rebuild procedure needs it: with it on, `DROP TABLE users` would
   cascade into every child table). `PRAGMA foreign_key_check` must come back empty
