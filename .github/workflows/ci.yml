@@ -57,6 +57,16 @@ jobs:
       - run: cmake --preset ${{ matrix.preset }} -DRECS_GIT_SHA=${{ github.sha }}
       - run: cmake --build --preset ${{ matrix.preset }}
       - run: ctest --preset ${{ matrix.preset }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with: { node-version: '24', cache: npm, cache-dependency-path: tools/contracts/package-lock.json }
+      - name: Validate reports written by the test run
+        run: |
+          if [ -d build/${{ matrix.preset }}/test-reports ]; then
+            npm ci --prefix tools/contracts
+            node tools/contracts/validate-reports.mjs build/${{ matrix.preset }}/test-reports
+          else
+            echo "no test-reports directory yet"
+          fi
 
   cpp-fuzz-build:
     name: cpp (fuzz build)
