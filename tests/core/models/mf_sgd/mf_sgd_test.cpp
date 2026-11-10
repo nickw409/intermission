@@ -1,0 +1,441 @@
+// Phase 3 gates and contract tests for the MF-SGD model (spec: Models -> Matrix factorization;
+// Phase 3 gates). The ml-32m gates (RMSE vs bias baseline, 500-user parity) run after Wave 4.
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <limits>
+#include <numeric>
+#include <set>
+#include <vector>
+
+#include <catch2/catch_test_macros.hpp>
+
+#include "../../data/temp_dir.hpp"
+#include "../../../../core/src/models/mf_sgd_detail.hpp"
+#include "property.hpp"
+#include "recs/dataset.hpp"
+#include "recs/metrics.hpp"
+#include "recs/model.hpp"
+#include "recs/synthetic.hpp"
+
+namespace {
+
+using recs::mf_detail::Params;
+
+// --- helpers -------------------------------------------------------------------------------
+
+Params random_params(recs::Rng& rng, std::uint32_t nu, std::uint32_t ni, std::uint32_t k) {
+  Params m;
+  m.k = k;
+  m.mu = 3.5;
+  m.bu.resize(nu);
+  m.bi.resize(ni);
+  m.P.resize(std::size_t{nu} * k);
+  m.Q.resize(std::size_t{ni} * k);
+  for (auto& x : m.bu) x = 0.5 * rng.normal();
+  for (auto& x : m.bi) x = 0.5 * rng.normal();
+  for (auto& x : m.P) x = 0.5 * rng.normal();
+  for (auto& x : m.Q) x = 0.5 * rng.normal();
+  return m;
+}
+
+std::vector<recs::Triplet> random_ratings(recs::Rng& rng, std::uint32_t nu, std::uint32_t ni,
+                                          double density) {
+  std::vector<recs::Triplet> out;
+  for (std::uint32_t u = 0; u < nu; ++u)
+    for (std::uint32_t i = 0; i < ni; ++i)
+      if (rng.uniform01() < density)
+        out.push_back({u, i, static_cast<float>(0.5 * (1 + rng.uniform(10))), 0});
+  return out;
+}
+
+// The four parameter blocks, addressed uniformly.
+std::vector<double>& block(Params& m, int b) {
+  switch (b) {
+    case 0: return m.bu;
+    case 1: return m.bi;
+    case 2: return m.P;
+    default: return m.Q;
+  }
+}
+const char* block_name(int b) {
+  static const char* names[] = {"b_u", "b_i", "P", "Q"};
+  return names[b];
+}
+
+double rel_error(const std::vector<double>& a, const std::vector<double>& b) {
+  double diff = 0.0, na = 0.0, nb = 0.0;
+  for (std::size_t j = 0; j < a.size(); ++j) {
+    diff += (a[j] - b[j]) * (a[j] - b[j]);
+    na += a[j] * a[j];
+    nb += b[j] * b[j];
+  }
+  const double denom = std::max(std::sqrt(na), std::sqrt(nb));
+  return denom == 0.0 ? 0.0 : std::sqrt(diff) / denom;
+}
+
+// Central finite-difference gradient of objective() for one parameter block.
+std::vector<double> fd_gradient(const Params& m0, int b, std::span<const recs::Triplet> ratings,
+                                double lambda, double h) {
+  Params m = m0;
+  auto& theta = block(m, b);
+  std::vector<double> g(theta.size());
+  for (std::size_t j = 0; j < theta.size(); ++j) {
+    const double saved = theta[j];
+    theta[j] = saved + h;
+    const double fp = recs::mf_detail::objective(m, ratings, lambda);
+    theta[j] = saved - h;
+    const double fm = recs::mf_detail::objective(m, ratings, lambda);
+    theta[j] = saved;
+    g[j] = (fp - fm) / (2.0 * h);
+  }
+  return g;
+}
+
+// Top-k by score descending, ItemIdx ascending, excluding the user's rated items (independent of
+// the shared recommend(), which belongs to another workstream).
+std::vector<recs::ItemIdx> top_k(std::span<const float> scores, std::span<const recs::Rating> rated,
+                                 std::size_t k) {
+  std::vector<bool> excluded(scores.size(), false);
+  for (const auto& r : rated) excluded[r.item] = true;
+  std::vector<recs::ItemIdx> items;
+  for (recs::ItemIdx i = 0; i < scores.size(); ++i)
+    if (!excluded[i] && std::isfinite(scores[i])) items.push_back(i);
+  std::sort(items.begin(), items.end(), [&](recs::ItemIdx a, recs::ItemIdx b) {
+    if (scores[a] != scores[b]) return scores[a] > scores[b];
+    return a < b;
+  });
+  if (items.size() > k) items.resize(k);
+  return items;
+}
+
+std::vector<recs::Rating> user_ratings(const recs::Dataset& ds, recs::UserIdx u) {
+  std::vector<recs::Rating> out;
+  const auto items = ds.by_user.row_indices(u);
+  const auto vals = ds.by_user.row_values(u);
+  const auto ts = ds.by_user.row_ts(u);
+  for (std::size_t j = 0; j < items.size(); ++j) out.push_back({items[j], vals[j], ts[j]});
+  return out;
+}
+
+// Moves a seeded `fraction` of each user's training ratings into a validation set, so that early
+// stopping never looks at the held-out test ratings.
+struct TrainValidation {
+  recs::Dataset train;
+  std::vector<std::vector<recs::Rating>> validation;
+};
+TrainValidation carve_validation(const recs::Dataset& ds, double fraction, std::uint64_t seed) {
+  TrainValidation out;
+  out.validation.resize(ds.n_users());
+  std::vector<recs::Triplet> keep;
+  for (recs::UserIdx u = 0; u < ds.n_users(); ++u) {
+    auto rs = user_ratings(ds, u);
+    recs::Rng rng(recs::mix_seed(seed, u));
+    rng.shuffle(rs.begin(), rs.end());
+    const auto n_val = static_cast<std::size_t>(fraction * static_cast<double>(rs.size()));
+    for (std::size_t j = 0; j < rs.size(); ++j) {
+      if (j < n_val && rs.size() - n_val >= 1)
+        out.validation[u].push_back(rs[j]);
+      else
+        keep.push_back({u, rs[j].item, rs[j].value, rs[j].ts});
+    }
+  }
+  out.train = recs::make_dataset("train", ds.n_users(), ds.n_items(), std::move(keep));
+  return out;
+}
+
+double heldout_rmse(const recs::Model& m, const recs::Dataset& train,
+                    const std::vector<std::vector<recs::Rating>>& heldout, bool trained_path) {
+  std::vector<float> scores(m.n_items());
+  std::vector<float> predicted;
+  std::vector<recs::Rating> actual;
+  for (recs::UserIdx u = 0; u < train.n_users(); ++u) {
+    if (heldout[u].empty()) continue;
+    if (trained_path) {
+      m.score_trained_user(u, scores);
+    } else {
+      const auto rs = user_ratings(train, u);
+      m.score(m.fold_in(rs), scores);
+    }
+    for (const auto& r : heldout[u]) {
+      predicted.push_back(scores[r.item]);
+      actual.push_back(r);
+    }
+  }
+  return recs::rating_errors(predicted, actual).rmse;
+}
+
+double mean_parity_jaccard(const recs::Model& m, const recs::Dataset& train) {
+  std::vector<float> batch(m.n_items()), folded(m.n_items());
+  double sum = 0.0;
+  std::size_t n = 0;
+  for (recs::UserIdx u = 0; u < train.n_users(); ++u) {
+    const auto rs = user_ratings(train, u);
+    if (rs.empty()) continue;
+    m.score_trained_user(u, batch);
+    m.score(m.fold_in(rs), folded);
+    sum += recs::jaccard_at_k(top_k(batch, rs, 10), top_k(folded, rs, 10), 10);
+    ++n;
+  }
+  return sum / static_cast<double>(n);
+}
+
+// The configuration for the synthetic gates; rationale in the test report and the comments below.
+recs::Config synthetic_config() {
+  return {{"k", 5},          {"lambda", 0.02},  {"lr", 0.02},  {"lr_decay", 0.98},
+          {"max_epochs", 300}, {"patience", 5}, {"init_sd", 0.1}};
+}
+
+}  // namespace
+
+// --- Phase 3 gate: gradient check ----------------------------------------------------------
+
+TEST_CASE("MF analytic gradient matches central finite differences", "[mf][gate]") {
+  recs::testing::for_seeds(10, 2026, [](recs::Rng& rng, std::uint64_t) {
+    const std::uint32_t nu = 6, ni = 7, k = 4;
+    const Params m = random_params(rng, nu, ni, k);
+    const auto ratings = random_ratings(rng, nu, ni, 0.5);
+    const double lambda = 0.1;
+    Params g = recs::mf_detail::gradient(m, ratings, lambda);
+    for (int b = 0; b < 4; ++b) {
+      INFO("block " << block_name(b));
+      const auto fd = fd_gradient(m, b, ratings, lambda, 1e-5);
+      const double err = rel_error(block(g, b), fd);
+      INFO("relative error " << err);
+      CHECK(err < 1e-5);
+    }
+  });
+}
+
+TEST_CASE("One SGD step equals a finite-difference gradient step on that rating", "[mf][gate]") {
+  // Ties the gradient check to the code training runs: sgd_step must move every parameter by
+  // exactly -lr * d(per-rating loss)/d(theta).
+  recs::testing::for_seeds(10, 77, [](recs::Rng& rng, std::uint64_t) {
+    const std::uint32_t nu = 4, ni = 5, k = 3;
+    const Params m = random_params(rng, nu, ni, k);
+    const recs::Triplet r{static_cast<std::uint32_t>(rng.uniform(nu)),
+                          static_cast<std::uint32_t>(rng.uniform(ni)), 4.0f, 0};
+    const double lambda = 0.05, lr = 0.01;
+    Params stepped = m;
+    recs::mf_detail::sgd_step(stepped, r, lr, lambda);
+    const std::vector<recs::Triplet> one{r};
+    for (int b = 0; b < 4; ++b) {
+      INFO("block " << block_name(b));
+      const auto fd = fd_gradient(m, b, one, lambda, 1e-5);
+      Params mm = m;
+      std::vector<double> delta(fd.size()), expected(fd.size());
+      for (std::size_t j = 0; j < fd.size(); ++j) {
+        delta[j] = block(stepped, b)[j] - block(mm, b)[j];
+        expected[j] = -lr * fd[j];
+      }
+      CHECK(rel_error(delta, expected) < 1e-5);
+    }
+  });
+}
+
+// --- Phase 3 gate: synthetic recovery ------------------------------------------------------
+
+TEST_CASE("MF recovers rank-5 synthetic ratings: held-out RMSE < 0.15", "[mf][gate]") {
+  // Rank-5 ground truth, N(0, 0.1^2) noise (spec Phase 3). Signal variance is 1, so predicting the
+  // mean scores RMSE about 1.0; the noise floor is 0.1.
+  const auto s = recs::synthetic::low_rank_explicit(600, 400, 5, 0.1, 0.15, 0.2, 31);
+  const auto tv = carve_validation(s.train, 0.1, 5);
+  auto model = recs::make_mf_sgd();
+  recs::TrainContext ctx;
+  ctx.validation = &tv.validation;
+  ctx.seed = 42;
+  model->fit(tv.train, synthetic_config(), ctx);
+
+  const double rmse_trained = heldout_rmse(*model, tv.train, s.heldout, true);
+  const double rmse_folded = heldout_rmse(*model, tv.train, s.heldout, false);
+  INFO("held-out RMSE trained vectors " << rmse_trained << ", fold-in " << rmse_folded
+                                        << ", epochs " << model->training_curve().size());
+  CHECK(rmse_trained < 0.15);
+  CHECK(rmse_folded < 0.15);
+}
+
+TEST_CASE("MF fold-in parity: Jaccard@10 against trained user vectors > 0.9", "[mf][gate]") {
+  const auto s = recs::synthetic::low_rank_explicit(600, 400, 5, 0.1, 0.15, 0.2, 31);
+  const auto tv = carve_validation(s.train, 0.1, 5);
+  auto model = recs::make_mf_sgd();
+  recs::TrainContext ctx;
+  ctx.validation = &tv.validation;
+  model->fit(tv.train, synthetic_config(), ctx);
+  REQUIRE(model->supports_trained_scoring());
+  const double j = mean_parity_jaccard(*model, tv.train);
+  INFO("mean Jaccard@10 " << j);
+  CHECK(j > 0.9);
+}
+
+TEST_CASE("MF fold-in parity holds with the default ml config on noisy rounded ratings",
+          "[mf][gate]") {
+  // Star ratings in 0.5 steps from a rank-8 structure, default hyperparameters (configs/mf.json).
+  const auto s = recs::synthetic::low_rank_explicit(400, 300, 8, 0.3, 0.2, 0.0, 9);
+  std::vector<recs::Triplet> t;
+  for (recs::UserIdx u = 0; u < s.train.n_users(); ++u)
+    for (const auto& r : user_ratings(s.train, u)) {
+      const double v = std::clamp(std::round((3.5 + r.value) * 2.0) / 2.0, 0.5, 5.0);
+      t.push_back({u, r.item, static_cast<float>(v), r.ts});
+    }
+  const auto ds = recs::make_dataset("stars", s.train.n_users(), s.train.n_items(), std::move(t));
+  const auto tv = carve_validation(ds, 0.1, 6);
+  auto model = recs::make_mf_sgd();
+  recs::TrainContext ctx;
+  ctx.validation = &tv.validation;
+  model->fit(tv.train, recs::Config::object(), ctx);
+  const double j = mean_parity_jaccard(*model, tv.train);
+  INFO("mean Jaccard@10 " << j);
+  CHECK(j > 0.9);
+}
+
+// --- Contract tests -----------------------------------------------------------------------
+
+TEST_CASE("MF fills config defaults from configs/mf.json values", "[mf]") {
+  const auto s = recs::synthetic::low_rank_explicit(30, 20, 2, 0.1, 0.5, 0.0, 1);
+  auto model = recs::make_mf_sgd();
+  CHECK(model->name() == "mf");
+  CHECK(model->predicts_ratings());
+  model->fit(s.train, recs::Config{{"max_epochs", 2}}, recs::TrainContext{});
+  const auto cfg = model->config();
+  CHECK(cfg.at("k") == 64);
+  CHECK(cfg.at("lambda") == 0.05);
+  CHECK(cfg.at("lr") == 0.007);
+  CHECK(cfg.at("lr_decay") == 0.95);
+  CHECK(cfg.at("max_epochs") == 2);
+  CHECK(cfg.at("patience") == 3);
+  CHECK(cfg.at("init_sd") == 0.1);
+  CHECK(model->n_items() == 20);
+  CHECK(model->training_curve().size() == 2);
+  CHECK(model->training_curve_metric() == "train_rmse");
+}
+
+TEST_CASE("MF rejects invalid configs", "[mf]") {
+  const auto s = recs::synthetic::low_rank_explicit(10, 10, 2, 0.1, 0.5, 0.0, 1);
+  for (const auto& bad : {recs::Config{{"k", 0}}, recs::Config{{"lr", -1.0}},
+                          recs::Config{{"lambda", -0.1}}, recs::Config{{"lr_decay", 0.0}},
+                          recs::Config{{"max_epochs", 0}}, recs::Config{{"bogus", 1}}}) {
+    INFO(bad.dump());
+    auto model = recs::make_mf_sgd();
+    CHECK_THROWS_AS(model->fit(s.train, bad, recs::TrainContext{}), std::invalid_argument);
+  }
+}
+
+TEST_CASE("MF training is bit-identical for a fixed seed and differs across seeds", "[mf]") {
+  const auto s = recs::synthetic::low_rank_explicit(80, 60, 3, 0.1, 0.3, 0.2, 4);
+  const recs::Config cfg{{"k", 4}, {"max_epochs", 15}};
+  recs::TrainContext ctx;
+  ctx.validation = &s.heldout;
+  ctx.seed = 99;
+  auto a = recs::make_mf_sgd();
+  auto b = recs::make_mf_sgd();
+  auto c = recs::make_mf_sgd();
+  a->fit(s.train, cfg, ctx);
+  b->fit(s.train, cfg, ctx);
+  ctx.seed = 100;
+  c->fit(s.train, cfg, ctx);
+  CHECK(a->training_curve() == b->training_curve());
+  std::vector<float> sa(60), sb(60), sc(60);
+  bool any_diff = false;
+  for (recs::UserIdx u = 0; u < 80; ++u) {
+    a->score_trained_user(u, sa);
+    b->score_trained_user(u, sb);
+    c->score_trained_user(u, sc);
+    CHECK(sa == sb);
+    any_diff = any_diff || sa != sc;
+  }
+  CHECK(any_diff);
+}
+
+TEST_CASE("MF early stopping keeps the best validation epoch", "[mf]") {
+  // A large learning rate with no decay makes validation RMSE bottom out and rise again.
+  const auto s = recs::synthetic::low_rank_explicit(100, 80, 3, 0.3, 0.2, 0.2, 8);
+  auto model = recs::make_mf_sgd();
+  recs::TrainContext ctx;
+  ctx.validation = &s.heldout;
+  model->fit(s.train,
+             recs::Config{{"k", 20}, {"lambda", 0.0}, {"lr", 0.05}, {"lr_decay", 1.0},
+                          {"max_epochs", 200}, {"patience", 3}, {"init_sd", 0.1}},
+             ctx);
+  const auto curve = model->training_curve();
+  CHECK(model->training_curve_metric() == "val_rmse");
+  REQUIRE(curve.size() >= 4);
+  CHECK(curve.size() < 200);  // stopped early
+  for (std::size_t e = 0; e < curve.size(); ++e) CHECK(curve[e].first == static_cast<int>(e + 1));
+  // The best epoch is exactly `patience` epochs before the last one.
+  const auto best = std::min_element(curve.begin(), curve.end(),
+                                     [](const auto& x, const auto& y) { return x.second < y.second; });
+  CHECK(curve.end() - best == 4);
+  // The kept parameters are that epoch's: re-measured validation RMSE equals the curve minimum.
+  const double rmse = heldout_rmse(*model, s.train, s.heldout, true);
+  CHECK(std::abs(rmse - best->second) < 1e-5);
+}
+
+TEST_CASE("MF score() is finite, one per item, and explain() cites only rated items", "[mf]") {
+  const auto s = recs::synthetic::low_rank_explicit(60, 50, 3, 0.1, 0.3, 0.0, 12);
+  auto model = recs::make_mf_sgd();
+  model->fit(s.train, recs::Config{{"k", 4}, {"max_epochs", 20}}, recs::TrainContext{});
+  std::vector<float> scores(50);
+  recs::testing::for_seeds(30, 5, [&](recs::Rng& rng, std::uint64_t) {
+    std::vector<recs::Rating> rs;
+    for (recs::ItemIdx i = 0; i < 50; ++i)
+      if (rng.uniform01() < 0.2) rs.push_back({i, static_cast<float>(0.5 * (1 + rng.uniform(10))), 0});
+    const auto st = model->fold_in(rs);
+    CHECK(st.ratings == rs);
+    CHECK(st.vec.size() == 4);
+    model->score(st, scores);
+    for (const float x : scores) CHECK(std::isfinite(x));
+    const std::set<recs::ItemIdx> rated = [&] {
+      std::set<recs::ItemIdx> r;
+      for (const auto& x : rs) r.insert(x.item);
+      return r;
+    }();
+    for (recs::ItemIdx i = 0; i < 50; ++i) {
+      const auto ex = model->explain(st, i);
+      CHECK(ex.because.size() <= 3);
+      for (std::size_t j = 0; j < ex.because.size(); ++j) {
+        CHECK(rated.count(ex.because[j].item) == 1);
+        CHECK(ex.because[j].weight > 0.0f);
+        if (j > 0) CHECK(ex.because[j - 1].weight >= ex.because[j].weight);
+      }
+    }
+  });
+  // An empty history folds in to the baseline mu + b_i.
+  const auto empty = model->fold_in({});
+  CHECK(empty.bias == 0.0);
+  model->score(empty, scores);
+  for (const float x : scores) CHECK(std::isfinite(x));
+  CHECK(model->explain(empty, 0).because.empty());
+}
+
+TEST_CASE("MF fold-in rejects unknown items", "[mf]") {
+  const auto s = recs::synthetic::low_rank_explicit(10, 10, 2, 0.1, 0.5, 0.0, 1);
+  auto model = recs::make_mf_sgd();
+  model->fit(s.train, recs::Config{{"k", 2}, {"max_epochs", 1}}, recs::TrainContext{});
+  const std::vector<recs::Rating> bad{{10, 4.0f, 0}};
+  CHECK_THROWS_AS(model->fold_in(bad), std::invalid_argument);
+}
+
+TEST_CASE("MF save/load round-trips fold-in scores exactly", "[mf]") {
+  const auto s = recs::synthetic::low_rank_explicit(50, 40, 3, 0.1, 0.3, 0.0, 21);
+  auto model = recs::make_mf_sgd();
+  model->fit(s.train, recs::Config{{"k", 3}, {"max_epochs", 10}}, recs::TrainContext{});
+  recs::testing::TempDir dir("mf");
+  model->save(dir.path());
+  auto loaded = recs::make_mf_sgd();
+  loaded->load(dir.path());
+  CHECK(loaded->n_items() == 40);
+  CHECK(loaded->config() == model->config());
+  CHECK_FALSE(loaded->supports_trained_scoring());  // per-user factors are not shipped
+  std::vector<float> a(40), b(40);
+  for (recs::UserIdx u = 0; u < 50; ++u) {
+    const auto rs = user_ratings(s.train, u);
+    model->score(model->fold_in(rs), a);
+    loaded->score(loaded->fold_in(rs), b);
+    CHECK(a == b);
+  }
+  // A truncated file is rejected rather than read short.
+  for (const auto& e : std::filesystem::directory_iterator(dir.path()))
+    if (e.path().extension() == ".bin") std::filesystem::resize_file(e.path(), 20);
+  auto broken = recs::make_mf_sgd();
+  CHECK_THROWS(broken->load(dir.path()));
+}
