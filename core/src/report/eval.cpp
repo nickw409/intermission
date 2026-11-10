@@ -12,7 +12,10 @@
 //   4. mean_pop_rank10: the mean popularity rank (1 = most rated in `train`) of the user's top-10,
 //      for every user. NaN if the list is empty (no candidates at all); excluded from the mean.
 //   5. Rating task, only for models that predict star ratings: per-user sums of squared and
-//      absolute errors of score[item] against each held-out rating.
+//      absolute errors of score[item] against each held-out rating. If the model cannot score a
+//      held-out item (a non-finite score, e.g. a movie with no training ratings), the prediction
+//      is the global mean of the training ratings and the rating still counts; the number of such
+//      fallbacks is printed to stderr at the end of evaluate().
 // Catalog coverage@10 is the share of the whole catalog that appears in at least one user's
 // top-10, over every evaluated user.
 //
@@ -41,6 +44,7 @@
 #include <chrono>
 #include <cmath>
 #include <exception>
+#include <iostream>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -171,6 +175,13 @@ EvalResult evaluate(const Model& m, const Dataset& train, std::span<const std::v
   const auto ranks = popularity_ranks(train.by_item);
   const bool rating_task = m.predicts_ratings();
   const std::uint32_t n_items = m.n_items();
+  double global_mean = 0.0;  // fallback prediction for held-out items the model cannot score
+  if (rating_task && train.n_ratings() > 0) {
+    double total = 0.0;
+    for (float v : train.by_user.values) total += v;
+    global_mean = total / static_cast<double>(train.n_ratings());
+  }
+  std::vector<std::uint32_t> fallbacks(users.size(), 0);
 
   EvalResult res;
   res.has_rating_task = rating_task;
@@ -208,11 +219,12 @@ EvalResult evaluate(const Model& m, const Dataset& train, std::span<const std::v
       m.score(st, scores);
       for (const Rating& r : hs) {
         if (r.item >= n_items) throw std::invalid_argument("evaluate: held-out item out of range");
-        const float pred = scores[r.item];
+        double pred = scores[r.item];
         if (!std::isfinite(pred)) {
-          throw std::logic_error(std::string(m.name()) + " predicts ratings but cannot score item " + std::to_string(r.item));
+          pred = global_mean;
+          ++fallbacks[j];
         }
-        const double err = static_cast<double>(r.value) - static_cast<double>(pred);
+        const double err = static_cast<double>(r.value) - pred;
         pu.sq_err += err * err;
         pu.abs_err += std::abs(err);
         ++pu.n_rated;
@@ -225,6 +237,12 @@ EvalResult evaluate(const Model& m, const Dataset& train, std::span<const std::v
     if (pu.n_relevant == 0) ++res.users_without_relevant;
   }
   res.coverage10 = catalog_coverage(top10, n_items, 10);
+  std::uint64_t n_fallbacks = 0;
+  for (auto c : fallbacks) n_fallbacks += c;
+  if (n_fallbacks > 0) {
+    std::cerr << "evaluate: " << m.name() << " could not score " << n_fallbacks
+              << " held-out rating(s); predicted the training global mean " << global_mean << " for them\n";
+  }
   if (m.supports_trained_scoring()) res.foldin_jaccard10 = foldin_parity(m, train, users, opt);
 
   res.eval_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();

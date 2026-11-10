@@ -57,6 +57,7 @@ class Popularity final : public Model {
   void fit(const Dataset& train, const Config& cfg, const TrainContext& /*ctx*/) override {
     m_ = parse_config(cfg);
     const std::uint32_t n_items = train.n_items();
+    if (train.by_item.n_rows != n_items) throw std::invalid_argument(std::string(name()) + ": by_item rows != n_items");
     counts_.assign(n_items, 0);
     std::vector<double> sums(n_items, 0.0);
     double total = 0.0;
@@ -115,6 +116,9 @@ class Popularity final : public Model {
     }
     const double m = r.f64();
     const double c = r.f64();
+    if (!std::isfinite(m) || m < 0.0 || !std::isfinite(c)) {
+      throw ArtifactError(std::string(name()) + ": invalid m or global mean in scores.bin");
+    }
     const std::uint32_t n = r.u32();
     r.need_elems(n, 8);
     std::vector<std::uint32_t> counts(n);

@@ -21,15 +21,16 @@
 #include <cmath>
 #include <ctime>
 #include <fstream>
+#include <iterator>
 #include <regex>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 
-#include <unistd.h>
 
 #include "recs/eval.hpp"
 #include "recs/stats.hpp"
+#include "report/output_files.hpp"
 
 namespace recs {
 namespace {
@@ -95,20 +96,11 @@ void check_header(const ReportHeader& h) {
   if (!std::regex_match(h.run_id, kRunIdPattern)) throw std::invalid_argument("invalid run_id '" + h.run_id + "'");
 }
 
-/// Writes `text` to dir/name via a temporary file and rename; refuses to replace an existing file.
+/// Writes `text` to dir/name atomically; refuses to replace an existing file (two runs can never
+/// overwrite each other, even when they race).
 fs::path write_new_file(const fs::path& dir, const std::string& name, const std::string& text) {
   fs::create_directories(dir);
-  const fs::path final_path = dir / name;
-  if (fs::exists(final_path)) throw std::runtime_error("refusing to overwrite " + final_path.string());
-  const fs::path tmp = dir / ("." + name + ".tmp-" + std::to_string(::getpid()));
-  {
-    std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-    out << text;
-    out.flush();
-    if (!out) throw std::runtime_error("cannot write " + tmp.string());
-  }
-  fs::rename(tmp, final_path);
-  return final_path;
+  return output::write_file_atomic(dir / name, text, output::Mode::NoReplace);
 }
 
 // Values of one ranking metric, null for users without a relevant item.
@@ -130,7 +122,13 @@ nlohmann::json make_report(const ReportHeader& h, const EvalResult& r, const Eva
   const Split& split = *h.split;
   const Dataset& trained_on = h.evaluated_on == "test" ? split.train : split.train_minus_val;
 
-  // Per-user columns, ascending user order.
+  // Per-user columns, ascending user order. Scope (contracts/report.schema.json):
+  //  - ranking metrics use users with >= 1 relevant held-out item; with no such user the estimate
+  //    is written as mean 0, CI [0, 0] (the schema requires numbers; counts.users_without_relevant
+  //    == counts.users_evaluated tells the reader why);
+  //  - cold_users.users counts EVERY evaluated user with fewer than cold_train_ratings_lt training
+  //    ratings, while cold_users.ndcg@10 averages only those of them with a relevant item (null
+  //    when there is none).
   std::vector<double> ndcg10, recall10, recall50, precision10, map10, pop_rank, cold_ndcg10;
   std::size_t cold_users = 0;
   for (const auto& pu : r.per_user) {
@@ -204,7 +202,8 @@ nlohmann::json make_report(const ReportHeader& h, const EvalResult& r, const Eva
   rep["split_hash"] = split.hash;
   rep["split"] = {{"min_ratings", split.config.min_ratings}, {"test_fraction", split.config.test_fraction},
                   {"val_fraction", split.config.val_fraction}, {"test_min", split.config.test_min},
-                  {"test_max", split.config.test_max},       {"seed", split.config.seed}};
+                  {"test_max", split.config.test_max},       {"val_min", split.config.val_min},
+                  {"val_max", split.config.val_max},         {"seed", split.config.seed}};
   rep["evaluated_on"] = h.evaluated_on;
   rep["model"] = h.model;
   rep["config"] = h.config.is_null() ? Config::object() : h.config;
@@ -247,9 +246,18 @@ fs::path write_report(const nlohmann::json& report, const fs::path& reports_dir)
 fs::path write_per_user(const ReportHeader& h, const EvalResult& r, const EvalOptions& opt,
                         const fs::path& private_dir) {
   check_header(h);
-  // Per-user results identify (dense) users: never write them where reports are served.
-  for (const auto& part : fs::absolute(private_dir).lexically_normal()) {
-    if (part == "reports") throw std::invalid_argument("write_per_user: refusing to write inside a reports directory");
+  // Per-user results identify (dense) users: never write them where reports are served. The
+  // library only knows the default layout, so it refuses data/reports and anything inside it;
+  // recs-train eval additionally checks the actual --reports directory (canonical paths).
+  {
+    const fs::path norm = fs::absolute(private_dir).lexically_normal();
+    fs::path prev;
+    for (const auto& part : norm) {
+      if (prev == "data" && part == "reports") {
+        throw std::invalid_argument("write_per_user: refusing to write inside data/reports (served)");
+      }
+      prev = part;
+    }
   }
   const std::size_t i10 = k_index(opt, 10);
   const std::size_t i50 = k_index(opt, 50);
@@ -292,10 +300,10 @@ fs::path write_per_user(const ReportHeader& h, const EvalResult& r, const EvalOp
 }
 
 // compare_runs: a paired bootstrap on per-user deltas a - b over the users present in both files
-// (for a ranking metric, those with a non-null value in both). "rmse" is compared when both runs
-// have rating data, as the per-user RMSE sqrt(sq_err / count) over users with count > 0 in both;
-// its mean_delta is therefore a mean of per-user RMSE differences, not the difference of the two
-// global RMSEs.
+// (for a ranking metric, those with a non-null value in both). When both runs have rating data,
+// "user_rmse" compares the per-user RMSE sqrt(sq_err / count) over users with count > 0 in both.
+// Its mean_delta is a mean of per-user RMSE differences — NOT the difference of the two global
+// RMSEs (which weigh every rating, not every user, equally) — hence the distinct name.
 nlohmann::json compare_runs(const nlohmann::json& a, const nlohmann::json& b, std::size_t resamples,
                             std::uint64_t seed) {
   try {
@@ -358,7 +366,7 @@ nlohmann::json compare_runs(const nlohmann::json& a, const nlohmann::json& b, st
         va.push_back(std::sqrt(xa.at("sq_err").at(ia).get<double>() / na));
         vb.push_back(std::sqrt(xb.at("sq_err").at(ib).get<double>() / nb));
       }
-      metrics["rmse"] = entry(va, vb);
+      metrics["user_rmse"] = entry(va, vb);
     }
 
     nlohmann::json out;

@@ -1,5 +1,6 @@
 // Gate 3 (C1): catalog, artifact write/load/verify, and the CURRENT pointer.
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -221,6 +222,27 @@ TEST_CASE("artifact: a truncated or malformed manifest fails verification", "[c1
   fs::remove(dir / "manifest.json");
   CHECK_THROWS_AS(recs::load_artifact(dir), recs::ArtifactError);
   CHECK_THROWS_AS(recs::load_artifact(root.path() / "does-not-exist"), recs::ArtifactError);
+}
+
+TEST_CASE("artifact: the manifest version must match the directory name", "[c1][artifact]") {
+  TempDir root("art-rename");
+  const auto dir = write_sample(root.path());
+  fs::rename(dir, root.path() / "2027-01-01T00-00-00Z");
+  CHECK_THROWS_AS(recs::load_artifact(root.path() / "2027-01-01T00-00-00Z"), recs::ArtifactError);
+}
+
+TEST_CASE("artifact: an inconsistent catalog is rejected", "[c1][artifact][catalog]") {
+  TempDir root("art-badcat");
+  const Fitted f;
+  auto cat = recs::make_catalog(fixture());
+  cat.popularity_rank[0] = cat.popularity_rank[1];  // not a permutation of 1..n
+  CHECK_THROWS(recs::write_artifact(root.path(), "v1", cat, f.list(), "pop", "x", "d"));
+  cat = recs::make_catalog(fixture());
+  cat.mean_rating[2] = std::nanf("");
+  CHECK_THROWS(recs::write_artifact(root.path(), "v1", cat, f.list(), "pop", "x", "d"));
+  cat = recs::make_catalog(fixture());
+  cat.rating_count.pop_back();
+  CHECK_THROWS(recs::write_artifact(root.path(), "v1", cat, f.list(), "pop", "x", "d"));
 }
 
 TEST_CASE("artifact: leftover .tmp-* directories are ignored and cleaned up", "[c1][artifact]") {

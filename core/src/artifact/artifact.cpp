@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <cmath>
 #include <chrono>
 #include <cstring>
 #include <ctime>
@@ -87,12 +88,27 @@ std::string utc_now_iso() {
 
 // ---- catalog file -------------------------------------------------------------------------------
 
-void save_catalog(const Catalog& c, const fs::path& file) {
-  const auto n = static_cast<std::uint32_t>(c.items.size());
+// Sizes agree, means are finite, and popularity_rank is a permutation of 1..n. Returns an error
+// message, or an empty string if the catalog is consistent.
+std::string catalog_problem(const Catalog& c) {
+  const std::size_t n = c.items.size();
   if (c.movies.size() != n || c.rating_count.size() != n || c.mean_rating.size() != n ||
       c.popularity_rank.size() != n) {
-    throw std::invalid_argument("catalog arrays have inconsistent sizes");
+    return "catalog arrays have inconsistent sizes";
   }
+  std::vector<bool> seen(n + 1, false);
+  for (std::size_t i = 0; i < n; ++i) {
+    if (!std::isfinite(c.mean_rating[i])) return "catalog mean_rating is not finite";
+    const std::uint32_t r = c.popularity_rank[i];
+    if (r == 0 || r > n || seen[r]) return "catalog popularity_rank is not a permutation of 1..n";
+    seen[r] = true;
+  }
+  return {};
+}
+
+void save_catalog(const Catalog& c, const fs::path& file) {
+  if (const auto problem = catalog_problem(c); !problem.empty()) throw std::invalid_argument(problem);
+  const auto n = static_cast<std::uint32_t>(c.items.size());
   binio::Writer w(file, kCatalogMagic, kCatalogVersion);
   w.u32(n);
   for (std::uint32_t i = 0; i < n; ++i) {
@@ -147,6 +163,7 @@ Catalog load_catalog(const fs::path& file) {
     c.popularity_rank[i] = r.u32();
   }
   r.finish();
+  if (const auto problem = catalog_problem(c); !problem.empty()) throw ArtifactError(problem);
   return c;
 }
 
@@ -238,6 +255,7 @@ std::set<std::string> listed_files_on_disk(const fs::path& dir) {
 
 Catalog make_catalog(const Dataset& train) {
   const std::uint32_t n = train.n_items();
+  if (train.by_item.n_rows != n) throw std::invalid_argument("make_catalog: by_item rows != n_items");
   Catalog c;
   c.items = train.items;
   c.movies = train.movies;
@@ -339,6 +357,11 @@ LoadedArtifact load_artifact(const fs::path& dir) {
   LoadedArtifact out;
   out.manifest = manifest_from_json(j);
   const Manifest& man = out.manifest;
+  fs::path norm = fs::absolute(dir).lexically_normal();
+  if (!norm.has_filename()) norm = norm.parent_path();  // trailing separator
+  if (man.version != norm.filename().string()) {
+    throw ArtifactError("manifest version " + man.version + " does not match directory " + dir.string());
+  }
 
   std::set<std::string> on_disk;
   try {

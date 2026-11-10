@@ -4,7 +4,9 @@
 //                      [--out data/reports/comparisons] [--resamples 1000] [--seed 42]
 //
 // Reads <private>/<run_id>.per_user.json for both runs (written by eval --keep-per-user), which
-// must share split_hash and evaluated_on. Writes <out>/<a>__vs__<b>.json
+// must share split_hash and evaluated_on. "user_rmse" (present when both runs predict ratings) is
+// the mean of per-user RMSE differences, not the difference of the global RMSEs.
+// Writes <out>/<a>__vs__<b>.json
 // (contracts/comparison.schema.json: aggregates only) and prints a table. A difference is called
 // significant only when the paired 95% CI of the per-user deltas excludes zero (spec: Statistical
 // honesty).
@@ -18,8 +20,7 @@
 #include <stdexcept>
 #include <string>
 
-#include <unistd.h>
-
+#include "../core/src/report/output_files.hpp"
 #include "commands.hpp"
 #include "recs/eval.hpp"
 
@@ -52,14 +53,9 @@ void run_compare(const CompareArgs& args) {
   const auto cmp = compare_runs(a, b, args.resamples, args.seed);
 
   fs::create_directories(args.out);
-  const fs::path path = fs::path(args.out) / (args.a + "__vs__" + args.b + ".json");
-  const fs::path tmp = fs::path(args.out) / ("." + path.filename().string() + ".tmp-" + std::to_string(::getpid()));
-  {
-    std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-    out << cmp.dump(2) << "\n";
-    if (!out) throw std::runtime_error("cannot write " + tmp.string());
-  }
-  fs::rename(tmp, path);
+  // Re-running a comparison replaces its (deterministic) output atomically.
+  const fs::path path = output::write_file_atomic(fs::path(args.out) / (args.a + "__vs__" + args.b + ".json"),
+                                                  cmp.dump(2) + "\n", output::Mode::Replace);
 
   std::cout << "a = " << args.a << " (" << a["model"].get<std::string>() << ")\n"
             << "b = " << args.b << " (" << b["model"].get<std::string>() << ")\n"
@@ -87,7 +83,7 @@ void add_compare_command(CLI::App& app) {
   cmd->add_option("--private", args->private_dir, "Directory holding <run_id>.per_user.json files");
   cmd->add_option("--out", args->out, "Output directory for the comparison JSON");
   cmd->add_option("--resamples", args->resamples, "Bootstrap resamples")->check(CLI::PositiveNumber);
-  cmd->add_option("--seed", args->seed, "Bootstrap seed");
+  cmd->add_option("--seed", args->seed, "Bootstrap seed")->check(CLI::Range(std::uint64_t{0}, (std::uint64_t{1} << 53) - 1));
   cmd->callback([args] { run_compare(*args); });
 }
 

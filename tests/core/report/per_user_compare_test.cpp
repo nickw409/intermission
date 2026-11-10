@@ -8,6 +8,7 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include "../../../core/src/report/output_files.hpp"
 #include "fake_models.hpp"
 #include "recs/dataset.hpp"
 #include "recs/eval.hpp"
@@ -78,6 +79,13 @@ TEST_CASE("write_per_user writes the private per-user file", "[c1][per_user]") {
                   std::invalid_argument);
   CHECK_THROWS_AS(recs::write_per_user(run.header("x_fixed", "fixed"), r, opt, dir.path() / "data" / "reports" / "private"),
                   std::invalid_argument);
+  CHECK_THROWS_AS(recs::write_per_user(run.header("x_fixed", "fixed"), r, opt, dir.path() / "data" / "reports-private" / ".." / "reports"),
+                  std::invalid_argument);
+  // No false positive: a checkout that lives under some directory named "reports".
+  const auto under = dir.path() / "reports" / "intermission" / "data" / "reports-private";
+  CHECK(recs::write_per_user(run.header("y_fixed", "fixed"), r, opt, under) == under / "y_fixed.per_user.json");
+  // Never overwrites an existing per-user file.
+  CHECK_THROWS(recs::write_per_user(run.header("y_fixed", "fixed"), r, opt, under));
 }
 
 TEST_CASE("compare_runs: a run against itself has zero deltas", "[c1][compare]") {
@@ -94,7 +102,8 @@ TEST_CASE("compare_runs: a run against itself has zero deltas", "[c1][compare]")
   CHECK(c["a"]["run_id"] == "2026-11-10T00-00-00Z_fixed");
   CHECK(c["b"]["model"] == "fixed");
   CHECK(c["metrics"].contains("ndcg@10"));
-  CHECK(c["metrics"].contains("rmse"));  // both runs predict ratings
+  CHECK(c["metrics"].contains("user_rmse"));  // both runs predict ratings
+  CHECK_FALSE(c["metrics"].contains("rmse"));
   CHECK(c["metrics"]["ndcg@10"]["users"] == 2);
   CHECK(c["metrics"]["pop_rank@10"]["users"] == 3);
   for (const auto& [name, v] : c["metrics"].items()) {
@@ -119,7 +128,7 @@ TEST_CASE("compare_runs: deltas are a - b over common users", "[c1][compare]") {
   const auto c = recs::compare_runs(a, b, 100, 42);
   require_valid(c, "comparison.schema.json");
   CHECK(c["metrics"]["ndcg@10"]["mean_delta"].get<double>() == Approx((1.0 / std::log2(3.0) - 0.5) / 2.0));
-  CHECK_FALSE(c["metrics"].contains("rmse"));  // neither predicts ratings
+  CHECK_FALSE(c["metrics"].contains("user_rmse"));  // neither predicts ratings
 
   auto other = b;
   other["split_hash"] = std::string(64, 'd');
@@ -151,4 +160,33 @@ TEST_CASE("make_run_id, write_report and peak_rss_bytes", "[c1][report]") {
   const auto rss = recs::peak_rss_bytes();
   REQUIRE(rss.has_value());
   CHECK(*rss > 0);
+}
+
+TEST_CASE("output_files: atomic writes and nested-directory detection", "[c1][report][output]") {
+  using recs::output::Mode;
+  TempDir dir("out-files");
+  const auto f = dir.path() / "a.json";
+  recs::output::write_file_atomic(f, "one\n", Mode::NoReplace);
+  CHECK(recs::testing::read_file(f) == "one\n");
+  CHECK_THROWS_AS(recs::output::write_file_atomic(f, "two\n", Mode::NoReplace), std::runtime_error);
+  CHECK(recs::testing::read_file(f) == "one\n");
+  recs::output::write_file_atomic(f, "three\n", Mode::Replace);
+  CHECK(recs::testing::read_file(f) == "three\n");
+  CHECK_THROWS(recs::output::write_file_atomic(dir.path() / "missing-dir" / "x.json", "x", Mode::Replace));
+  for (const auto& e : recs::fs::directory_iterator(dir.path())) {
+    CHECK(e.path().filename().string().find(".tmp-") == std::string::npos);  // no temp files left
+  }
+
+  const auto root = dir.path();
+  recs::fs::create_directories(root / "data" / "reports");
+  recs::fs::create_directories(root / "data" / "reports-private");
+  CHECK(recs::output::paths_nested(root / "data" / "reports", root / "data" / "reports" / "private"));
+  CHECK(recs::output::paths_nested(root / "data" / "reports" / "private", root / "data" / "reports"));
+  CHECK(recs::output::paths_nested(root / "data" / "reports", root / "data" / "reports-private" / ".." / "reports"));
+  CHECK(recs::output::paths_nested(root / "data", root / "data" / "reports"));
+  CHECK_FALSE(recs::output::paths_nested(root / "data" / "reports", root / "data" / "reports-private"));
+  CHECK_FALSE(recs::output::paths_nested(root / "reports" / "repo" / "data" / "reports-private", root / "data" / "reports"));
+  // A symlinked alias of the reports directory is caught.
+  recs::fs::create_directory_symlink(root / "data" / "reports", root / "alias");
+  CHECK(recs::output::paths_nested(root / "alias" / "private", root / "data" / "reports"));
 }

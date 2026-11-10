@@ -141,7 +141,7 @@ void add_train_command(CLI::App& app) {
   cmd->add_option("--out", args->out, "Artifact root directory");
   cmd->add_option("--config-dir", args->config_dir, "Directory of <model>.json configs");
   cmd->add_option("--data-dir", args->data_dir, "Data directory (raw/ and cache/)");
-  cmd->add_option("--seed", args->seed, "Model seed");
+  cmd->add_option("--seed", args->seed, "Model seed")->check(CLI::Range(std::uint64_t{0}, (std::uint64_t{1} << 53) - 1));
   cmd->add_flag("--set-current", args->set_current, "Point CURRENT at the new artifact");
   cmd->callback([args] { run_train(*args); });
 }

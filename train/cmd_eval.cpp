@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 
+#include "../core/src/report/output_files.hpp"
 #include "commands.hpp"
 #include "recs/dataset.hpp"
 #include "recs/eval.hpp"
@@ -30,6 +31,9 @@ namespace recs::cli {
 namespace {
 
 namespace fs = std::filesystem;
+
+// Seeds are recorded in JSON reports, which must stay exact in every JSON reader (2^53 - 1).
+constexpr std::uint64_t kMaxSeed = (std::uint64_t{1} << 53) - 1;
 
 struct EvalArgs {
   std::string dataset;
@@ -73,9 +77,21 @@ void print_estimate(const char* name, const nlohmann::json& e) {
 }
 
 void run_eval(const EvalArgs& a) {
+  // Everything that can fail cheaply is checked before the dataset is loaded.
   if (a.on != "test" && a.on != "validation") throw std::invalid_argument("--on must be test or validation");
   const Config cfg = read_config(a.config, a.model);
-  auto model = make_model(a.model);  // validates the name before any heavy work
+  auto model = make_model(a.model);
+  const std::string run_id = make_run_id(a.model);
+  fs::create_directories(a.reports);
+  if (fs::exists(fs::path(a.reports) / (run_id + ".json"))) throw std::runtime_error("report " + run_id + " already exists");
+  if (a.keep_per_user) {
+    // Per-user files identify users and must never be served: --private may neither be nor
+    // contain nor lie inside --reports (canonical paths, so `..` and symlinks are resolved).
+    if (output::paths_nested(a.private_dir, a.reports)) {
+      throw std::invalid_argument("--private and --reports must be separate directories (neither inside the other)");
+    }
+    fs::create_directories(a.private_dir);
+  }
 
   const fs::path data(a.data_dir);
   const Dataset full = load_or_build(data / "raw" / a.dataset, data / "cache" / (a.dataset + ".bin"), a.dataset);
@@ -109,7 +125,7 @@ void run_eval(const EvalArgs& a) {
   if (with_baselines) baselines = evaluate_rating_baselines(train, heldout, split.eval_users);
 
   ReportHeader h;
-  h.run_id = make_run_id(a.model);
+  h.run_id = run_id;
   h.git_sha = git_sha();
   h.dataset = a.dataset;
   h.split = &split;
@@ -124,9 +140,22 @@ void run_eval(const EvalArgs& a) {
   h.peak_rss_bytes = peak_rss_bytes();
 
   const auto report = make_report(h, res, opt);
-  const auto path = write_report(report, a.reports);
+  // The per-user file is written first; if the report then fails, it is removed again, so a
+  // report never exists without the per-user file it was asked to keep (and vice versa).
+  fs::path per_user_path;
+  if (a.keep_per_user) per_user_path = write_per_user(h, res, opt, a.private_dir);
+  fs::path path;
+  try {
+    path = write_report(report, a.reports);
+  } catch (...) {
+    if (!per_user_path.empty()) {
+      std::error_code ec;
+      fs::remove(per_user_path, ec);
+    }
+    throw;
+  }
   std::cout << "report: " << path.string() << "\n";
-  if (a.keep_per_user) std::cout << "per-user: " << write_per_user(h, res, opt, a.private_dir).string() << "\n";
+  if (a.keep_per_user) std::cout << "per-user: " << per_user_path.string() << "\n";
 
   const auto& m = report["metrics"];
   std::cout << "\n" << a.model << " on " << a.dataset << " (" << a.on << ", " << report["counts"]["users_evaluated"]
@@ -154,8 +183,8 @@ void add_eval_command(CLI::App& app) {
   cmd->add_option("--model", args->model, "Model name (pop, pop_count, knn, content, mf, als)")->required();
   cmd->add_option("--config", args->config, "Config JSON (default configs/<model>.json if present)");
   cmd->add_option("--on", args->on, "Held-out set: test or validation")->check(CLI::IsMember({"test", "validation"}));
-  cmd->add_option("--split-seed", args->split_seed, "Split seed");
-  cmd->add_option("--seed", args->seed, "Model, bootstrap and parity seed");
+  cmd->add_option("--split-seed", args->split_seed, "Split seed")->check(CLI::Range(std::uint64_t{0}, kMaxSeed));
+  cmd->add_option("--seed", args->seed, "Model, bootstrap and parity seed")->check(CLI::Range(std::uint64_t{0}, kMaxSeed));
   cmd->add_option("--bootstrap", args->bootstrap, "Bootstrap resamples")->check(CLI::PositiveNumber);
   cmd->add_option("--data-dir", args->data_dir, "Data directory (raw/ and cache/)");
   cmd->add_option("--reports", args->reports, "Report output directory");

@@ -1,5 +1,6 @@
 // Gates 4 and 7 (C1): evaluate() metric scope, fold-in parity, the rating task, and make_report.
 #include <cmath>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -150,6 +151,8 @@ TEST_CASE("make_report: means over relevant users; pop rank and coverage over al
   CHECK(rep["counts"]["n_train_ratings"] == 4);
   CHECK(rep["split"]["min_ratings"] == 10);
   CHECK(rep["split"]["seed"] == 42);
+  CHECK(rep.at("split").value("val_min", -1) == 1);
+  CHECK(rep.at("split").value("val_max", -1) == 10);
   CHECK(rep["seeds"]["bootstrap"] == 42);
   CHECK(rep["peak_rss_bytes"] == 1234);
   CHECK(rep["train_seconds"] == 0.5);
@@ -262,6 +265,21 @@ TEST_CASE("evaluate: rating task for models that predict ratings", "[c1][eval][r
   CHECK(rep["rating_metrics"]["n"] == 4);
   CHECK(rep["rating_metrics"]["rmse"]["mean"].get<double>() == Approx(std::sqrt(4.25 / 4.0)));
   CHECK(rep["rating_metrics"]["mae"]["mean"].get<double>() == Approx(3.5 / 4.0));
+}
+
+TEST_CASE("evaluate: a rating model that cannot score a held-out item predicts the global mean", "[c1][eval][rating]") {
+  Fixture f;
+  // Item 2 is "cold" for this model. Training ratings are 4, 3, 5, 2: global mean 3.5.
+  const float inf = std::numeric_limits<float>::infinity();
+  const FixedScoreModel m({3.f, 3.f, -inf, 3.f, 3.f, 3.f}, true);
+  const auto r = recs::evaluate(m, f.train, f.heldout, f.users, recs::EvalOptions{});
+  REQUIRE(r.has_rating_task);
+  // u1: item 2 rated 3.0 -> error 0.5; u2: item 2 rated 4.0 -> error 0.5. Both still counted.
+  CHECK(r.per_user[1].n_rated == 1);
+  CHECK(r.per_user[1].sq_err == Approx(0.25));
+  CHECK(r.per_user[2].abs_err == Approx(0.5));
+  // u0's items are scorable: unchanged.
+  CHECK(r.per_user[0].sq_err == Approx(3.25));
 }
 
 TEST_CASE("evaluate is identical with 1 and 4 threads", "[c1][eval][determinism]") {
