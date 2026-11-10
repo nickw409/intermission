@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -150,6 +151,7 @@ func register(mux *http.ServeMux, d *app.Deps, o options) {
 		timeout:   o.timeout,
 		cache:     newDiskCache(d.Config.PosterCacheDir, d.Config.PosterCacheMaxByte, logger),
 		negative:  newNegCache(negativeEntries, negativeTTL, o.now),
+		flights:   flightGroup{logger: logger},
 	}
 	// No proxy from the environment: requests go straight to the TMDB hosts.
 	transport := http.DefaultTransport.(*http.Transport).Clone()
@@ -186,7 +188,11 @@ func (h *handler) serve(w http.ResponseWriter, r *http.Request) {
 	select {
 	case <-call.done:
 	case <-r.Context().Done():
-		return // nobody is listening
+		// The client gave up: write no body, but record 499 ("client
+		// closed request", as Caddy does) so the access log doesn't show
+		// a 200 for a response that was never sent.
+		w.WriteHeader(499)
+		return
 	}
 	if call.err != nil {
 		writePlaceholder(w)
@@ -230,8 +236,9 @@ func (h *handler) fetchAndRecord(ctx context.Context, id int64) ([]byte, error) 
 // flightGroup runs at most one fetch per movie ID at a time; callers that
 // arrive while one runs share its result (a minimal singleflight).
 type flightGroup struct {
-	mu    sync.Mutex
-	calls map[int64]*flight
+	mu     sync.Mutex
+	calls  map[int64]*flight
+	logger *slog.Logger // for recovered panics; nil means slog.Default()
 }
 
 type flight struct {
@@ -260,6 +267,15 @@ func (g *flightGroup) do(id int64, fn func() ([]byte, error)) *flight {
 			defer func() {
 				if v := recover(); v != nil {
 					c.img, c.err = nil, fmt.Errorf("poster fetch panicked: %v", v)
+					logger := g.logger
+					if logger == nil {
+						logger = slog.Default()
+					}
+					// The movie ID, the panic's type and the stack: no
+					// request data, and not the value (it could carry a URL
+					// with the TMDB key).
+					logger.Error("posters: fetch panicked", "movie_id", id,
+						"panic_type", fmt.Sprintf("%T", v), "stack", string(debug.Stack()))
 				}
 			}()
 			c.img, c.err = fn()

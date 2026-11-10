@@ -1,7 +1,11 @@
 package posters
 
 import (
+	"bytes"
+	"context"
+	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -36,7 +40,8 @@ func TestTMDBTimeoutNotNegativelyCached(t *testing.T) {
 // A panic inside a shared fetch becomes that call's error; waiters are
 // released and the process keeps running.
 func TestFlightPanicBecomesError(t *testing.T) {
-	var g flightGroup
+	var logs bytes.Buffer
+	g := flightGroup{logger: slog.New(slog.NewTextHandler(&logs, nil))}
 	c := g.do(1, func() ([]byte, error) { panic("boom") })
 	select {
 	case <-c.done:
@@ -46,11 +51,39 @@ func TestFlightPanicBecomesError(t *testing.T) {
 	if c.err == nil || !strings.Contains(c.err.Error(), "panic") {
 		t.Fatalf("err = %v, want a panic error", c.err)
 	}
+	if !strings.Contains(logs.String(), "panicked") || !strings.Contains(logs.String(), "movie_id=1") {
+		t.Errorf("panic not logged: %q", logs.String())
+	}
 	// The group still works for the same ID.
 	c = g.do(1, func() ([]byte, error) { return []byte("ok"), nil })
 	<-c.done
 	if c.err != nil || string(c.img) != "ok" {
 		t.Fatalf("after a panic: %q %v", c.img, c.err)
+	}
+}
+
+// PR #42 re-review 5: a client that gives up gets nothing written, and the
+// access log records 499 (client closed request) rather than a 200.
+func TestGivenUpClientRecordedAs499(t *testing.T) {
+	e := newEnv(t, setup{key: testKey})
+	started, release := blockImages(e)
+	defer close(release)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- e.posterCtx(ctx, "8") }()
+	<-started
+	cancel()
+	var rec *httptest.ResponseRecorder
+	select {
+	case rec = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled request did not return")
+	}
+	if rec.Code != 499 || rec.Body.Len() != 0 {
+		t.Fatalf("given-up client: status %d, %d body bytes; want 499 and none", rec.Code, rec.Body.Len())
+	}
+	if !strings.Contains(e.Logs.String(), `"status":499`) {
+		t.Errorf("access log does not record 499: %s", e.Logs.String())
 	}
 }
 
