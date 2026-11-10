@@ -58,6 +58,11 @@ std::string model_input(const std::string& model, const fs::path& dir) {
   const auto f = recs::fuzz::model_files(model);
   std::string binary = read_file(dir / f.binary);
   if (f.sealed) binary = without_digest(std::move(binary), dir / f.binary);
+  if (f.second != nullptr) {
+    std::string second = read_file(dir / f.second);
+    if (f.sealed) second = without_digest(std::move(second), dir / f.second);
+    binary = recs::fuzz::join_binary(binary, second);
+  }
   if (!f.has_config) return binary;
   return recs::fuzz::join_config(read_file(dir / "config.json"), binary);
 }
