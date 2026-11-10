@@ -41,11 +41,19 @@ code="$(stack_invite "$(( ${LOAD_USERS:-70} + 5 ))")"
 [[ -n "$code" ]] || { slog "no invite code"; exit 1; }
 
 (cd "$here" && go build -o "$STACK_DIR/recs-load" .)
-slog "host: $(nproc) CPUs, load average $(cut -d' ' -f1-3 /proc/loadavg)"
-fuzzers="$(pgrep -fa 'build/fuzz/|-test\.fuzz|go test .*-fuzz' | grep -v pgrep || true)"
-[[ -z "$fuzzers" ]] || slog "WARNING: fuzzers are running; the latency numbers will be skewed:"$'\n'"$fuzzers"
-
+# Between setup and measurement: report the host state; with WAIT_QUIET=1, first wait until no
+# fuzzer is running (other load is reported, not waited for).
+# (Bracketed so the pattern does not match the shell running it.)
+fuzz_re='[b]uild/fuzz/|-test[.]fu[z]z|go test .*-fu[z]z'
+quiet="$(cat <<EOF
+if [ -n "${WAIT_QUIET:-}" ]; then
+  until ! pgrep -f '$fuzz_re' >/dev/null; do sleep 10; done
+fi
+echo "host: $(nproc) CPUs, load average \$(cut -d' ' -f1-3 /proc/loadavg)" >&2
+if pgrep -f '$fuzz_re' >/dev/null; then echo "WARNING: fuzzers are running; latency numbers will be skewed" >&2; fi
+EOF
+)"
 # shellcheck disable=SC2086
-"$STACK_DIR/recs-load" -base "http://127.0.0.1:$STACK_PORT" -origin "$STACK_ORIGIN" -invite "$code" \
+"$STACK_DIR/recs-load" -before-measure "$quiet" -base "http://127.0.0.1:$STACK_PORT" -origin "$STACK_ORIGIN" -invite "$code" \
   -users "${LOAD_USERS:-70}" -clients "${LOAD_CLIENTS:-20}" -label "$dataset, knn $(tr -d '\n ' < "$knn_config")" \
   ${LOAD_ARGS:-}

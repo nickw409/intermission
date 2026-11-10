@@ -28,4 +28,5 @@ What the generator does:
   `X-Model-Version` header; any error fails the run, as does p99 ≥ 75 ms.
 - Prints a JSON summary (p50/p90/p95/p99/max/mean, throughput, load average before and after).
 
-Run it on a quiet host: the script prints the load average and warns if fuzzers are running.
+Run it on a quiet host: the script prints the load average and warns if fuzzers are running;
+with `WAIT_QUIET=1` it does the setup, then waits until no fuzzer is running before measuring.

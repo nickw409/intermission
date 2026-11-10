@@ -32,6 +32,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"slices"
 	"strings"
 	"sync"
@@ -45,6 +46,7 @@ type config struct {
 	perUser                                 int
 	seed                                    uint64
 	thresholdMS                             float64
+	beforeMeasure                           string
 }
 
 func main() {
@@ -63,6 +65,7 @@ func main() {
 	flag.IntVar(&c.perUser, "per-user", 30, "recommendation calls per user (recs-api's per-user burst)")
 	flag.Uint64Var(&c.seed, "seed", 42, "seed for ratings and movie choice")
 	flag.Float64Var(&c.thresholdMS, "p99-ms", 75, "fail if p99 is at or above this many milliseconds")
+	flag.StringVar(&c.beforeMeasure, "before-measure", "", "shell command run (and waited for) between setup and measurement, e.g. waiting for a quiet host")
 	flag.Parse()
 	if c.invite == "" {
 		fmt.Fprintln(os.Stderr, "-invite is required")
@@ -224,6 +227,14 @@ func run(c config) error {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "setup done in %s: %d users with %d ratings each\n", time.Since(setupStart).Round(time.Second), len(users), c.ratings)
+
+	if c.beforeMeasure != "" {
+		cmd := exec.Command("bash", "-c", c.beforeMeasure)
+		cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("-before-measure: %w", err)
+		}
+	}
 
 	total := len(users) * c.perUser
 	if total <= c.warmup {
