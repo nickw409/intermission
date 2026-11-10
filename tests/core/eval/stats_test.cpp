@@ -1,4 +1,5 @@
 // Gate tests for recs/stats.hpp (B1 gate 3): percentile bootstrap over users.
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 #include <string>
@@ -60,6 +61,45 @@ TEST_CASE("bootstrap_ci mean is the sample mean and the CI brackets it", "[eval]
   const auto y = normal_sample(11, 300, 1.0, 2.0);
   const auto ey = recs::bootstrap_ci(y);
   CHECK_THAT(ey.mean, WithinAbs(sample_mean(y), 1e-12));
+}
+
+TEST_CASE("bootstrap_ci percentiles interpolate linearly between order statistics", "[eval][stats]") {
+  // Data {0, 1} (n = 2), B = 3 resamples. Each resample draws 2 indices, so its mean is
+  // 0, 0.5 or 1. The header fixes the stream: recs::Rng(seed), indices drawn with uniform(n), n per
+  // resample, resample after resample. Replaying it, pick the first seed whose three resample
+  // means sort to exactly {0, 0.5, 1}.
+  const std::vector<double> x{0.0, 1.0};
+  auto sorted_means = [](std::uint64_t seed) {
+    recs::Rng rng(seed);
+    std::vector<double> m;
+    for (int b = 0; b < 3; ++b) {
+      double s = 0.0;
+      for (int i = 0; i < 2; ++i) s += static_cast<double>(rng.uniform(2));
+      m.push_back(s / 2.0);
+    }
+    std::sort(m.begin(), m.end());
+    return m;
+  };
+  std::uint64_t seed = 0;
+  while (sorted_means(seed) != std::vector<double>{0.0, 0.5, 1.0}) {
+    ++seed;
+    REQUIRE(seed < 10000);
+  }
+  INFO("seed = " << seed);
+
+  // Type 7 with sorted x_0 = 0, x_1 = 0.5, x_2 = 1: q_p = x_f + (h - f)(x_{f+1} - x_f),
+  // h = (B - 1) p = 2p, f = floor(h).
+  // level 0.5:  p = 0.25 -> h = 0.5 -> 0 + 0.5 * 0.5 = 0.25;  p = 0.75 -> h = 1.5 -> 0.5 + 0.5 * 0.5 = 0.75.
+  const auto e50 = recs::bootstrap_ci(x, 3, seed, 0.5);
+  CHECK_THAT(e50.lo, WithinAbs(0.25, 1e-15));
+  CHECK_THAT(e50.hi, WithinAbs(0.75, 1e-15));
+  // level 0.95: p = 0.025 -> h = 0.05 -> 0 + 0.05 * 0.5 = 0.025;
+  //             p = 0.975 -> h = 1.95 -> 0.5 + 0.95 * 0.5 = 0.975.
+  // (Taking x_floor(h) instead would give 0 and 0.5.)
+  const auto e95 = recs::bootstrap_ci(x, 3, seed, 0.95);
+  CHECK_THAT(e95.lo, WithinAbs(0.025, 1e-12));
+  CHECK_THAT(e95.hi, WithinAbs(0.975, 1e-12));
+  CHECK(e95.mean == 0.5);
 }
 
 TEST_CASE("bootstrap_ci is deterministic for a seed", "[eval][stats]") {
