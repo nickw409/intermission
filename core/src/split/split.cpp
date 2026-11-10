@@ -22,7 +22,13 @@
 //
 // Outputs: `train` = train-minus-val + validation, `train_minus_val`, and per-user validation and
 // test vectors in ascending item order. Both Datasets keep the input's user/item index spaces,
-// IdMaps and metadata (movies, tags, genome) unchanged; only the rating matrices differ.
+// IdMaps and metadata (movies, genome) unchanged; only the rating matrices and tags differ.
+//
+// Tags (leakage guard): a user's tag on a held-out movie reveals the interaction, so
+//   `train`           drops every tag application whose (tagging user, item) is in that user's test set;
+//   `train_minus_val` also drops those whose (tagging user, item) is in the user's validation set.
+// The tag's external user_id is mapped through full.users; tags by users with no ratings, and tags
+// on items the tagger did not rate, are kept. Tags are not part of the hash.
 //
 // Hash (reproducible from this description alone): SHA-256 over
 //   the config as nlohmann::json::dump() of {"min_ratings","seed","test_fraction","test_max",
@@ -95,10 +101,24 @@ Dataset filtered_copy(const Dataset& full, const std::vector<char>& assign, Keep
   d.users = full.users;
   d.items = full.items;
   d.movies = full.movies;
-  d.tags = full.tags;
   d.genome = full.genome;
 
   const Csr& src = full.by_user;
+  // Leakage guard: a tag stays unless its tagger is a rating user whose rating of the same item
+  // was moved out of this Dataset (to validation or test).
+  for (const TagApplication& t : full.tags) {
+    const auto u = full.users.find(t.user_id);
+    if (u && *u < src.n_rows) {
+      const auto row = src.row_indices(*u);
+      const auto it = std::lower_bound(row.begin(), row.end(), t.item);
+      if (it != row.end() && *it == t.item) {
+        const std::uint64_t p = src.indptr[*u] + static_cast<std::uint64_t>(it - row.begin());
+        if (!keep(assign[p])) continue;
+      }
+    }
+    d.tags.push_back(t);
+  }
+
   Csr& m = d.by_user;
   m.n_rows = src.n_rows;
   m.n_cols = src.n_cols;

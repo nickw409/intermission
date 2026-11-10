@@ -215,6 +215,22 @@ void check_split(const Dataset& full, const SplitConfig& c, const Split& sp) {
   CHECK(sp.eval_users == expected_eval);
   CHECK(sp.hash == recs::sha256_hex(hash_input));
 
+  // Tags (leakage guard): drop a tag whose (tagging user, item) is held out of that Dataset.
+  auto held_in = [&](const std::vector<std::vector<Rating>>& sets, const recs::TagApplication& t) {
+    const auto u = full.users.find(t.user_id);
+    if (!u) return false;
+    for (const auto& r : sets[*u])
+      if (r.item == t.item) return true;
+    return false;
+  };
+  std::vector<recs::TagApplication> want_train, want_tmv;
+  for (const auto& t : full.tags) {
+    if (!held_in(sp.test, t)) want_train.push_back(t);
+    if (!held_in(sp.test, t) && !held_in(sp.validation, t)) want_tmv.push_back(t);
+  }
+  CHECK(sp.train.tags == want_train);
+  CHECK(sp.train_minus_val.tags == want_tmv);
+
   // cold_item_share by brute force: test ratings whose item has no rating in train.
   std::set<ItemIdx> train_items;
   for (UserIdx u = 0; u < n_users; ++u)
@@ -245,7 +261,22 @@ Dataset random_dataset(recs::Rng& rng) {
       t.push_back({u, items[j], value, ts});
     }
   }
-  return recs::make_dataset("random", n_users, n_items, std::move(t));
+  Dataset ds = recs::make_dataset("random", n_users, n_items, std::move(t));
+  // Tags: mostly by rating users on items they rated (so some land on held-out pairs), some on
+  // unrated items, and some by external users who have no ratings at all.
+  const auto n_tags = rng.uniform(40);
+  for (std::uint64_t j = 0; j < n_tags; ++j) {
+    const auto user = static_cast<std::int64_t>(rng.uniform(n_users + 3));
+    const auto item = static_cast<ItemIdx>(rng.uniform(n_items));
+    ds.tags.push_back({user, item, "tag" + std::to_string(j), 0});
+    if (user < static_cast<std::int64_t>(n_users)) {
+      const auto row = ds.by_user.row_indices(static_cast<UserIdx>(user));
+      if (!row.empty()) {
+        ds.tags.push_back({user, row[rng.uniform(row.size())], "rated" + std::to_string(j), 0});
+      }
+    }
+  }
+  return ds;
 }
 
 SplitConfig random_config(recs::Rng& rng) {
@@ -401,6 +432,36 @@ TEST_CASE("split cold_item_share hand fixture", "[split]") {
   // No evaluated users: no test ratings, share 0.
   const Dataset small = recs::make_dataset("small", 1, 2, {{0, 0, 4.0f, 0}});
   CHECK(recs::make_split(small, SplitConfig{}).cold_item_share == 0.0);
+}
+
+TEST_CASE("split drops tags on held-out pairs (leakage guard)", "[split][tags]") {
+  // user 0 rates items 0..9 at ts = item: test {8, 9}, validation {6, 7}, train-minus-val {0..5}.
+  // user 1 rates only item 9 (not evaluated, all train).
+  // Tags:
+  //   A (user 0, item 9): test pair        -> dropped from train and train_minus_val
+  //   B (user 0, item 7): validation pair  -> kept in train, dropped from train_minus_val
+  //   C (user 0, item 2): train pair       -> kept in both
+  //   D (user 0, item 10): item not rated by user 0 -> kept in both
+  //   E (user 1, item 9): user 1 not evaluated -> kept in both
+  //   F (external user 50, item 9): no ratings at all -> kept in both
+  std::vector<Triplet> t;
+  for (ItemIdx i = 0; i < 10; ++i) t.push_back({0, i, 4.0f, static_cast<std::int64_t>(i)});
+  t.push_back({1, 9, 4.0f, 0});
+  Dataset full = recs::make_dataset("tags", 2, 11, t);
+  const recs::TagApplication A{0, 9, "A", 1}, B{0, 7, "B", 2}, C{0, 2, "C", 3}, D{0, 10, "D", 4},
+      E{1, 9, "E", 5}, F{50, 9, "F", 6};
+  full.tags = {A, B, C, D, E, F};
+  const Split sp = recs::make_split(full, SplitConfig{});
+  check_split(full, SplitConfig{}, sp);
+  REQUIRE(items_of(sp.test[0]) == std::set<ItemIdx>{8, 9});
+  REQUIRE(items_of(sp.validation[0]) == std::set<ItemIdx>{6, 7});
+  CHECK(sp.train.tags == std::vector<recs::TagApplication>{B, C, D, E, F});
+  CHECK(sp.train_minus_val.tags == std::vector<recs::TagApplication>{C, D, E, F});
+
+  // Tags never enter the hash.
+  Dataset no_tags = full;
+  no_tags.tags.clear();
+  CHECK(recs::make_split(no_tags, SplitConfig{}).hash == sp.hash);
 }
 
 TEST_CASE("split hash: exact encoding, stability, sensitivity", "[split][hash]") {
