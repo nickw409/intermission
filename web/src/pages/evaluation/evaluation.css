@@ -1,0 +1,160 @@
+/* Evaluation page. Chart text and axes use currentColor, so they follow the site's light/dark text
+   color; series colors come from src/lib/reports/models.ts (separate light and dark steps). */
+
+.evaluation__intro {
+  max-width: 48rem;
+}
+
+.eval-section {
+  margin-top: var(--space-8);
+}
+
+.eval-group-picker {
+  max-width: 20rem;
+  margin: var(--space-4) 0;
+}
+
+.eval-group-picker select,
+.run-picker select {
+  font: inherit;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+}
+
+.eval-error {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
+  justify-content: space-between;
+}
+
+.eval-error p {
+  margin: 0;
+}
+
+.chart-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 30rem), 1fr));
+  gap: var(--space-6);
+}
+
+.chart-group {
+  margin-top: var(--space-8);
+}
+
+.chart {
+  margin: 0;
+  min-width: 0;
+  padding: var(--space-4);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+}
+
+.chart__title {
+  margin: 0 0 var(--space-1);
+  font-family: var(--font-display);
+  line-height: 1.2;
+  font-size: 1.1rem;
+}
+
+.chart__description {
+  margin: 0 0 var(--space-3);
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.chart__plot {
+  --plot-background: var(--surface); /* Plot's tooltip fill */
+  width: 100%;
+  overflow: hidden;
+}
+
+.chart__plot svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  font-size: 11px;
+}
+
+.chart__note {
+  margin: var(--space-2) 0;
+  font-size: 0.9rem;
+}
+
+.chart__toggle {
+  margin-top: var(--space-3);
+  font-size: 0.875rem;
+  padding: var(--space-1) var(--space-3);
+}
+
+.chart__data {
+  margin-top: var(--space-3);
+  overflow-x: auto;
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-4);
+  margin: 0 0 var(--space-2);
+  padding: 0;
+  list-style: none;
+  font-size: 0.875rem;
+}
+
+.legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.legend__swatch svg {
+  display: block;
+}
+
+.table-scroll {
+  overflow-x: auto;
+  margin-top: var(--space-4);
+}
+
+.data-table {
+  border-collapse: collapse;
+  font-size: 0.875rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.data-table caption {
+  text-align: left;
+  font-weight: 600;
+  padding-bottom: var(--space-2);
+}
+
+.data-table th,
+.data-table td {
+  padding: var(--space-1) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.data-table th[scope='row'],
+.data-table thead th:first-child {
+  text-align: left;
+}
+
+.run-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  margin: var(--space-4) 0;
+}
+
+.eval-skipped code {
+  overflow-wrap: anywhere;
+}

@@ -1,0 +1,3 @@
+# Each entry is one specific, reviewed finding (commit:file:rule:line). Never add patterns here.
+# Fake TMDB key used by the poster proxy tests to prove the key never leaks (not a real credential).
+6a515c2c196b16ca5272c2ad6acb7b2836fb1786:api/internal/posters/posters_test.go:generic-api-key:24

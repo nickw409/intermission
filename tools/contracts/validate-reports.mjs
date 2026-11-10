@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
+import { reportConsistency } from './report-consistency.mjs';
 
 const dir = process.argv[2];
 if (!dir || !existsSync(dir)) { console.error(`reports dir not found: ${dir}`); process.exit(1); }
@@ -16,8 +17,12 @@ const files = readdirSync(dir).filter((f) => f.endsWith('.json'));
 if (files.length === 0) { console.error(`no reports in ${dir}`); process.exit(1); }
 let bad = 0;
 for (const f of files) {
-  if (!validate(JSON.parse(readFileSync(join(dir, f), 'utf8')))) {
+  const report = JSON.parse(readFileSync(join(dir, f), 'utf8'));
+  if (!validate(report)) {
     bad++; console.error(`INVALID ${f}: ${ajv.errorsText(validate.errors)}`);
+  } else {
+    const problems = reportConsistency(report);
+    if (problems.length) { bad++; console.error(`INCONSISTENT ${f}: ${problems.join('; ')}`); }
   }
 }
 console.log(`${files.length - bad}/${files.length} reports valid in ${dir}`);
