@@ -240,11 +240,19 @@ Manifest manifest_from_json(const nlohmann::json& j) {
 // Reads a small control file (CURRENT, manifest.json) with hard limits: the final path component
 // is opened with O_NOFOLLOW (a symlink is rejected, not followed), it must be a regular file
 // (O_NONBLOCK keeps a planted FIFO from blocking the open), and it may hold at most `max_bytes`.
-std::string read_small_file(const fs::path& p, std::size_t max_bytes) {
+// Returns nullopt only when the file (or a directory above it) does not exist: open() decides,
+// so there is no stat-then-open race. A dangling symlink is an error, not "missing".
+std::optional<std::string> read_small_file(const fs::path& p, std::size_t max_bytes) {
   const int fd = ::open(p.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
   if (fd < 0) {
-    const int err = errno;
-    if (err == ELOOP) throw ArtifactError(p.string() + " is a symlink");
+    const int err = errno;  // before anything else can overwrite it
+    if (err == ENOENT) return std::nullopt;
+    if (err == ELOOP) {
+      // With O_NOFOLLOW, ELOOP means the last component is a symlink, or the path has a loop.
+      struct stat lst {};
+      if (::lstat(p.c_str(), &lst) == 0 && S_ISLNK(lst.st_mode)) throw ArtifactError(p.string() + " is a symlink");
+      throw ArtifactError(p.string() + ": too many levels of symlinks in the path");
+    }
     throw ArtifactError("cannot read " + p.string() + ": " + std::strerror(err));
   }
   struct Closer {
@@ -252,7 +260,10 @@ std::string read_small_file(const fs::path& p, std::size_t max_bytes) {
     ~Closer() { ::close(fd); }
   } closer{fd};
   struct stat st {};
-  if (::fstat(fd, &st) != 0) throw ArtifactError("cannot stat " + p.string() + ": " + std::strerror(errno));
+  if (::fstat(fd, &st) != 0) {
+    const int err = errno;
+    throw ArtifactError("cannot stat " + p.string() + ": " + std::strerror(err));
+  }
   if (!S_ISREG(st.st_mode)) throw ArtifactError(p.string() + " is not a regular file");
   if (static_cast<std::uint64_t>(st.st_size) > max_bytes) {
     throw ArtifactError(p.string() + " is larger than " + std::to_string(max_bytes) + " bytes");
@@ -263,8 +274,9 @@ std::string read_small_file(const fs::path& p, std::size_t max_bytes) {
   for (;;) {
     const ssize_t n = ::read(fd, buf, sizeof buf);
     if (n < 0) {
-      if (errno == EINTR) continue;
-      throw ArtifactError("cannot read " + p.string() + ": " + std::strerror(errno));
+      const int err = errno;
+      if (err == EINTR) continue;
+      throw ArtifactError("cannot read " + p.string() + ": " + std::strerror(err));
     }
     if (n == 0) break;
     out.append(buf, static_cast<std::size_t>(n));
@@ -273,6 +285,13 @@ std::string read_small_file(const fs::path& p, std::size_t max_bytes) {
     }
   }
   return out;
+}
+
+// read_small_file for a file that must exist.
+std::string read_required_file(const fs::path& p, std::size_t max_bytes) {
+  auto s = read_small_file(p, max_bytes);
+  if (!s) throw ArtifactError("cannot read " + p.string() + ": " + std::strerror(ENOENT));
+  return std::move(*s);
 }
 
 // Every regular file under `dir` except the top-level manifest.json, as '/'-separated relative
@@ -389,7 +408,7 @@ LoadedArtifact load_artifact(const fs::path& dir) {
   if (!fs::is_directory(dir)) throw ArtifactError("artifact directory not found: " + dir.string());
   nlohmann::json j;
   try {
-    j = nlohmann::json::parse(read_small_file(dir / "manifest.json", kMaxManifestBytes));
+    j = nlohmann::json::parse(read_required_file(dir / "manifest.json", kMaxManifestBytes));
   } catch (const nlohmann::json::exception& e) {
     throw ArtifactError(std::string("manifest.json does not parse: ") + e.what());
   }
@@ -460,12 +479,9 @@ void write_current(const fs::path& root, const std::string& version) {
 
 std::optional<std::string> read_current(const fs::path& root) {
   const fs::path file = root / "CURRENT";
-  // symlink_status: a dangling symlink is an error below, not "no CURRENT".
-  std::error_code ec;
-  const auto st = fs::symlink_status(file, ec);
-  if (st.type() == fs::file_type::not_found) return std::nullopt;
-  if (ec) throw ArtifactError("cannot stat " + file.string() + ": " + ec.message());
-  std::string s = read_small_file(file, kMaxCurrentBytes);
+  auto content = read_small_file(file, kMaxCurrentBytes);
+  if (!content) return std::nullopt;
+  std::string s = std::move(*content);
   if (!s.empty() && s.back() == '\n') s.pop_back();
   if (!valid_component(s) || s == "CURRENT") throw ArtifactError("CURRENT holds an invalid version");
   return s;
