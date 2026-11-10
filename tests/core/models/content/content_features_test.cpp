@@ -154,6 +154,58 @@ TEST_CASE("Content hand fixture: the default baseline-residual profile matches t
   CHECK_THAT(static_cast<double>(e.because[0].weight + e.because[1].weight), WithinAbs(scores[1], 1e-5));
 }
 
+TEST_CASE("Content hand fixture: with small dampings the item bias changes the sign of a weight",
+          "[content][features]") {
+  // beta_u = beta_i = 1, so b_j is large enough that a wrong sign or scale changes the answer.
+  auto model = make_content();
+  model->fit(hand_fixture(), Config{{"user_damping", 1.0}, {"item_damping", 1.0}}, TrainContext{});
+  // mu = 2.5; b_0 = -2/3, b_1 = 0, b_2 = +2/3 (each item rated twice, see the test above).
+  // The user rates item 2 = 3 and item 0 = 5:
+  //   b_u = ((3 - 2.5 - 2/3) + (5 - 2.5 + 2/3)) / (1 + 2) = (-1/6 + 19/6) / 3 = 1, m_u = 3.5
+  //   w_0 = 5 - 3.5 + 2/3 = 13/6,   w_2 = 3 - 3.5 - 2/3 = -7/6
+  // (with the sign of b_j flipped: w_0 = 5/6, w_2 = 1/6; without it: w_0 = 1.5, w_2 = -0.5).
+  const double w0 = 13.0 / 6.0, w2 = -7.0 / 6.0;
+  const double r2 = std::sqrt(2.0), L = std::sqrt(1.0 + (1.0 + std::log(2.0)) * (1.0 + std::log(2.0)));
+  const std::vector<double> v0{1.0 / (r2 * L), (1.0 + std::log(2.0)) / (r2 * L), 1.0 / r2, 0.0};
+  const std::vector<double> v2{1.0 / r2, 0.0, 0.0, 1.0 / r2};
+
+  const auto state = model->fold_in(std::vector<Rating>{{2, 3.0f, 1}, {0, 5.0f, 2}});
+  CHECK_THAT(state.mean, WithinAbs(3.5, 1e-12));
+  REQUIRE(state.vec.size() == 4);
+  for (int f = 0; f < 4; ++f) CHECK_THAT(state.vec[f], WithinAbs(w0 * v0[f] + w2 * v2[f], 1e-6));
+  CHECK(state.vec[3] < 0.0f);  // Comedy (only item 2 has it) is pushed away
+
+  // Item 1 (Action + Comedy + funny): item 0 contributes positively, item 2 negatively, so only
+  // item 0 is cited.
+  const auto e = model->explain(state, 1);
+  REQUIRE(e.because.size() == 1);
+  CHECK(e.because[0].item == 0);
+}
+
+TEST_CASE("Content: fit refuses ratings outside [0.5, 5]; statistics at the edges round-trip",
+          "[content][features][persist]") {
+  const auto movies = std::vector<MovieMeta>{movie(1, {"Drama"}), movie(2, {"Comedy"}), movie(3, {"Drama", "Comedy"})};
+  const auto with_ratings = [&](std::vector<float> values) {
+    std::vector<Triplet> t;
+    for (std::uint32_t i = 0; i < values.size(); ++i) t.push_back({0, i, values[i], 1});
+    return make_dataset("edges", 1, 3, std::move(t), movies);
+  };
+  auto m = make_content();
+  CHECK_THROWS_AS(m->fit(with_ratings({5.0f, 5.5f, 4.0f}), Config::object(), TrainContext{}), std::invalid_argument);
+  CHECK_THROWS_AS(m->fit(with_ratings({0.0f, 1.0f, 4.0f}), Config::object(), TrainContext{}), std::invalid_argument);
+
+  // mu = 5 and mu = 0.5 exactly; and with item_damping 0 the biases reach +-(5 - mu) = 4.5 * 2/3.
+  for (const auto& values : {std::vector<float>{5.0f, 5.0f, 5.0f}, std::vector<float>{0.5f, 0.5f, 0.5f},
+                             std::vector<float>{0.5f, 5.0f, 5.0f}}) {
+    auto trained = make_content();
+    trained->fit(with_ratings(values), Config{{"item_damping", 0.0}}, TrainContext{});
+    ScratchDir dir;
+    trained->save(dir.path());
+    auto loaded = make_content();
+    CHECK_NOTHROW(loaded->load(dir.path()));
+  }
+}
+
 TEST_CASE("Content config: defaults are filled in and bad values are rejected", "[content][features]") {
   auto model = make_content();
   model->fit(hand_fixture(), Config::object(), TrainContext{});

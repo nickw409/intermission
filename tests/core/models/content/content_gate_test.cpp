@@ -188,22 +188,17 @@ TEST_CASE("Content: a user who rated only one genre gets every unrated movie of 
 // The gate scenario for every centering (the evidence behind the default; docs/phase-1.md).
 // Prints, never fails. Run with  recs_tests "[.centering-comparison]" -s
 TEST_CASE("Content: one-genre gate result for each centering", "[content][.centering-comparison]") {
-  const std::vector<Config> configs{
-      Config{{"centering", "user_mean"}},
-      Config{{"centering", "global_mean"}},
-      Config{{"centering", "damped_user_mean"}, {"user_damping", 1.0}},
-      Config{{"centering", "damped_user_mean"}, {"user_damping", 3.0}},
-      Config{{"centering", "damped_user_mean"}, {"user_damping", 10.0}},
-      Config{{"centering", "damped_user_mean"}, {"user_damping", 30.0}},
-      Config{{"centering", "damped_user_mean"}, {"user_damping", 100.0}},
-      Config{{"centering", "damped_user_mean"}, {"user_damping", 1000.0}},
-      Config{{"centering", "baseline"}, {"user_damping", 3.0}, {"item_damping", 25.0}},
-      Config{{"centering", "baseline"}, {"user_damping", 10.0}, {"item_damping", 25.0}},
-      Config{{"centering", "baseline"}, {"user_damping", 100.0}, {"item_damping", 100.0}},
-      Config{{"centering", "baseline"}, {"user_damping", 100.0}, {"item_damping", 1000.0}},
-      Config{{"centering", "baseline"}, {"user_damping", 1000.0}, {"item_damping", 1000.0}},
-      Config::object(),  // the default
-  };
+  // Every configuration of the validation search in docs/phase-1.md, then the default.
+  std::vector<Config> configs{Config{{"centering", "user_mean"}}, Config{{"centering", "global_mean"}}};
+  for (double b : {1.0, 3.0, 10.0, 30.0, 100.0, 300.0, 1000.0, 3000.0})
+    configs.push_back(Config{{"centering", "damped_user_mean"}, {"user_damping", b}});
+  const std::vector<std::pair<double, double>> baseline{
+      {3, 10},   {3, 25},    {3, 100},   {10, 10},   {10, 25},   {10, 100},   {30, 10},    {30, 25},
+      {30, 100}, {100, 10},  {100, 25},  {100, 100}, {100, 300}, {100, 1000}, {100, 3000}, {300, 100},
+      {300, 300}, {300, 1000}, {300, 3000}, {1000, 100}, {1000, 300}, {1000, 1000}, {1000, 3000}};
+  for (const auto& [bu, bi] : baseline)
+    configs.push_back(Config{{"centering", "baseline"}, {"user_damping", bu}, {"item_damping", bi}});
+  configs.push_back(Config::object());  // the default
   for (const auto& cfg : configs) {
     const auto results = one_genre_user(cfg, false);
     std::string line;
@@ -218,10 +213,11 @@ TEST_CASE("Content: one-genre gate result for each centering", "[content][.cente
   }
 }
 
-// NOT the spec gate (see the gate above). This documents a narrower behaviour: a user whose
-// ratings rise with how purely a movie belongs to one genre (straight comedies 4.5-5, comedy
-// hybrids 2-3) gets mostly that genre. It passes only because the ratings correlate with the
-// genre's weight in each vector; with the ratings swapped, or random, it does not.
+// NOT the spec gate (see the gate above). A narrower behaviour: a user whose ratings rise with
+// how purely a movie belongs to one genre (straight comedies 4.5-5, comedy hybrids 2-3) gets
+// mostly that genre. It was written for the user-mean centering, under which it passes only
+// because the ratings correlate with the genre's weight in each vector (with the ratings swapped,
+// or random, it does not). It runs with the default centering, which also passes it.
 TEST_CASE("Content: a user who prefers pure-genre over hybrid movies gets mostly that genre",
           "[content][behaviour]") {
   recs::testing::for_seeds(20, 2026, [](Rng& rng, std::uint64_t) {
@@ -287,8 +283,9 @@ TEST_CASE("Content: user-mean centering cancels features every rated movie share
     CHECK(scores[4] > scores[5]);
   }
   SECTION("the default (baseline residual) keeps the shared Comedy feature") {
-    // The training ratings (catalog(): 1 + (u + i) % 5) average 3, so ratings 5, 4, 3, 2 are
-    // mostly above what is expected and Comedy gets a clearly positive weight.
+    // The training ratings (catalog(): 1 + (u + i) % 5, 2 users x 6 items) average 33/12 = 2.75,
+    // so ratings 5, 4, 3, 2 are mostly above what is expected and Comedy gets a clearly positive
+    // weight.
     auto baseline = make_content();
     baseline->fit(ds, Config::object(), TrainContext{});
     const auto state = baseline->fold_in(std::vector<Rating>{{0, 5.0f, 1}, {1, 4.0f, 1}, {2, 3.0f, 1}, {3, 2.0f, 1}});

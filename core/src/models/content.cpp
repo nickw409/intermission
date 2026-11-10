@@ -54,11 +54,13 @@
 //   and the weights no longer sum to zero: rating comedies 2.5-5 when the average movie gets 3.5
 //   still says "comedy". The item bias removes what everybody thinks of the movie: a 4.0 for a
 //   film everybody rates 4.3 is mild disappointment, a 4.0 for one everybody rates 3.0 is real
-//   enthusiasm. beta_u = 100, beta_i = 1000 were chosen on the ml-latest-small validation split.
+//   enthusiasm. beta_u = 100, beta_i = 1000 were chosen on the ml-latest-small validation split
+//   (docs/phase-1.md, "Content centering (option b)").
 //   The model keeps mu and b_i (centering.bin), so fold-in for a new website user uses exactly the
 //   statistics the batch path uses.
 //
-//   Other centerings (config "centering", for comparison; docs/phase-1.md has the table):
+//   Other centerings (config "centering", for comparison; the table is in docs/phase-1.md,
+//   "Content centering (option b)"):
 //     "user_mean"         m_u = user mean, b_j = 0 (the original spec; fails the one-genre gate)
 //     "global_mean"       m_u = mu, b_j = 0
 //     "damped_user_mean"  m_u = (n_u * user mean + beta_u * mu) / (n_u + beta_u), b_j = 0
@@ -97,7 +99,8 @@
 //   centering.bin: little-endian; header {magic "RECSCTR1", u32 format version, u32 n_items,
 //   u32 centering, f64 user_damping, f64 item_damping, f64 mu, u32 has_item_bias} (48 bytes; the
 //   centering and dampings must match config.json), then b_i (f64 x n_items) for "baseline", then
-//   the SHA-256 of everything before it.
+//   the SHA-256 of everything before it. load() requires mu in the rating range [0.5, 5] and
+//   |b_i| <= 4.5, and reports a missing centering.bin as an artifact that must be retrained.
 //   config.json: the config fit() used. The training matrix is not saved, so a loaded model has no
 //   batch path (supports_trained_scoring() == false).
 //
@@ -150,9 +153,14 @@ constexpr const char* kConfigFile = "config.json";
 constexpr char kCenteringMagic[8] = {'R', 'E', 'C', 'S', 'C', 'T', 'R', '1'};
 constexpr std::uint32_t kCenteringVersion = 1;
 constexpr const char* kCenteringFile = "centering.bin";
-// Learned centering statistics are rating-scale quantities (|mu| <= 5, |b_i| <= 4.5 for MovieLens);
-// anything far outside that is a damaged file.
-constexpr double kMaxCenteringValue = 1e6;
+// Ratings are in [0.5, 5] (recs/types.hpp). So mu, a mean of ratings, is in that range, and
+// |b_i| <= 4.5: b_i = sum (r - mu) / (beta_i + n_i) with every |r - mu| <= 4.5 and
+// n_i / (beta_i + n_i) <= 1. fit() refuses data outside these bounds and load() rejects a file
+// outside them. (The slack only absorbs rounding.)
+constexpr double kMinRating = 0.5, kMaxRating = 5.0;
+constexpr double kCenteringSlack = 1e-9;
+bool valid_global_mean(double mu) { return mu >= kMinRating - kCenteringSlack && mu <= kMaxRating + kCenteringSlack; }
+bool valid_item_bias(double b) { return std::abs(b) <= (kMaxRating - kMinRating) + kCenteringSlack; }
 
 // ---------------------------------------------------------------------------------------------
 // Config
@@ -175,7 +183,8 @@ const char* centering_name(Centering c) {
 struct ContentConfig {
   std::int64_t min_tag_count = 2;
   double genre_weight = 1.0;
-  // Defaults chosen on the ml-latest-small validation split (docs/phase-1.md).
+  // Defaults chosen on the ml-latest-small validation split (docs/phase-1.md, "Content centering
+  // (option b)").
   Centering centering = Centering::kBaseline;
   double user_damping = 100.0;   // beta_u: damped_user_mean and baseline
   double item_damping = 1000.0;  // beta_i: baseline only
@@ -369,9 +378,13 @@ class ContentModel final : public Model {
     double global_mean = 0.0;
     std::vector<double> item_bias;
     {
+      if (train.by_user.values.empty()) throw std::invalid_argument("content: no training ratings");
       double sum = 0.0;
-      for (float v : train.by_user.values) sum += static_cast<double>(v);
-      if (!train.by_user.values.empty()) global_mean = sum / static_cast<double>(train.by_user.values.size());
+      for (float v : train.by_user.values) {
+        if (!(v >= kMinRating && v <= kMaxRating)) throw std::invalid_argument("content: rating outside [0.5, 5]");
+        sum += static_cast<double>(v);
+      }
+      global_mean = sum / static_cast<double>(train.by_user.values.size());
       if (c.centering == Centering::kBaseline) {
         std::vector<double> dev(n_items, 0.0), count(n_items, 0.0);
         for (std::size_t k = 0; k < train.by_user.indices.size(); ++k) {
@@ -383,6 +396,10 @@ class ContentModel final : public Model {
         for (std::uint32_t i = 0; i < n_items; ++i)
           if (count[i] > 0.0) item_bias[i] = dev[i] / (c.item_damping + count[i]);
       }
+      // Holds for ratings in [0.5, 5] (checked above); load() enforces the same bounds.
+      if (!valid_global_mean(global_mean)) throw std::logic_error("content: global mean outside the rating range");
+      for (double b : item_bias)
+        if (!valid_item_bias(b)) throw std::logic_error("content: item bias larger than the rating range");
     }
 
     // Commit (fit() either succeeds completely or leaves the model as it was).
@@ -596,6 +613,9 @@ class ContentModel final : public Model {
 
     double global_mean = 0.0;
     std::vector<double> item_bias;
+    // An artifact written before the centering change has no centering.bin and cannot be served
+    // with the same profile math: it must be retrained (deploy/runbooks/deploy.md).
+    if (!fs::exists(dir / kCenteringFile)) Reader::fail("content artifact predates centering.bin; retrain");
     read_centering(read_file(dir / kCenteringFile), c, n_items, global_mean, item_bias);
 
     cfg_ = c;
@@ -750,39 +770,40 @@ class ContentModel final : public Model {
     return bytes;
   }
 
+  [[noreturn]] static void centering_fail(const std::string& why) { Reader::fail("centering.bin: " + why); }
+
   /// Parses and validates centering.bin against the config and the feature file's n_items.
   static void read_centering(const std::string& bytes, const ContentConfig& c, std::uint32_t n_items,
                              double& global_mean, std::vector<double>& item_bias) {
     constexpr std::size_t kDigest = 32;
-    const auto fail = [](const std::string& why) { Reader::fail("centering.bin: " + why); };
-    if (bytes.size() < sizeof kCenteringMagic + kDigest) fail("truncated");
+    if (bytes.size() < sizeof kCenteringMagic + kDigest) centering_fail("truncated");
     const std::size_t body = bytes.size() - kDigest;
     Sha256 sha;
     sha.update(std::string_view(bytes.data(), body));
     const auto digest = sha.digest();
-    if (std::memcmp(digest.data(), bytes.data() + body, kDigest) != 0) fail("checksum mismatch");
+    if (std::memcmp(digest.data(), bytes.data() + body, kDigest) != 0) centering_fail("checksum mismatch");
 
     Reader in(bytes, body);
     const auto magic = in.get<std::array<char, 8>>();
-    if (std::memcmp(magic.data(), kCenteringMagic, sizeof kCenteringMagic) != 0) fail("bad magic");
-    if (in.get<std::uint32_t>() != kCenteringVersion) fail("unsupported format version");
-    if (in.get<std::uint32_t>() != n_items) fail("n_items does not match the feature file");
+    if (std::memcmp(magic.data(), kCenteringMagic, sizeof kCenteringMagic) != 0) centering_fail("bad magic");
+    if (in.get<std::uint32_t>() != kCenteringVersion) centering_fail("unsupported format version");
+    if (in.get<std::uint32_t>() != n_items) centering_fail("n_items does not match the feature file");
     const auto centering = in.get<std::uint32_t>();
     const auto user_damping = in.get<double>();
     const auto item_damping = in.get<double>();
     if (centering != static_cast<std::uint32_t>(c.centering) ||
         std::bit_cast<std::uint64_t>(user_damping) != std::bit_cast<std::uint64_t>(c.user_damping) ||
         std::bit_cast<std::uint64_t>(item_damping) != std::bit_cast<std::uint64_t>(c.item_damping))
-      fail("config.json does not match the centering file");
+      centering_fail("config.json does not match the centering file");
     global_mean = in.get<double>();
-    if (!(std::abs(global_mean) <= kMaxCenteringValue)) fail("global mean out of range");
+    if (!valid_global_mean(global_mean)) centering_fail("global mean outside the rating range");
     const auto has_item_bias = in.get<std::uint32_t>();
-    if (has_item_bias != (c.centering == Centering::kBaseline ? 1u : 0u)) fail("item-bias flag does not match the centering");
+    if (has_item_bias != (c.centering == Centering::kBaseline ? 1u : 0u)) centering_fail("item-bias flag does not match the centering");
     const std::uint64_t expected = has_item_bias ? static_cast<std::uint64_t>(n_items) * 8 : 0;
-    if (body - in.pos() != expected) fail("size does not match the header");
+    if (body - in.pos() != expected) centering_fail("size does not match the header");
     item_bias = has_item_bias ? in.get_array<double>(n_items) : std::vector<double>{};
     for (double b : item_bias)
-      if (!(std::abs(b) <= kMaxCenteringValue)) fail("item bias out of range");
+      if (!valid_item_bias(b)) centering_fail("item bias larger than the rating range");
   }
 
   /// b_j for the "baseline" centering, 0 otherwise.
