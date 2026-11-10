@@ -52,16 +52,6 @@ func TestInvalidConfigFailsFast(t *testing.T) {
 	}
 }
 
-func TestStubSubcommands(t *testing.T) {
-	for _, args := range [][]string{{"export-ratings"}} {
-		var out, errb bytes.Buffer
-		code := run(context.Background(), args, env(map[string]string{"RECS_DB_PATH": filepath.Join(t.TempDir(), "app.db")}), &out, &errb, nil)
-		if code != 1 || !strings.Contains(errb.String(), "not implemented yet") {
-			t.Errorf("%v: code %d stderr %q", args, code, errb.String())
-		}
-	}
-}
-
 func TestServeAndGracefulShutdown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
