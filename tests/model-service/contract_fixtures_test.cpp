@@ -1,0 +1,217 @@
+// Gate: recs-model produces every response in contracts/fixtures/model/.
+//
+// Each fixture case is replayed against Service::handle(): with the fixture artifact loaded, or
+// with nothing loaded for the 503 cases. Checked for every case: the status code, X-Model-Version,
+// the error code and message, and that the body validates against the operation's schema in
+// contracts/model.yaml. Where the value is determined by the catalog alone (movies/batch, search,
+// version, models, healthz) the body must equal the fixture exactly; for model output (recommend,
+// compare, similar, onboarding) the numbers depend on the trained model, so the test checks shape
+// and invariants (k, exclusions, `ignored`, model names) instead (contracts/README.md).
+#include <algorithm>
+#include <fstream>
+#include <map>
+#include <set>
+#include <sstream>
+#include <string>
+
+#include <catch2/catch_test_macros.hpp>
+#include <nlohmann/json.hpp>
+
+#include "fixtures.hpp"
+#include "schema.hpp"
+#include "service.hpp"
+#include "test_bundle.hpp"
+
+namespace {
+
+using nlohmann::json;
+using recs::service::Request;
+using recs::service::Response;
+
+json read_json(const std::filesystem::path& p) {
+  std::ifstream in(p);
+  REQUIRE(in);
+  return json::parse(in);
+}
+
+std::string read_text(const std::filesystem::path& p) {
+  std::ifstream in(p);
+  std::stringstream ss;
+  ss << in.rdbuf();
+  return ss.str();
+}
+
+Request to_request(const json& r) {
+  Request req;
+  req.method = r.at("method");
+  req.path = r.at("path");
+  const json query = r.value("query", json::object());
+  for (const auto& [k, v] : query.items()) req.query.emplace_back(k, v.get<std::string>());
+  if (r.contains("rawBody")) {
+    req.body = r["rawBody"].get<std::string>();
+  } else if (r.contains("body") && !r["body"].is_null()) {
+    req.body = r["body"].dump();
+  }
+  return req;
+}
+
+// The success schema of each operation.
+const std::map<std::string, std::string>& ok_schema() {
+  static const std::map<std::string, std::string> m = {
+      {"recommend", "RecommendResponse"}, {"compare", "CompareResponse"}, {"similar", "SimilarResponse"},
+      {"onboarding", "IdList"},          {"search", "IdList"},           {"moviesBatch", "BatchResponse"},
+      {"version", "Version"},            {"models", "ModelsResponse"},   {"healthz", "Health"},
+  };
+  return m;
+}
+
+struct Harness {
+  recs::service::BundleHolder loaded;
+  recs::service::BundleHolder empty;
+  recs::service::Metrics metrics;
+  recs::service::Service with_artifact{loaded, metrics, [](std::string_view) {}};
+  recs::service::Service without_artifact{empty, metrics, [](std::string_view) {}};
+  Harness() { loaded.store(recs::testing::fixture_bundle()); }
+};
+
+std::set<std::int64_t> ids_of(const json& arr) {
+  std::set<std::int64_t> s;
+  for (const auto& v : arr) s.insert(v.get<std::int64_t>());
+  return s;
+}
+
+// Invariants of an item list produced for request body `body`.
+void check_items(const json& items, const json& body) {
+  CHECK(items.size() <= body.at("k").get<std::size_t>());
+  std::set<std::int64_t> rated;
+  for (const auto& r : body.at("ratings")) rated.insert(r.at("movie_id").get<std::int64_t>());
+  const auto excluded = ids_of(body.value("exclude", json::array()));
+  std::set<std::int64_t> seen;
+  for (const auto& it : items) {
+    const auto id = it.at("movie_id").get<std::int64_t>();
+    CHECK_FALSE(rated.contains(id));
+    CHECK_FALSE(excluded.contains(id));
+    CHECK(seen.insert(id).second);
+    for (const auto& b : it.at("because")) CHECK(rated.contains(b.at("movie_id").get<std::int64_t>()));
+  }
+}
+
+void check_case(Harness& h, const std::string& op, const json& c) {
+  const json& expected = c.at("response");
+  const int status = expected.at("status");
+  const Request req = to_request(c.at("request"));
+  const Response res = (status == 503 ? h.without_artifact : h.with_artifact).handle(req);
+
+  REQUIRE(res.status == status);
+  CHECK(res.content_type == "application/json");
+  CHECK(res.model_version == expected.at("headers").at("X-Model-Version").get<std::string>());
+  CHECK_FALSE(res.request_id.empty());
+
+  const json body = json::parse(res.body);
+  const json& want = expected.at("body");
+  if (want.contains("error")) {
+    CHECK(recs::testing::validate_against(body, "Error").empty());
+    CHECK(body == want);
+    return;
+  }
+  const auto errors = recs::testing::validate_against(body, ok_schema().at(op));
+  INFO(json(errors).dump());
+  CHECK(errors.empty());
+
+  if (op == "moviesBatch" || op == "search" || op == "version" || op == "models" || op == "healthz") {
+    CHECK(body == want);
+  } else if (op == "recommend") {
+    const json rq = json::parse(req.body);
+    CHECK(body.at("model") == want.at("model"));
+    CHECK(body.at("ignored") == want.at("ignored"));
+    CHECK(body.at("items").size() == want.at("items").size());
+    check_items(body.at("items"), rq);
+  } else if (op == "compare") {
+    const json rq = json::parse(req.body);
+    CHECK(body.at("ignored") == want.at("ignored"));
+    REQUIRE(body.at("results").size() == want.at("results").size());
+    for (std::size_t i = 0; i < body["results"].size(); ++i) {
+      CHECK(body["results"][i].at("model") == want["results"][i].at("model"));
+      CHECK(body["results"][i].at("items").size() == want["results"][i].at("items").size());
+      check_items(body["results"][i].at("items"), rq);
+    }
+  } else if (op == "similar") {
+    CHECK(body.at("model") == want.at("model"));
+    CHECK(body.at("movie_id") == want.at("movie_id"));
+    CHECK(body.at("items").size() == want.at("items").size());
+    for (const auto& it : body.at("items")) CHECK(it.at("movie_id") != body.at("movie_id"));
+  } else if (op == "onboarding") {
+    const json rq = json::parse(req.body);
+    CHECK(body.at("movie_ids").size() == want.at("movie_ids").size());
+    const auto excluded = ids_of(rq.value("exclude", json::array()));
+    const auto got = ids_of(body.at("movie_ids"));
+    CHECK(got.size() == body.at("movie_ids").size());
+    for (auto id : got) CHECK_FALSE(excluded.contains(id));
+  } else {
+    FAIL("unhandled operation " << op);
+  }
+}
+
+}  // namespace
+
+TEST_CASE("recs-model produces every contracts/fixtures/model response", "[model-service][contract]") {
+  Harness h;
+  const auto dir = recs::testing::contracts_dir() / "fixtures" / "model";
+  std::size_t files = 0;
+  std::size_t cases = 0;
+  std::set<std::string> ops;
+  for (const auto& e : std::filesystem::directory_iterator(dir)) {
+    if (e.path().extension() != ".json") continue;
+    const json f = read_json(e.path());
+    const std::string op = f.at("operationId");
+    ops.insert(op);
+    ++files;
+    for (const auto& c : f.at("cases")) {
+      DYNAMIC_SECTION(op << "/" << c.at("name").get<std::string>()) { check_case(h, op, c); }
+      ++cases;
+    }
+  }
+  // Every operation in model.yaml except /metrics (text, no fixture) has a fixture file.
+  CHECK(ops == std::set<std::string>{"compare", "healthz", "models", "moviesBatch", "onboarding", "recommend",
+                                     "search", "similar", "version"});
+  CHECK(files == 9);
+  CHECK(cases >= 40);
+}
+
+TEST_CASE("fixture responses validate against the transcribed schemas", "[model-service][contract]") {
+  // Guards the schema transcription in schema.hpp: the fixtures are validated against model.yaml
+  // in CI (tools/contracts), so they must also pass here.
+  const auto dir = recs::testing::contracts_dir() / "fixtures" / "model";
+  for (const auto& e : std::filesystem::directory_iterator(dir)) {
+    const json f = read_json(e.path());
+    const std::string op = f.at("operationId");
+    for (const auto& c : f.at("cases")) {
+      const json& body = c.at("response").at("body");
+      const std::string schema = body.contains("error") ? "Error" : ok_schema().at(op);
+      const auto errors = recs::testing::validate_against(body, schema);
+      INFO(op << "/" << c.at("name").get<std::string>() << ": " << json(errors).dump());
+      CHECK(errors.empty());
+    }
+  }
+}
+
+TEST_CASE("transcribed schemas match model.yaml's required lists", "[model-service][contract]") {
+  const std::string yaml = read_text(recs::testing::contracts_dir() / "model.yaml");
+  std::size_t checked = 0;
+  const auto check_required = [&](const json& schema, const auto& self) -> void {
+    if (!schema.is_object()) return;
+    if (schema.contains("required")) {
+      std::string line = "required: [";
+      for (std::size_t i = 0; i < schema["required"].size(); ++i) {
+        line += (i ? ", " : "") + schema["required"][i].get<std::string>();
+      }
+      line += "]";
+      INFO(line);
+      CHECK(yaml.find(line) != std::string::npos);
+      ++checked;
+    }
+    for (const auto& [k, v] : schema.items()) self(v, self);
+  };
+  for (const auto& [name, schema] : recs::testing::model_components().items()) check_required(schema, check_required);
+  CHECK(checked >= 14);
+}
