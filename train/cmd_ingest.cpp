@@ -3,7 +3,7 @@
 //   recs-train ingest --dataset ml-latest-small [--raw data/raw/ml-latest-small]
 //                     [--cache data/cache/ml-latest-small.bin]
 //
-// Always parses the CSV files (it never trusts an existing cache) and then overwrites the cache,
+// Always parses the CSV files (it deletes any existing cache first) and then writes the cache,
 // so running ingest is the way to refresh a cache after the raw files change.
 #include <chrono>
 #include <iostream>
@@ -41,10 +41,11 @@ void run_ingest(const IngestOptions& opt) {
   const auto seconds = [](Clock::duration d) { return std::chrono::duration<double>(d).count(); };
 
   std::cout << "ingest: parsing " << raw.string() << "\n" << std::flush;
+  // Removing the old cache first makes load_or_build parse; it then writes the cache together with
+  // the raw files' sizes and mtimes, so later load_or_build calls can tell when it is stale.
+  fs::remove(cache);
   const auto t0 = Clock::now();
-  const Dataset ds = load_movielens(raw, opt.dataset);
-  const auto t1 = Clock::now();
-  save_cache(ds, cache);
+  const Dataset ds = load_or_build(raw, cache, opt.dataset);
   const auto t2 = Clock::now();
 
   std::cout << "ingest: dataset " << ds.name << "\n"
@@ -55,7 +56,7 @@ void run_ingest(const IngestOptions& opt) {
             << "  genome  "
             << (ds.genome ? std::to_string(ds.genome->n_items) + " x " + std::to_string(ds.genome->n_tags) : "absent")
             << "\n"
-            << "  parse " << seconds(t1 - t0) << " s, cache write " << seconds(t2 - t1) << " s\n"
+            << "  parse + cache write " << seconds(t2 - t0) << " s\n"
             << "ingest: wrote " << cache.string() << " (" << fs::file_size(cache) << " bytes)\n";
 }
 
