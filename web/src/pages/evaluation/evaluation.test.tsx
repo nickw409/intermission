@@ -57,6 +57,37 @@ function dataTable(name: string | RegExp): HTMLElement {
   return within(figure(name)).getByRole('table', { hidden: true });
 }
 
+/** A per_k value read from a fixture, formatted as the tables show it. */
+function perK(runId: string, curve: 'ndcg' | 'recall' | 'precision', k: number): string {
+  const point = (reportsById.get(runId)!.per_k[curve] as [number, number][]).find(([x]) => x === k);
+  if (!point) throw new Error(`no ${curve}@${k} in ${runId}`);
+  return point[1].toFixed(4);
+}
+
+/** "translate(x,y)" -> [x, y] */
+function translation(element: Element): [number, number] {
+  const match = /translate\(([-\d.e]+),([-\d.e]+)\)/.exec(element.getAttribute('transform') ?? '');
+  if (!match) throw new Error(`no translate on ${element.outerHTML}`);
+  return [Number(match[1]), Number(match[2])];
+}
+
+/** Rebuilds the chart's linear x scale from two of its axis tick labels. */
+function xScaleOf(svg: Element): (value: number) => number {
+  const ticks = [...svg.querySelectorAll('[data-mark="x-axis tick label"] text')].map(
+    (t) => [Number(t.textContent), translation(t)[0]] as const,
+  );
+  const [first, last] = [ticks[0]!, ticks.at(-1)!];
+  const slope = (last[1] - first[1]) / (last[0] - first[0]);
+  return (value) => first[1] + (value - first[0]) * slope;
+}
+
+/** The y position of each y-axis label (model name -> y). */
+function yRowsOf(svg: Element): Map<string, number> {
+  return new Map(
+    [...svg.querySelectorAll('[data-mark="y-axis tick label"] text')].map((t) => [t.textContent!, translation(t)[1]]),
+  );
+}
+
 function rowFor(table: HTMLElement, header: string): HTMLElement {
   const cell = within(table).getByRole('rowheader', { name: header, hidden: true });
   return cell.closest('tr')!;
@@ -159,8 +190,9 @@ describe('evaluation page', () => {
     await openPage();
     const table = dataTable('Recall@k by model');
     const k50 = rowFor(table, '50');
-    expect(k50).toHaveTextContent('0.2286'); // als k=128
-    expect(k50).toHaveTextContent('0.1021'); // pop
+    expect(k50).toHaveTextContent(perK(ALS_K128, 'recall', 50)); // newest als run
+    expect(k50).toHaveTextContent(perK('2026-11-09T21-00-00Z_pop', 'recall', 50));
+    expect(rowFor(table, '10')).toHaveTextContent(perK('2026-11-09T21-12-00Z_content', 'recall', 10));
     const headers = within(table)
       .getAllByRole('columnheader', { hidden: true })
       .map((c) => c.textContent);
@@ -345,7 +377,7 @@ describe('evaluation page', () => {
       const smallItem = { ...listing.items.find((i) => i.model === 'pop')!, run_id: 'small_pop', dataset: 'ml-latest-small', created_at: small.created_at };
       serveListing([smallItem, ...listing.items]);
       renderApp('/evaluation');
-      const picker = await screen.findByRole('combobox', { name: 'Dataset' });
+      const picker = await screen.findByRole('combobox', { name: 'Dataset and split' });
       // Newest run's dataset first.
       expect(picker).toHaveValue('ml-latest-small · test');
       await screen.findByRole('img', { name: 'NDCG@10 by model' });
@@ -357,6 +389,103 @@ describe('evaluation page', () => {
     } finally {
       reportsById.delete('small_pop');
     }
+  });
+
+  it('draws the NDCG@10 chart from the right numbers: reference rule, whiskers, means and failure labels', async () => {
+    serveReports();
+    await openPage();
+    const svg = screen.getByRole('img', { name: 'NDCG@10 by model' });
+    const x = xScaleOf(svg);
+    const rows = yRowsOf(svg);
+    const latest = ['2026-11-09T21-00-00Z_pop', '2026-11-09T21-05-00Z_pop_count', '2026-11-09T21-10-00Z_knn',
+      '2026-11-09T21-12-00Z_content', '2026-11-09T21-13-00Z_mf', ALS_K128].map((id) => reportsById.get(id)!);
+    expect([...rows.keys()]).toEqual(latest.map((r) => r.model));
+    const close = (actual: number, expected: number) => expect(Math.abs(actual - expected)).toBeLessThan(0.5);
+
+    // Popularity reference rule at pop's mean, spanning the plot.
+    const reference = svg.querySelectorAll('.ndcg-reference line');
+    expect(reference).toHaveLength(1);
+    close(Number(reference[0]!.getAttribute('x1')), x(latest[0]!.metrics['ndcg@10'].mean));
+    close(Number(reference[0]!.getAttribute('x2')), x(latest[0]!.metrics['ndcg@10'].mean));
+
+    // One whisker per model, from CI low to CI high, on that model's row.
+    const whiskers = [...svg.querySelectorAll('.ndcg-ci line')];
+    expect(whiskers).toHaveLength(latest.length);
+    latest.forEach((report, i) => {
+      const [lo, hi] = report.metrics['ndcg@10'].ci95 as [number, number];
+      const line = whiskers[i]!;
+      close(Number(line.getAttribute('x1')), x(lo));
+      close(Number(line.getAttribute('x2')), x(hi));
+      close(Number(line.getAttribute('y1')), rows.get(report.model)!);
+    });
+
+    // One mean marker per model, at the mean.
+    const means = [...svg.querySelectorAll('.ndcg-mean > *')];
+    expect(means).toHaveLength(latest.length);
+    latest.forEach((report, i) => {
+      const marker = means[i]!;
+      const [cx, cy] = marker.tagName === 'circle'
+        ? [Number(marker.getAttribute('cx')), Number(marker.getAttribute('cy'))]
+        : translation(marker);
+      close(cx, x(report.metrics['ndcg@10'].mean));
+      close(cy, rows.get(report.model)!);
+    });
+
+    // In-chart failure label only on content's row, just right of its CI.
+    const labels = [...svg.querySelectorAll('.ndcg-verdict text')];
+    expect(labels.map((t) => t.textContent)).toEqual(['does not beat popularity']);
+    const [labelX, labelY] = translation(labels[0]!);
+    close(labelX, x(reportsById.get('2026-11-09T21-12-00Z_content')!.metrics['ndcg@10'].ci95[1]));
+    close(labelY, rows.get('content')!);
+  });
+
+  it('skips a report whose body is for a different run than the one listed', async () => {
+    const requested = serveReports({
+      '2026-11-09T21-10-00Z_knn': () => HttpResponse.json(structuredClone(reportsById.get('2026-11-09T21-13-00Z_mf'))),
+    });
+    await openPage();
+    expect(requested).toContain('2026-11-09T21-10-00Z_knn');
+    const problems = screen.getByRole('region', { name: 'Reports not shown' });
+    expect(problems).toHaveTextContent('2026-11-09T21-10-00Z_knn');
+    expect(problems).toHaveTextContent(/returned run 2026-11-09T21-13-00Z_mf instead/);
+    const rows = within(dataTable('NDCG@10 by model')).getAllByRole('rowheader', { hidden: true });
+    expect(rows.map((c) => c.textContent)).toEqual(['pop', 'pop_count', 'content', 'mf', 'als']);
+  });
+
+  it('fetches and charts a run listed twice only once', async () => {
+    const requested = serveReports();
+    const knn = listing.items.find((i) => i.model === 'knn')!;
+    serveListing([...listing.items, knn]);
+    await openPage();
+    expect(requested.filter((id) => id === knn.run_id)).toHaveLength(1);
+    expect(screen.getByRole('region', { name: 'Reports not shown' })).toHaveTextContent(/listed more than once/);
+    expect(within(dataTable('NDCG@10 by model')).getAllByRole('rowheader', { name: 'knn', hidden: true })).toHaveLength(1);
+  });
+
+  it.each(['..', '../secrets', 'a b', ''])('never requests a listed run_id that is not a valid id (%j)', async (badId) => {
+    const requested: string[] = [];
+    server.events.on('request:start', ({ request }) => {
+      const path = new URL(request.url).pathname;
+      if (path !== '/api/reports' && path.startsWith('/api/reports')) requested.push(path);
+    });
+    serveReports();
+    const knn = listing.items.find((i) => i.model === 'knn')!;
+    serveListing([...listing.items.filter((i) => i !== knn), { ...knn, run_id: badId }]);
+    await openPage();
+    expect(requested).toHaveLength(6);
+    expect(requested.every((path) => /^\/api\/reports\/[A-Za-z0-9_-]+$/.test(path))).toBe(true);
+    expect(screen.getByRole('region', { name: 'Reports not shown' })).toHaveTextContent(/not a valid run id/);
+  });
+
+  it('explains a v1 listing entry that has no summary, distinctly from an unknown version', async () => {
+    const requested = serveReports();
+    const knn = listing.items.find((i) => i.model === 'knn')!;
+    serveListing([...listing.items.filter((i) => i !== knn), { ...knn, model: null, headline: null }]);
+    await openPage();
+    const problems = screen.getByRole('region', { name: 'Reports not shown' });
+    expect(problems).toHaveTextContent(/2026-11-09T21-10-00Z_knn: the listing has no model or headline metrics for this run/);
+    expect(problems).toHaveTextContent(/2026-12-01T00-00-00Z_pop_v2: unsupported report format \(v2\)/);
+    expect(requested).not.toContain(knn.run_id);
   });
 
   it('has no axe violations with all charts shown and with tables expanded', async () => {

@@ -48,6 +48,15 @@ describe('configLabel / runLabels', () => {
     expect(labels.get('b')).toBe('als · k=64');
   });
 
+  it('never prints key=undefined when a key is missing from one run', () => {
+    const labels = runLabels([
+      { run_id: 'a', model: 'als', config: { k: 128, lambda: 0.05 }, created_at: '2026-11-09T22:02:10Z' },
+      { run_id: 'b', model: 'als', config: { lambda: 0.05 }, created_at: '2026-11-09T21:14:03Z' },
+    ]);
+    expect(labels.get('a')).toBe('als · k=128');
+    expect(labels.get('b')).toBe('als · k unset');
+  });
+
   it('falls back to the run time when configs are identical', () => {
     const labels = runLabels([
       { run_id: 'a', model: 'knn', config: { neighbors: 100 }, created_at: '2026-11-09T22:02:10Z' },
@@ -65,6 +74,10 @@ describe('popularityVerdict (CI-overlap rule)', () => {
     expect(popularityVerdict({ mean: 0.09, ci95: [0.0893, 0.0911] }, pop)).toBe('beats');
     // pop_count fixture: lower bound 0.0427 > 0.0421.
     expect(popularityVerdict({ mean: 0.0436, ci95: [0.0427, 0.0445] }, pop)).toBe('beats');
+  });
+
+  it('fails when the CI only touches popularity\'s (low == popularity high)', () => {
+    expect(popularityVerdict({ mean: 0.05, ci95: [0.0421, 0.06] }, pop)).toBe('fails');
   });
 
   it('fails when the CI overlaps popularity\'s, even if the mean is higher', () => {

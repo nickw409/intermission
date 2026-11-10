@@ -80,12 +80,36 @@ describe('parseReport', () => {
     ['a bad training_curve_metric', (r) => (r.training_curve_metric = 3), 'training_curve_metric'],
     ['an out-of-range fold-in Jaccard', (r) => (r['foldin_jaccard@10'] = 2), 'foldin_jaccard@10'],
     ['malformed rating metrics', (r) => (r.rating_metrics = { rmse: 1 }), 'rating_metrics'],
+    ['a created_at without a time zone', (r) => (r.created_at = '2026-11-09T22:02:10'), 'created_at'],
+    ['a date-only created_at', (r) => (r.created_at = '2026-11-09'), 'created_at'],
+    ['a free-form created_at', (r) => (r.created_at = 'Mon, 09 Nov 2026 22:02:10 GMT'), 'created_at'],
+    ['a negative peak_rss_bytes', (r) => (r.peak_rss_bytes = -1), 'peak_rss_bytes'],
+    ['a fractional peak_rss_bytes', (r) => (r.peak_rss_bytes = 1.5), 'peak_rss_bytes'],
+    ['a missing split field', (r) => delete r.split.test_fraction, 'split.test_fraction'],
+    ['a string split seed', (r) => (r.split.seed = '42'), 'split.seed'],
+    ['a fractional split.min_ratings', (r) => (r.split.min_ratings = 10.5), 'split.min_ratings'],
+    ['an extra split field', (r) => (r.split.extra = 1), 'split.extra'],
+    ['a seed above MAX_SAFE_INTEGER', (r) => (r.seeds.model = Number.MAX_SAFE_INTEGER + 2), 'seeds.model'],
+    ['a negative seed', (r) => (r.seeds.model = -1), 'seeds.model'],
+    ['cold_item_share above 1', (r) => (r.cold_item_share = 1.01), 'cold_item_share'],
+    ['a negative cold_item_share', (r) => (r.cold_item_share = -0.1), 'cold_item_share'],
+    ['rating_baselines missing a baseline', (r) => (r.rating_baselines = {}), 'rating_baselines.global_mean'],
+    ['a non-object rating_baselines', (r) => (r.rating_baselines = 3), 'rating_baselines'],
   ])('rejects %s and names the field', (_label, mutate, path) => {
     const body = fixture('mf');
     mutate(body);
     expect(() => parseReport(body)).toThrow(InvalidReport);
     expect(() => parseReport(body)).toThrow(path);
   });
+
+  it.each(['2026-11-09T22:02:10Z', '2026-11-09T22:02:10.123Z', '2026-11-09T22:02:10+01:00', '2026-11-09t22:02:10z'])(
+    'accepts the RFC 3339 created_at %s',
+    (createdAt) => {
+      const body = fixture('mf');
+      body.created_at = createdAt;
+      expect(parseReport(body).created_at).toBe(createdAt);
+    },
+  );
 
   it('accepts a null cold-user NDCG (slice with no eligible users)', () => {
     const body = fixture('knn') as Record<string, any>;
