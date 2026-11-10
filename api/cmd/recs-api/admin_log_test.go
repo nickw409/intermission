@@ -18,7 +18,7 @@ func TestAdminInviteNoteNotLogged(t *testing.T) {
 		{[]string{"--note", "Canary Person 7f3a"}, "note_set=true"},
 		{nil, "note_set=false"},
 	} {
-		d := adminDeps(t)
+		d := migratedAdminDeps(t)
 		var logs bytes.Buffer
 		d.Logger = slog.New(slog.NewTextHandler(&logs, nil))
 		var out bytes.Buffer

@@ -120,6 +120,25 @@ func (d *DB) migrate(ctx context.Context, logger *slog.Logger, fsys fs.FS) error
 	return nil
 }
 
+// RequireCurrent returns an error unless every embedded migration has been
+// applied. Commands that run next to a live server (`recs-api admin`) use
+// it instead of migrating themselves.
+func (d *DB) RequireCurrent(ctx context.Context) error {
+	ms, err := loadMigrations(embedded())
+	if err != nil {
+		return err
+	}
+	current, err := d.Version(ctx)
+	if err != nil {
+		return fmt.Errorf("read user_version: %w", err)
+	}
+	if current < len(ms) {
+		return fmt.Errorf("database schema is at version %d but this recs-api needs %d: "+
+			"start the server or run `recs-api migrate` first", current, len(ms))
+	}
+	return nil
+}
+
 // applyWithoutForeignKeys runs the pending migrations and the user_version
 // bump in one transaction with foreign key enforcement switched off, the
 // procedure SQLite documents for rebuilding a table

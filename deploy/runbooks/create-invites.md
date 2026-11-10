@@ -8,6 +8,10 @@ docker compose -f deploy/compose.yaml run --rm --no-deps api \
   admin invite create --uses 1 --expires 14d --note "alex"
 ```
 
+`admin` never migrates the database (it runs next to the live server). On a new or older
+database it fails with "start the server or run `recs-api migrate` first": start the stack, or
+run `docker compose -f deploy/compose.yaml run --rm --no-deps api migrate`, then retry.
+
 - `--uses N`: how many accounts the code can create (redemption is race-safe).
 - `--expires`: lifetime, e.g. `48h`, `14d`.
 - `--note`: who it is for; stored with the invite, never shown to users. Don't put personal

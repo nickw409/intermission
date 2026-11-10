@@ -54,9 +54,10 @@ func runAdminTo(ctx context.Context, d *app.Deps, args []string, out io.Writer) 
 		return err
 	}
 
-	// The command may run before the server ever has; make sure the schema exists.
-	if err := d.DB.Migrate(ctx, d.Logger); err != nil {
-		return fmt.Errorf("migrate: %w", err)
+	// Never migrate from here: this runs as a second process next to a live
+	// server, and a migration may rebuild tables under it.
+	if err := d.DB.RequireCurrent(ctx); err != nil {
+		return err
 	}
 	code, err := invites.New(d.DB).Create(ctx, *uses, lifetime, *note)
 	if err != nil {
