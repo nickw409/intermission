@@ -29,7 +29,7 @@ filter="${2:-.}"
 per_input_timeout=25  # seconds; libFuzzer reports a slower input as a timeout
 seed="${FUZZ_SEED:-$(( (RANDOM << 15 | RANDOM) + 1 ))}"
 [[ "$seconds" =~ ^[0-9]+$ ]] || { echo "seconds must be a whole number" >&2; exit 1; }
-[[ "$seed" =~ ^[0-9]+$ ]] || { echo "FUZZ_SEED must be a whole number" >&2; exit 1; }
+[[ "$seed" =~ ^[0-9]+$ ]] && (( seed >= 1 && seed <= 4294967295 )) || { echo "FUZZ_SEED must be 1..4294967295 (libFuzzer seeds are 32-bit)" >&2; exit 1; }
 if [[ "$seconds" -gt 0 ]]; then echo "fuzz seed: $seed (rerun with FUZZ_SEED=$seed)"; fi
 fail_tail() { echo "---- last lines of $1"; tail -n 40 "$1" | sed 's/^/    /'; echo "----"; }
 root="$(cd "$(dirname "$0")/../.." && pwd)"
