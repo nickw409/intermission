@@ -166,7 +166,7 @@ describe('evaluation page', () => {
       .map((c) => c.textContent);
     expect(headers).toEqual(['k', 'pop', 'pop_count', 'knn', 'content', 'mf', 'als']);
     const svg = screen.getByRole('img', { name: 'Recall@k by model' });
-    expect(svg.querySelectorAll('[aria-label="line"] path, g[aria-label="line"] path').length).toBe(6);
+    expect(svg.querySelectorAll('[data-mark="line"] path').length).toBe(6);
   });
 
   it('charts coverage against NDCG@10', async () => {
@@ -262,7 +262,7 @@ describe('evaluation page', () => {
   it('shows listing entries with an unknown schema_version as unsupported and never fetches or charts them', async () => {
     const requested = serveReports();
     await openPage();
-    const notice = screen.getByRole('region', { name: 'Unsupported reports' });
+    const notice = screen.getByRole('region', { name: 'Reports not shown' });
     expect(within(notice).getByText(POP_V2)).toBeInTheDocument();
     expect(notice).toHaveTextContent('unsupported report format');
     expect(requested).not.toContain(POP_V2);
@@ -292,7 +292,7 @@ describe('evaluation page', () => {
         HttpResponse.json({ error: { code: 'not_found', message: 'gone' } }, { status: 404 }),
     });
     await openPage();
-    const problems = screen.getByRole('region', { name: 'Unsupported reports' });
+    const problems = screen.getByRole('region', { name: 'Reports not shown' });
     expect(problems).toHaveTextContent('2026-11-09T21-13-00Z_mf');
     expect(problems).toHaveTextContent(/per_k/);
     expect(problems).toHaveTextContent('2026-11-09T21-10-00Z_knn');
@@ -314,7 +314,7 @@ describe('evaluation page', () => {
     serveListing(listing.items.filter((i) => i.run_id === POP_V2));
     renderApp('/evaluation');
     expect(await screen.findByText(/No evaluation runs this site can display/)).toBeInTheDocument();
-    expect(screen.getByRole('region', { name: 'Unsupported reports' })).toHaveTextContent(POP_V2);
+    expect(screen.getByRole('region', { name: 'Reports not shown' })).toHaveTextContent(POP_V2);
   });
 
   it('shows an error with a retry when the listing fails', async () => {
