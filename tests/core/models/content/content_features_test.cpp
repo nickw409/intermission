@@ -115,8 +115,10 @@ TEST_CASE("Content config: defaults are filled in and bad values are rejected", 
 TEST_CASE("Content TF-IDF: tags are case-folded and trimmed before counting", "[content][features]") {
   // Two items with no genres share one tag written differently. Without folding each spelling
   // would be used on one item only and dropped by min_tag_count = 2, leaving no features.
+  // (Item 2 is tagged too, so that N = 3 > df = 2 and the idf of "sci-fi" is not zero.)
   auto model = make_content();
-  model->fit(catalog({movie(1, {}), movie(2, {})}, {tag(1, 0, "Sci-Fi"), tag(2, 1, "  sci-fi\t")}),
+  model->fit(catalog({movie(1, {}), movie(2, {}), movie(3, {})},
+                     {tag(1, 0, "Sci-Fi"), tag(2, 1, "  sci-fi\t"), tag(2, 2, "western")}),
              Config::object(), TrainContext{});
   const auto s = model->similar(0, 5);
   REQUIRE(s.size() == 1);

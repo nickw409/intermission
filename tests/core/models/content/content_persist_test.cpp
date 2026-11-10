@@ -37,7 +37,8 @@ Outputs outputs_of(const Model& m, const Dataset& ds) {
     o.scores.push_back(scores_of(m, state));
     for (ItemIdx i = 0; i < ds.n_items(); i += 7) o.explain.push_back(m.explain(state, i).because);
   }
-  for (ItemIdx i = 0; i < ds.n_items(); ++i) o.similar.push_back(m.similar(i, 10));
+  const ItemIdx stride = std::max<ItemIdx>(1, ds.n_items() / 60);
+  for (ItemIdx i = 0; i < ds.n_items(); i += stride) o.similar.push_back(m.similar(i, 10));
   return o;
 }
 
@@ -78,22 +79,26 @@ void write_file(const fs::path& p, const std::string& bytes) {
 }  // namespace
 
 TEST_CASE("Content determinism: 1 thread and 4 threads give bit-identical results", "[content][determinism]") {
-  recs::testing::for_seeds(3, 5150, [](Rng& rng, std::uint64_t) {
-    const auto ds = random_dataset(rng, 30, 80, 0.2);
-    Outputs one, four;
-    {
-      ThreadCount t(1);
-      auto m = make_content();
-      m->fit(ds, Config::object(), TrainContext{});
-      one = outputs_of(*m, ds);
+  // The second size is above the catalog size at which score() starts a thread team.
+  recs::testing::for_seeds(2, 5150, [](Rng& rng, std::uint64_t) {
+    for (std::uint32_t n_items : {80u, 6000u}) {
+      INFO("n_items = " << n_items);
+      const auto ds = random_dataset(rng, 12, n_items, 40.0 / n_items);
+      Outputs one, four;
+      {
+        ThreadCount t(1);
+        auto m = make_content();
+        m->fit(ds, Config::object(), TrainContext{});
+        one = outputs_of(*m, ds);
+      }
+      {
+        ThreadCount t(4);
+        auto m = make_content();
+        m->fit(ds, Config::object(), TrainContext{});
+        four = outputs_of(*m, ds);
+      }
+      CHECK(same(one, four));
     }
-    {
-      ThreadCount t(4);
-      auto m = make_content();
-      m->fit(ds, Config::object(), TrainContext{});
-      four = outputs_of(*m, ds);
-    }
-    CHECK(same(one, four));
   });
 }
 

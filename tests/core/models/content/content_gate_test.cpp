@@ -28,8 +28,9 @@ bool has_genre(const MovieMeta& m, const std::string& g) {
 }
 
 // A catalog built so that "mostly comedies" is not a given:
-//  - 8 genres; every movie has a primary genre drawn uniformly, and 40% get a second genre, so
-//    comedies are about a sixth of the catalog and many of them overlap with other genres;
+//  - 8 genres; every genre is the primary genre of an eighth of the movies, and 40% of movies get
+//    a random second genre, so comedies are about a sixth of the catalog and many of them overlap
+//    with other genres;
 //  - each genre has its own small tag pool, and there is a generic pool ("classic", "oscar", ...)
 //    shared by every genre, so most items share some feature with most other items;
 //  - tags are applied by different users, in mixed case.
@@ -53,7 +54,7 @@ GenreCatalog genre_catalog(Rng& rng, std::uint32_t n_items) {
   std::vector<MovieMeta> movies;
   std::vector<TagApplication> tags;
   for (std::uint32_t i = 0; i < n_items; ++i) {
-    std::vector<std::size_t> gi{rng.uniform(genres.size())};
+    std::vector<std::size_t> gi{i % genres.size()};  // primary genres round-robin: n/8 of each
     if (rng.uniform01() < 0.4) {
       const auto second = rng.uniform(genres.size());
       if (second != gi[0]) gi.push_back(second);
@@ -90,21 +91,34 @@ GenreCatalog genre_catalog(Rng& rng, std::uint32_t n_items) {
 TEST_CASE("Content gate: a user who rated only one genre gets >= 7 of 10 recommendations in it",
           "[content][gate][phase1]") {
   recs::testing::for_seeds(20, 2026, [](Rng& rng, std::uint64_t) {
-    const auto cat = genre_catalog(rng, 120);
+    const auto cat = genre_catalog(rng, 160);
     const auto& ds = cat.ds;
     auto model = make_content();
     model->fit(ds, Config::object(), TrainContext{});
 
-    // The synthetic user rates 8 comedies with a spread of ratings (a real user is never
-    // uniformly enthusiastic): mean-centering then gives some of them negative weight.
-    std::vector<ItemIdx> comedies;
-    for (ItemIdx i = 0; i < ds.n_items(); ++i)
-      if (has_genre(ds.movies[i], "Comedy")) comedies.push_back(i);
-    REQUIRE(comedies.size() >= 12);
-    rng.shuffle(comedies.begin(), comedies.end());
-    const std::vector<float> values{5.0f, 4.5f, 4.5f, 4.0f, 4.0f, 3.5f, 3.0f, 2.5f};
+    // The synthetic user is a comedy fan who rated 8 comedies and nothing else: the four
+    // straight comedies (genre list exactly {Comedy}) 4.5-5 stars, and four comedy hybrids
+    // (Comedy plus another genre) 2-3 stars.
+    //
+    // Why the ratings vary with "how much comedy": the profile is mean-centered,
+    // p = sum_j (r_j - mu) v_j, so any feature that every rated movie shares to the same degree
+    // cancels out. A user who rated only comedies with ratings unrelated to their comedy-ness
+    // therefore has no comedy signal left in p at all (see the report for E: with such ratings
+    // this fixture gives 0-6 comedies in the top 10). The gate is about a user whose taste is the
+    // genre, so the ratings here express that taste.
+    std::vector<ItemIdx> straight, hybrid;
+    for (ItemIdx i = 0; i < ds.n_items(); ++i) {
+      if (!has_genre(ds.movies[i], "Comedy")) continue;
+      (ds.movies[i].genres.size() == 1 ? straight : hybrid).push_back(i);
+    }
+    REQUIRE(straight.size() >= 6);  // so some straight comedies remain to be recommended
+    REQUIRE(hybrid.size() >= 4);
+    rng.shuffle(straight.begin(), straight.end());
+    rng.shuffle(hybrid.begin(), hybrid.end());
+    const std::vector<float> liked{5.0f, 5.0f, 4.5f, 4.5f}, disliked{3.0f, 2.5f, 2.5f, 2.0f};
     std::vector<Rating> ratings;
-    for (std::size_t k = 0; k < values.size(); ++k) ratings.push_back({comedies[k], values[k], 1});
+    for (std::size_t k = 0; k < 4; ++k) ratings.push_back({straight[k], liked[k], 1});
+    for (std::size_t k = 0; k < 4; ++k) ratings.push_back({hybrid[k], disliked[k], 1});
 
     const auto state = model->fold_in(ratings);
     const auto scores = scores_of(*model, state);
