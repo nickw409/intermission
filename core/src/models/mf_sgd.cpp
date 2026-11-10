@@ -247,6 +247,8 @@ constexpr char kMagic[8] = {'R', 'E', 'C', 'S', 'M', 'F', '0', '1'};
 constexpr std::uint32_t kFormatVersion = 1;
 // magic, format version, n_items, k
 constexpr std::uint64_t kHeaderBytes = sizeof(kMagic) + 3 * sizeof(std::uint32_t);
+// Load-time bound on |mu|, |b_i| and every q_if (see load()).
+constexpr double kMaxAbsParam = 1e6;
 
 template <class T>
 void put(std::string& buf, const T& x) {
@@ -455,13 +457,17 @@ class MfSgd final : public Model {
                                    sizeof(float) * std::uint64_t{ni} * k;
     if (in.size() != expected) throw std::runtime_error("mf model file: wrong length for its header");
     const auto mu = in.get<double>();
-    if (!std::isfinite(mu)) throw std::runtime_error("mf model file: non-finite mu");
+    // Every parameter must be finite and at most kMaxAbsParam in magnitude. Finite is not enough:
+    // a finite but absurd value (fuzz_model_load_mf found mu = -1.1e297) overflows fold-in and
+    // scoring into NaN. With |mu|, |b_i|, |q_if| <= 1e6 and k <= 4096, the fold-in solution and
+    // every score stay far inside float range; trained models are many orders of magnitude below.
+    if (!(std::abs(mu) <= kMaxAbsParam)) throw std::runtime_error("mf model file: mu non-finite or out of range");
     std::vector<float> bi(ni), Q(std::size_t{ni} * k);
     for (auto& x : bi) x = in.get<float>();
     for (auto& x : Q) x = in.get<float>();
-    const auto finite = [](float x) { return std::isfinite(x); };
-    if (!std::all_of(bi.begin(), bi.end(), finite) || !std::all_of(Q.begin(), Q.end(), finite))
-      throw std::runtime_error("mf model file: non-finite item parameters");
+    const auto in_range = [](float x) { return std::abs(double{x}) <= kMaxAbsParam; };  // false for NaN
+    if (!std::all_of(bi.begin(), bi.end(), in_range) || !std::all_of(Q.begin(), Q.end(), in_range))
+      throw std::runtime_error("mf model file: non-finite or out-of-range item parameters");
     if (!in.at_end()) throw std::runtime_error("mf model file: trailing bytes");
 
     cfg_ = cfg;
