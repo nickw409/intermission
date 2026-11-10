@@ -192,12 +192,15 @@ status="$(head -n 1 <<<"$stall" | tr -d '\r')"
 # Expected failure, tracked as open finding SA3-5b (owner decision): the wanted outcome is a
 # 408 or a clean close, but Caddy 2.11.9's reverse_proxy writes this 499 itself when the
 # request context is cancelled, bypassing handle_errors (see the Caddyfile). Which status the
-# client sees is a race between Caddy's read_body timeout and recs-api's own 15 s ReadTimeout:
-# 499 when Caddy's fires first, 504 (through handle_errors) when recs-api's does; both were
-# observed. Either is reported as XFAIL, never as a pass; any other wrong answer fails; and the
-# wanted outcome itself fails as XPASS, so this check must be updated (and SA3-5b closed) the
-# moment the behaviour changes.
-if [[ "$status" == "HTTP/1.1 499"* || "$status" == "HTTP/1.1 504"* ]]; then
+# client sees is a race between Caddy's read_body timeout and recs-api's own 15 s ReadTimeout.
+# recs-api always answers the truncated body with 400 at 15 s (seen in its log for every
+# stalled request); the client then gets 499 when Caddy's timeout fires first, 504 (through
+# handle_errors) when Caddy treats the upstream as timed out, or recs-api's 400 when it
+# reaches Caddy just before Caddy's own timeout. All three were observed (400 rarely, in CI).
+# Each is reported as XFAIL, never as a pass; any other wrong answer fails; and the wanted
+# outcome itself fails as XPASS, so this check must be updated (and SA3-5b closed) the moment
+# the behaviour changes.
+if [[ "$status" == "HTTP/1.1 499"* || "$status" == "HTTP/1.1 504"* || "$status" == "HTTP/1.1 400"* ]]; then
   xfail "SA3-5b" "stalled body answered '$status', want 408 or a clean close (Caddy/recs-api timeout race)"
 elif [[ -z "$status" || "$status" == "HTTP/1.1 408"* ]]; then
   fail "XPASS: stalled body now gives '${status:-a clean close}'; SA3-5b looks fixed: make this a normal pass and close the finding"
