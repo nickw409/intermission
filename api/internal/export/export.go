@@ -35,6 +35,13 @@ const LatestName = "LATEST"
 // exportName matches the files this package writes (and may delete).
 var exportName = regexp.MustCompile(`^ratings-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z\.csv$`)
 
+// tempName matches this package's temp files (os.CreateTemp pattern below).
+var tempName = regexp.MustCompile(`^\.export-\d+\.tmp$`)
+
+// staleTemp is the age after which a leftover temp file (from a crashed
+// export) is removed. Younger ones may belong to an export still running.
+const staleTemp = time.Hour
+
 // Result describes one export.
 type Result struct {
 	Path  string
@@ -67,24 +74,25 @@ func Run(ctx context.Context, d *app.Deps, args []string) error {
 }
 
 // Export writes every rating of every existing account to
-// dir/ratings-<UTC time>.csv (temp file, fsync, rename), points dir/LATEST
-// at it, and deletes all but the Keep newest exports. Only internal user IDs
-// are written, never usernames. An existing file of the same name is never
-// overwritten (an error is returned instead).
+// dir/ratings-<UTC time>.csv (temp file, fsync, hard link into place), points
+// dir/LATEST at it (temp file, rename), and deletes all but the Keep newest
+// exports and any stale temp files. Only internal user IDs are written, never
+// usernames. An existing file of the same name is never overwritten (the
+// link fails instead). dir is created 0750 if missing and refused if it is
+// writable by group or others (anyone who could write there could swap the
+// files recs-train reads).
 func Export(ctx context.Context, database *db.DB, dir string, now time.Time) (Result, error) {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return Result{}, fmt.Errorf("export: create %s: %w", dir, err)
 	}
-	name := "ratings-" + now.UTC().Format("2006-01-02T15-04-05Z") + ".csv"
-	final := filepath.Join(dir, name)
-	if _, err := os.Lstat(final); err == nil {
-		return Result{}, fmt.Errorf("export: %s already exists", name)
-	} else if !errors.Is(err, fs.ErrNotExist) {
+	if err := checkDir(dir); err != nil {
 		return Result{}, err
 	}
+	name := "ratings-" + now.UTC().Format("2006-01-02T15-04-05Z") + ".csv"
+	final := filepath.Join(dir, name)
 
 	res := Result{Path: final}
-	err := writeAtomically(dir, final, func(w *bufio.Writer) error {
+	err := publishNew(dir, final, func(w *bufio.Writer) error {
 		var err error
 		res.Rows, res.Users, err = writeRows(ctx, database, w)
 		return err
@@ -92,7 +100,7 @@ func Export(ctx context.Context, database *db.DB, dir string, now time.Time) (Re
 	if err != nil {
 		return Result{}, err
 	}
-	if err := writeAtomically(dir, filepath.Join(dir, LatestName), func(w *bufio.Writer) error {
+	if err := replaceAtomically(dir, filepath.Join(dir, LatestName), func(w *bufio.Writer) error {
 		_, err := w.WriteString(name)
 		return err
 	}); err != nil {
@@ -156,40 +164,85 @@ func writeRows(ctx context.Context, database *db.DB, w *bufio.Writer) (rows, use
 	return rows, users, nil
 }
 
-// writeAtomically writes a temp file in dir with fill, fsyncs it, renames it
-// to path and fsyncs dir, so readers see either the old file or the whole
-// new one. Files are 0640 (recs-train reads them through the group).
-func writeAtomically(dir, path string, fill func(*bufio.Writer) error) (err error) {
-	tmp, err := os.CreateTemp(dir, ".export-*.tmp")
+// checkDir refuses a directory (or a symlink to one) writable by group or
+// others.
+func checkDir(dir string) error {
+	st, err := os.Stat(dir)
 	if err != nil {
-		return fmt.Errorf("export: create temp file: %w", err)
+		return fmt.Errorf("export: %w", err)
 	}
-	defer func() {
-		if err != nil {
-			_ = tmp.Close()
-			_ = os.Remove(tmp.Name())
-		}
-	}()
-	if err = tmp.Chmod(0o640); err != nil {
+	if !st.IsDir() {
+		return fmt.Errorf("export: %s is not a directory", dir)
+	}
+	if st.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("export: %s is writable by group or others (mode %o); use 0750 or stricter", dir, st.Mode().Perm())
+	}
+	return nil
+}
+
+// publishNew writes a complete, fsynced temp file and publishes it at path
+// with a hard link, which fails if path already exists, so an existing
+// export is never replaced. The temp name is then removed.
+func publishNew(dir, path string, fill func(*bufio.Writer) error) error {
+	tmp, err := writeTemp(dir, fill)
+	if err != nil {
 		return err
 	}
-	w := bufio.NewWriter(tmp)
-	if err = fill(w); err != nil {
+	defer func() { _ = os.Remove(tmp) }()
+	if err := os.Link(tmp, path); err != nil {
+		return fmt.Errorf("export: publish %s: %w", filepath.Base(path), err)
+	}
+	if err := os.Remove(tmp); err != nil {
 		return err
 	}
-	if err = w.Flush(); err != nil {
+	return syncDir(dir)
+}
+
+// replaceAtomically writes a complete, fsynced temp file and renames it over
+// path, so readers see either the old file or the whole new one.
+func replaceAtomically(dir, path string, fill func(*bufio.Writer) error) error {
+	tmp, err := writeTemp(dir, fill)
+	if err != nil {
 		return err
 	}
-	if err = tmp.Sync(); err != nil {
-		return err
-	}
-	if err = tmp.Close(); err != nil {
-		return err
-	}
-	if err = os.Rename(tmp.Name(), path); err != nil {
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
 		return fmt.Errorf("export: rename into place: %w", err)
 	}
 	return syncDir(dir)
+}
+
+// writeTemp creates a 0640 temp file in dir (recs-train reads exports
+// through the group), fills, fsyncs and closes it, and returns its path. On
+// failure nothing is left behind.
+func writeTemp(dir string, fill func(*bufio.Writer) error) (name string, err error) {
+	f, err := os.CreateTemp(dir, ".export-*.tmp")
+	if err != nil {
+		return "", fmt.Errorf("export: create temp file: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = f.Close()
+			_ = os.Remove(f.Name())
+		}
+	}()
+	if err = f.Chmod(0o640); err != nil {
+		return "", err
+	}
+	w := bufio.NewWriter(f)
+	if err = fill(w); err != nil {
+		return "", err
+	}
+	if err = w.Flush(); err != nil {
+		return "", err
+	}
+	if err = f.Sync(); err != nil {
+		return "", err
+	}
+	if err = f.Close(); err != nil {
+		return "", err
+	}
+	return f.Name(), nil
 }
 
 func syncDir(dir string) error {
@@ -201,22 +254,33 @@ func syncDir(dir string) error {
 	return d.Sync()
 }
 
-// prune deletes all but the Keep newest exports. Names embed a UTC
-// timestamp in a fixed-width format, so name order is time order. Only
-// files matching exportName are ever considered.
+// prune deletes all but the Keep newest exports, and this package's temp
+// files older than staleTemp. Names embed a UTC timestamp in a fixed-width
+// format, so name order is time order. Only files matching exportName or
+// tempName are ever considered.
 func prune(dir string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return err
 	}
 	var exports []string
+	var errs []error
 	for _, e := range entries {
-		if e.Type().IsRegular() && exportName.MatchString(e.Name()) {
+		if !e.Type().IsRegular() {
+			continue
+		}
+		switch {
+		case exportName.MatchString(e.Name()):
 			exports = append(exports, e.Name())
+		case tempName.MatchString(e.Name()):
+			if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > staleTemp {
+				if err := os.Remove(filepath.Join(dir, e.Name())); err != nil && !errors.Is(err, fs.ErrNotExist) {
+					errs = append(errs, err)
+				}
+			}
 		}
 	}
 	sort.Strings(exports)
-	var errs []error
 	for len(exports) > Keep {
 		if err := os.Remove(filepath.Join(dir, exports[0])); err != nil {
 			errs = append(errs, err)

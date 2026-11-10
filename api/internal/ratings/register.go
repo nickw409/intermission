@@ -245,7 +245,7 @@ func (h *handler) write(ctx context.Context, uid, movieID int64, rating float64,
 			return errTooManyRatings
 		}
 	}
-	if err := bumpVersion(ctx, tx, uid); err != nil {
+	if err := bump(ctx, tx, uid); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx,
@@ -288,7 +288,7 @@ func (h *handler) delete(w http.ResponseWriter, r *http.Request) {
 		if n == 0 {
 			return nil
 		}
-		if err := bumpVersion(ctx, tx, uid); err != nil {
+		if err := bump(ctx, tx, uid); err != nil {
 			return err
 		}
 		return tx.Commit()
@@ -304,6 +304,10 @@ func (h *handler) delete(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// bump is the ratings_version step of every write. It is a variable only so
+// tests can make it fail and check that the rating write rolls back with it.
+var bump = bumpVersion
 
 // bumpVersion increments users.ratings_version (it keys the recommendation
 // cache). No row means the account was deleted mid-request.

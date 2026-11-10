@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"time"
 	"unicode/utf8"
 
 	"github.com/nickw409/intermission/api/internal/app"
@@ -15,6 +16,7 @@ import (
 	"github.com/nickw409/intermission/api/internal/db"
 	"github.com/nickw409/intermission/api/internal/modelclient"
 	"github.com/nickw409/intermission/api/internal/moviecache"
+	"github.com/nickw409/intermission/api/internal/ratelimit"
 	"github.com/nickw409/intermission/api/internal/reqid"
 )
 
@@ -89,17 +91,47 @@ type SimilarResponse struct {
 //	GET /api/movies/{movieId}/similar?model=&k=
 //	GET /api/onboarding?n=                 (session)
 //	GET /api/models
+//
+// The four anonymous catalog routes share one global token bucket,
+// CatalogGlobal; onboarding needs a session and is not charged to it.
 func Register(mux *http.ServeMux, d *app.Deps) {
+	register(mux, d, CatalogGlobal)
+}
+
+// CatalogGlobal is the shared budget of the anonymous catalog routes
+// (search, movie, similar, models): 20 requests per second sustained, bursts
+// of 100. Each request costs at most two recs-model calls (search or similar,
+// then a batch lookup for uncached results) and at most one short cache
+// write, so an anonymous flood can't saturate recs-model or the single
+// SQLite writer. A typing user's search box stays far below it (the web UI
+// debounces keystrokes). Over budget: 429 rate_limited with Retry-After.
+var CatalogGlobal = ratelimit.Config{Every: 50 * time.Millisecond, Burst: 100}
+
+func register(mux *http.ServeMux, d *app.Deps, budget ratelimit.Config) {
 	logger := d.Logger
 	if logger == nil {
 		logger = slog.Default()
 	}
 	h := &handler{db: d.DB, model: d.Model, movies: d.Movies, logger: logger}
-	mux.HandleFunc("GET /api/movies/search", h.search)
-	mux.Handle("GET /api/movies/{movieId}", optionalSession(d)(http.HandlerFunc(h.movie)))
-	mux.HandleFunc("GET /api/movies/{movieId}/similar", h.similar)
+	limit := globalLimit(ratelimit.NewGlobal(budget))
+	mux.Handle("GET /api/movies/search", limit(http.HandlerFunc(h.search)))
+	mux.Handle("GET /api/movies/{movieId}", limit(optionalSession(d)(http.HandlerFunc(h.movie))))
+	mux.Handle("GET /api/movies/{movieId}/similar", limit(http.HandlerFunc(h.similar)))
 	mux.Handle("GET /api/onboarding", auth.RequireSession(d)(http.HandlerFunc(h.onboarding)))
-	mux.HandleFunc("GET /api/models", h.models)
+	mux.Handle("GET /api/models", limit(http.HandlerFunc(h.models)))
+}
+
+// globalLimit charges every request to g before anything else runs.
+func globalLimit(g *ratelimit.Global) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if ok, retry := g.Allow(); !ok {
+				ratelimit.WriteLimited(w, retry)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 type handler struct {

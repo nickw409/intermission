@@ -84,6 +84,28 @@ func Movie(id int64, title string, year int) modelclient.MovieMeta {
 	return modelclient.MovieMeta{MovieID: id, Title: title, Year: &year, Genres: []string{"Drama"}, RatingCount: 1}
 }
 
+// CountMovieWrites installs triggers that count every INSERT and UPDATE on
+// the movies table and returns a function reporting the count so far.
+func CountMovieWrites(t testing.TB, d *db.DB) func() int {
+	t.Helper()
+	for _, stmt := range []string{
+		"CREATE TABLE test_movie_writes (n INTEGER)",
+		"CREATE TRIGGER test_movies_ins AFTER INSERT ON movies BEGIN INSERT INTO test_movie_writes VALUES (1); END",
+		"CREATE TRIGGER test_movies_upd AFTER UPDATE ON movies BEGIN INSERT INTO test_movie_writes VALUES (1); END",
+	} {
+		if _, err := d.Writer.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return func() int {
+		var n int
+		if err := d.Reader.QueryRow("SELECT count(*) FROM test_movie_writes").Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+}
+
 // RatingsVersion returns users.ratings_version for uid.
 func RatingsVersion(t testing.TB, d *db.DB, uid int64) int64 {
 	t.Helper()

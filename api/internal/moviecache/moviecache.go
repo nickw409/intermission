@@ -6,9 +6,12 @@
 //
 // Freshness: rows are never invalidated, including when recs-model loads a
 // new artifact. Title, year, genres and TMDB ID are stable catalog data;
-// rating_count and mean_rating can lag. Refresh (used by the movie page)
-// re-reads one movie from recs-model and updates its row whenever recs-model
-// is up, so the only place those counts are shown is never stale for long.
+// rating_count and mean_rating can lag. Refresh (used by the movie page, the
+// only place those counts are shown) re-reads a movie from recs-model only
+// when its row is older than the refresh TTL (DefaultRefreshTTL, 10 minutes),
+// and writes the row only when something changed. An unchanged re-check is
+// remembered in memory, so anonymous page views cost neither recs-model calls
+// nor database writes more than once per movie per TTL.
 //
 // Owner: workstream J. The table is created by migrations/0002_movies.sql.
 package moviecache
@@ -17,9 +20,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
+	"sync"
 	"time"
 
 	"github.com/nickw409/intermission/api/internal/db"
@@ -33,11 +37,44 @@ type Cache struct {
 	model  modelclient.Client
 	now    func() time.Time
 	logger *slog.Logger
+	ttl    time.Duration
+
+	mu      sync.Mutex
+	checked map[int64]time.Time // unchanged re-checks since the row was written
 }
 
+// DefaultRefreshTTL is how long a row counts as fresh for Refresh.
+const DefaultRefreshTTL = 10 * time.Minute
+
+// maxChecked bounds the in-memory re-check map; it is cleared when full
+// (the cost is at most one extra recs-model call per movie).
+const maxChecked = 10_000
+
+// Option configures a Cache.
+type Option func(*Cache)
+
+// WithClock replaces time.Now (tests).
+func WithClock(now func() time.Time) Option { return func(c *Cache) { c.now = now } }
+
+// WithRefreshTTL sets how long a row counts as fresh for Refresh; zero
+// makes Refresh always ask recs-model.
+func WithRefreshTTL(d time.Duration) Option { return func(c *Cache) { c.ttl = d } }
+
+// WithLogger sets the logger. The default is slog.Default(), which main sets
+// to the process logger (app.Deps.Logger) before building the cache.
+func WithLogger(l *slog.Logger) Option { return func(c *Cache) { c.logger = l } }
+
 // New returns a Cache over database that fills misses from model.
-func New(database *db.DB, model modelclient.Client) *Cache {
-	return &Cache{db: database, model: model, now: time.Now, logger: slog.Default()}
+func New(database *db.DB, model modelclient.Client, opts ...Option) *Cache {
+	c := &Cache{db: database, model: model, now: time.Now, logger: slog.Default(), ttl: DefaultRefreshTTL,
+		checked: map[int64]time.Time{}}
+	for _, o := range opts {
+		o(c)
+	}
+	if c.logger == nil {
+		c.logger = slog.Default()
+	}
+	return c
 }
 
 // Result is what Get found.
@@ -97,24 +134,71 @@ func (c *Cache) Get(ctx context.Context, ids []int64) (Result, error) {
 	return res, nil
 }
 
-// Refresh fetches one movie from recs-model, updates its row and returns it.
-// ok is false when recs-model says the movie does not exist. When recs-model
-// can't be asked, the cached row is returned instead; with no cached row the
-// model error is returned.
+// Refresh returns one movie for the movie page. A cached row younger than
+// the refresh TTL is returned as is. Otherwise recs-model is asked; the row
+// is written only if the metadata changed (an unchanged answer just restarts
+// the TTL, in memory). ok is false when recs-model says the movie does not
+// exist. When recs-model can't be asked, the cached row (however old) is
+// returned; with no cached row the model error is returned.
 func (c *Cache) Refresh(ctx context.Context, id int64) (m modelclient.MovieMeta, ok bool, err error) {
-	fetched, err := c.fetch(ctx, []int64{id})
-	if err == nil {
-		m, ok = fetched[id]
-		return m, ok, nil
+	rows, err := c.lookupRows(ctx, []int64{id})
+	if err != nil {
+		return m, false, err
 	}
-	cached, lerr := c.Lookup(ctx, []int64{id})
-	if lerr != nil {
-		return m, false, errors.Join(err, lerr)
+	row, have := rows[id]
+	now := c.now()
+	if have && c.fresh(id, row.updatedAt, now) {
+		return row.meta, true, nil
 	}
-	if m, ok = cached[id]; ok {
+
+	resp, _, err := c.model.MoviesBatch(ctx, []int64{id})
+	if err != nil {
+		if have {
+			return row.meta, true, nil
+		}
+		return m, false, err
+	}
+	for _, got := range resp.Movies {
+		if got.MovieID == id {
+			m, ok = got, true
+			break
+		}
+	}
+	if !ok {
+		return m, false, nil
+	}
+	if m.Genres == nil {
+		m.Genres = []string{}
+	}
+	if have && reflect.DeepEqual(row.meta, m) {
+		c.markChecked(id, now)
 		return m, true, nil
 	}
-	return m, false, err
+	if err := c.Put(ctx, []modelclient.MovieMeta{m}); err != nil {
+		c.logger.WarnContext(ctx, "moviecache: storing movie failed", "err", err)
+	}
+	return m, true, nil
+}
+
+// fresh reports whether a row written at updatedAt (Unix seconds), or last
+// re-checked unchanged, is younger than the TTL.
+func (c *Cache) fresh(id, updatedAt int64, now time.Time) bool {
+	last := time.Unix(updatedAt, 0)
+	c.mu.Lock()
+	if t, ok := c.checked[id]; ok && t.After(last) {
+		last = t
+	}
+	c.mu.Unlock()
+	return now.Sub(last) < c.ttl
+}
+
+func (c *Cache) markChecked(id int64, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.checked) >= maxChecked {
+		clear(c.checked)
+	}
+	c.checked[id] = now
 }
 
 // fetch asks recs-model for ids (at most MaxBatchIDs) and stores what comes
@@ -149,7 +233,25 @@ func (c *Cache) fetch(ctx context.Context, ids []int64) (map[int64]modelclient.M
 
 // Lookup returns the cached rows for ids without asking recs-model.
 func (c *Cache) Lookup(ctx context.Context, ids []int64) (map[int64]modelclient.MovieMeta, error) {
-	out := make(map[int64]modelclient.MovieMeta, len(ids))
+	rows, err := c.lookupRows(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[int64]modelclient.MovieMeta, len(rows))
+	for id, r := range rows {
+		out[id] = r.meta
+	}
+	return out, nil
+}
+
+// cachedRow is one movies row.
+type cachedRow struct {
+	meta      modelclient.MovieMeta
+	updatedAt int64
+}
+
+func (c *Cache) lookupRows(ctx context.Context, ids []int64) (map[int64]cachedRow, error) {
+	out := make(map[int64]cachedRow, len(ids))
 	if len(ids) == 0 {
 		return out, nil
 	}
@@ -160,7 +262,7 @@ func (c *Cache) Lookup(ctx context.Context, ids []int64) (map[int64]modelclient.
 		return nil, err
 	}
 	rows, err := c.db.Reader.QueryContext(ctx,
-		`SELECT movie_id, title, year, genres_json, tmdb_id, rating_count, mean_rating
+		`SELECT movie_id, title, year, genres_json, tmdb_id, rating_count, mean_rating, updated_at
 		   FROM movies
 		  WHERE movie_id IN (SELECT value FROM json_each(?))`, string(idsJSON))
 	if err != nil {
@@ -174,8 +276,9 @@ func (c *Cache) Lookup(ctx context.Context, ids []int64) (map[int64]modelclient.
 			tmdb   sql.NullInt64
 			mean   sql.NullFloat64
 			genres string
+			upd    int64
 		)
-		if err := rows.Scan(&m.MovieID, &m.Title, &year, &genres, &tmdb, &m.RatingCount, &mean); err != nil {
+		if err := rows.Scan(&m.MovieID, &m.Title, &year, &genres, &tmdb, &m.RatingCount, &mean, &upd); err != nil {
 			return nil, fmt.Errorf("moviecache: scan: %w", err)
 		}
 		if year.Valid {
@@ -193,7 +296,7 @@ func (c *Cache) Lookup(ctx context.Context, ids []int64) (map[int64]modelclient.
 		if err := json.Unmarshal([]byte(genres), &m.Genres); err != nil || m.Genres == nil {
 			m.Genres = []string{}
 		}
-		out[m.MovieID] = m
+		out[m.MovieID] = cachedRow{meta: m, updatedAt: upd}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("moviecache: lookup: %w", err)
