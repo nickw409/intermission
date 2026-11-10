@@ -67,7 +67,7 @@ describe('evaluation page', () => {
     serveReports();
     renderApp('/evaluation');
     expect(screen.getByRole('heading', { level: 1, name: 'Evaluation' })).toBeInTheDocument();
-    expect(await screen.findByRole('status')).toHaveTextContent(/Loading/);
+    expect(await within(screen.getByRole('main')).findByRole('status')).toHaveTextContent(/Loading/);
 
     await screen.findByRole('img', { name: 'NDCG@10 by model' });
     const names = [
@@ -84,7 +84,7 @@ describe('evaluation page', () => {
       expect(svg).toHaveAccessibleDescription(/.{20,}/);
       expect(svg.querySelectorAll('path, circle, line, rect, g').length).toBeGreaterThan(0);
     }
-    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(within(screen.getByRole('main')).queryByRole('status')).not.toBeInTheDocument();
   });
 
   it('gives every chart a data table with a "Show data" toggle that stays available to screen readers', async () => {

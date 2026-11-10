@@ -58,12 +58,14 @@ export interface PlotContext {
   dark: boolean;
 }
 
-function PlotSvg({
+function PlotSvg<T>({
   build,
+  input,
   titleId,
   descriptionId,
 }: {
-  build: (context: PlotContext) => Plot.PlotOptions;
+  build: (input: T, context: PlotContext) => Plot.PlotOptions;
+  input: T;
   titleId: string;
   descriptionId: string;
 }) {
@@ -74,7 +76,7 @@ function PlotSvg({
   useEffect(() => {
     const host = container.current;
     if (!host) return;
-    const chart = Plot.plot({ width, ...build({ width, dark }) });
+    const chart = Plot.plot({ width, ...build(input, { width, dark }) });
     const svg = chart instanceof SVGSVGElement ? chart : chart.querySelector('svg');
     if (svg) {
       svg.setAttribute('role', 'img');
@@ -89,7 +91,7 @@ function PlotSvg({
     }
     host.replaceChildren(chart);
     return () => chart.remove();
-  }, [build, width, dark, titleId, descriptionId]);
+  }, [build, input, width, dark, titleId, descriptionId]);
 
   return <div ref={container} className="chart__plot" />;
 }
@@ -195,19 +197,32 @@ export function DataTable({ caption, data }: { caption: string; data: TableData 
 
 // ---- Figure ----
 
-export interface ChartFigureProps {
+export interface ChartFigureProps<T> {
   title: string;
   /** One or two sentences on what the chart shows; also the SVG's accessible description. */
   description: string;
-  /** Plot options for the current width and theme. Keep it stable (module-level or useCallback). */
-  build: (context: PlotContext) => Plot.PlotOptions;
+  /**
+   * Plot options for `input` at the current width and theme. Pass a module-level function and
+   * a stable `input`: the chart is redrawn whenever either changes.
+   */
+  build: (input: T, context: PlotContext) => Plot.PlotOptions;
+  input: T;
   table: TableData;
   legend?: LegendItem[];
   notes?: ReactNode;
   headingLevel?: 3 | 4;
 }
 
-export function ChartFigure({ title, description, build, table, legend, notes, headingLevel = 3 }: ChartFigureProps) {
+export function ChartFigure<T>({
+  title,
+  description,
+  build,
+  input,
+  table,
+  legend,
+  notes,
+  headingLevel = 3,
+}: ChartFigureProps<T>) {
   const titleId = useId();
   const descriptionId = useId();
   const tableId = useId();
@@ -225,7 +240,7 @@ export function ChartFigure({ title, description, build, table, legend, notes, h
         </p>
       </figcaption>
       {legend && legend.length > 1 && <Legend items={legend} />}
-      <PlotSvg build={build} titleId={titleId} descriptionId={descriptionId} />
+      <PlotSvg build={build} input={input} titleId={titleId} descriptionId={descriptionId} />
       {notes}
       <button
         type="button"

@@ -1,7 +1,8 @@
 // Compare two runs of the same model (e.g. ALS with k = 64 against k = 128): headline metrics in a
 // table, plus their Recall@k and training curves on shared axes. Run A is solid with filled
 // markers, run B dashed with hollow markers, so the two never differ by color alone.
-import { useCallback, useId, useState } from 'react';
+import type * as Plot from '@observablehq/plot';
+import { useId, useMemo, useState } from 'react';
 import type { RunReport } from '../../api/client';
 import { runLabels } from '../../lib/reports/models';
 import { comparableRuns } from '../../lib/reports/select';
@@ -28,42 +29,29 @@ const HEADLINE: { label: string; value: (run: RunReport) => string }[] = [
   { label: 'Training time (s)', value: (r) => number(r.train_seconds) },
 ];
 
-function Comparison({ a, b, labelA, labelB }: { a: RunReport; b: RunReport; labelA: string; labelB: string }) {
-  const series: CurveSeries[] = [
+function pairSeries(a: RunReport, b: RunReport, labelA: string, labelB: string): CurveSeries[] {
+  return [
     { run: a, label: labelA, dash: '' },
     { run: b, label: labelB, dash: DASH_B, hollow: true },
   ];
+}
+
+function pairRecallPlot(series: CurveSeries[], { dark }: PlotContext): Plot.PlotOptions {
+  return recallPlot(series, dark, 'Recall@k');
+}
+
+function pairTrainingPlot(series: CurveSeries[], { dark }: PlotContext): Plot.PlotOptions {
+  return trainingPlot(series, dark, series[0]?.run.training_curve_metric ?? '');
+}
+
+function Comparison({ a, b, labelA, labelB }: { a: RunReport; b: RunReport; labelA: string; labelB: string }) {
+  const series = useMemo(() => pairSeries(a, b, labelA, labelB), [a, b, labelA, labelB]);
   const legend = [
     { label: labelA, model: a.model, line: true, dash: '' },
     { label: labelB, model: b.model, line: true, dash: DASH_B, hollow: true },
   ];
-  const buildRecall = useCallback(
-    ({ dark }: PlotContext) =>
-      recallPlot(
-        [
-          { run: a, label: labelA, dash: '' },
-          { run: b, label: labelB, dash: DASH_B, hollow: true },
-        ],
-        dark,
-        'Recall@k',
-      ),
-    [a, b, labelA, labelB],
-  );
   const sameCurveMetric =
     a.training_curve.length > 0 && b.training_curve.length > 0 && a.training_curve_metric === b.training_curve_metric;
-  const buildTraining = useCallback(
-    ({ dark }: PlotContext) =>
-      trainingPlot(
-        [
-          { run: a, label: labelA, dash: '' },
-          { run: b, label: labelB, dash: DASH_B },
-        ],
-        dark,
-        a.training_curve_metric,
-      ),
-    [a, b, labelA, labelB],
-  );
-
   const headline: TableData = {
     columns: ['Metric', labelA, labelB],
     rows: HEADLINE.map(({ label, value }) => ({ header: label, cells: [value(a), value(b)] })),
@@ -94,7 +82,8 @@ function Comparison({ a, b, labelA, labelB }: { a: RunReport; b: RunReport; labe
           headingLevel={3}
           title={`Recall@k: ${labelA} vs ${labelB}`}
           description={`Recall@k for the two runs: ${labelA} (solid line, filled markers) and ${labelB} (dashed line, hollow markers).`}
-          build={buildRecall}
+          build={pairRecallPlot}
+          input={series}
           table={curveTable((run) => run.per_k.recall, 'k')}
           legend={legend}
         />
@@ -103,7 +92,8 @@ function Comparison({ a, b, labelA, labelB }: { a: RunReport; b: RunReport; labe
             headingLevel={3}
             title={`Training curve: ${labelA} vs ${labelB} (${a.training_curve_metric})`}
             description={`${a.training_curve_metric} by iteration for ${labelA} (solid) and ${labelB} (dashed).`}
-            build={buildTraining}
+            build={pairTrainingPlot}
+            input={series}
             table={curveTable((run) => run.training_curve, 'Iteration')}
             legend={legend.map((item) => ({ ...item, hollow: false }))}
           />
