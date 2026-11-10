@@ -1,0 +1,5 @@
+file(GLOB RECS_TRAIN_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
+add_executable(recs-train ${RECS_TRAIN_SOURCES})
+target_link_libraries(recs-train PRIVATE recs_core CLI11::CLI11)
+target_compile_definitions(recs-train PRIVATE RECS_GIT_SHA="${RECS_GIT_SHA}")
+recs_set_warnings(recs-train)

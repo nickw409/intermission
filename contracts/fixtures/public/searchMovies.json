@@ -1,0 +1,98 @@
+{
+  "operationId": "searchMovies",
+  "cases": [
+    {
+      "name": "ok",
+      "request": {
+        "method": "GET",
+        "path": "/api/movies/search",
+        "query": {
+          "q": "star",
+          "limit": "3"
+        },
+        "headers": {}
+      },
+      "response": {
+        "status": 200,
+        "headers": {},
+        "body": {
+          "items": [
+            {
+              "movieId": 260,
+              "title": "Star Wars: Episode IV - A New Hope",
+              "year": 1977,
+              "genres": [
+                "Action",
+                "Adventure",
+                "Sci-Fi"
+              ]
+            },
+            {
+              "movieId": 1196,
+              "title": "Star Wars: Episode V - The Empire Strikes Back",
+              "year": 1980,
+              "genres": [
+                "Action",
+                "Adventure",
+                "Sci-Fi"
+              ]
+            },
+            {
+              "movieId": 1210,
+              "title": "Star Wars: Episode VI - Return of the Jedi",
+              "year": 1983,
+              "genres": [
+                "Action",
+                "Adventure",
+                "Sci-Fi"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "empty_query",
+      "request": {
+        "method": "GET",
+        "path": "/api/movies/search",
+        "query": {
+          "q": ""
+        },
+        "headers": {}
+      },
+      "response": {
+        "status": 400,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "bad_request",
+            "message": "q must be 1-100 characters"
+          }
+        }
+      }
+    },
+    {
+      "name": "model_unavailable",
+      "request": {
+        "method": "GET",
+        "path": "/api/movies/search",
+        "query": {
+          "q": "star",
+          "limit": "3"
+        },
+        "headers": {}
+      },
+      "response": {
+        "status": 503,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "model_unavailable",
+            "message": "the recommendation service is unavailable"
+          }
+        }
+      }
+    }
+  ]
+}

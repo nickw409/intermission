@@ -1,0 +1,234 @@
+{
+  "operationId": "putRating",
+  "cases": [
+    {
+      "name": "ok",
+      "request": {
+        "method": "PUT",
+        "path": "/api/ratings/4993",
+        "query": {},
+        "headers": {
+          "Origin": "https://intermission.example",
+          "X-Requested-With": "recs",
+          "Cookie": "session=fixture-session-token"
+        },
+        "body": {
+          "rating": 4.5
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {},
+        "body": {
+          "movieId": 4993,
+          "title": "Lord of the Rings: The Fellowship of the Ring, The",
+          "year": 2001,
+          "rating": 4.5,
+          "updated_at": 1794259200
+        }
+      }
+    },
+    {
+      "name": "invalid_json",
+      "request": {
+        "method": "PUT",
+        "path": "/api/ratings/4993",
+        "query": {},
+        "headers": {
+          "Origin": "https://intermission.example",
+          "X-Requested-With": "recs",
+          "Cookie": "session=fixture-session-token"
+        },
+        "rawBody": "{not json"
+      },
+      "response": {
+        "status": 400,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "invalid_json",
+            "message": "request body is not valid JSON"
+          }
+        }
+      }
+    },
+    {
+      "name": "bad_rating_step",
+      "request": {
+        "method": "PUT",
+        "path": "/api/ratings/4993",
+        "query": {},
+        "headers": {
+          "Origin": "https://intermission.example",
+          "X-Requested-With": "recs",
+          "Cookie": "session=fixture-session-token"
+        },
+        "body": {
+          "rating": 4.3
+        }
+      },
+      "response": {
+        "status": 400,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "bad_request",
+            "message": "rating must be 0.5-5.0 in 0.5 steps"
+          }
+        }
+      }
+    },
+    {
+      "name": "unauthorized",
+      "request": {
+        "method": "PUT",
+        "path": "/api/ratings/4993",
+        "query": {},
+        "headers": {
+          "Origin": "https://intermission.example",
+          "X-Requested-With": "recs"
+        },
+        "body": {
+          "rating": 4.5
+        }
+      },
+      "response": {
+        "status": 401,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "unauthorized",
+            "message": "not logged in"
+          }
+        }
+      }
+    },
+    {
+      "name": "csrf_rejected",
+      "request": {
+        "method": "PUT",
+        "path": "/api/ratings/4993",
+        "query": {},
+        "headers": {
+          "Origin": "https://intermission.example",
+          "Cookie": "session=fixture-session-token"
+        },
+        "body": {
+          "rating": 4.5
+        }
+      },
+      "response": {
+        "status": 403,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "csrf_rejected",
+            "message": "missing or invalid X-Requested-With or Origin"
+          }
+        }
+      }
+    },
+    {
+      "name": "not_found",
+      "request": {
+        "method": "PUT",
+        "path": "/api/ratings/999999999",
+        "query": {},
+        "headers": {
+          "Origin": "https://intermission.example",
+          "X-Requested-With": "recs",
+          "Cookie": "session=fixture-session-token"
+        },
+        "body": {
+          "rating": 4.5
+        }
+      },
+      "response": {
+        "status": 404,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "not_found",
+            "message": "movie not found"
+          }
+        }
+      }
+    },
+    {
+      "name": "too_many_ratings",
+      "request": {
+        "method": "PUT",
+        "path": "/api/ratings/4993",
+        "query": {},
+        "headers": {
+          "Origin": "https://intermission.example",
+          "X-Requested-With": "recs",
+          "Cookie": "session=fixture-session-token"
+        },
+        "body": {
+          "rating": 4.5
+        }
+      },
+      "response": {
+        "status": 409,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "too_many_ratings",
+            "message": "at most 5000 ratings per user"
+          }
+        }
+      }
+    },
+    {
+      "name": "body_too_large",
+      "request": {
+        "method": "PUT",
+        "path": "/api/ratings/4993",
+        "query": {},
+        "headers": {
+          "Origin": "https://intermission.example",
+          "X-Requested-With": "recs",
+          "Cookie": "session=fixture-session-token"
+        },
+        "rawBodyBytes": 65537
+      },
+      "response": {
+        "status": 413,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "body_too_large",
+            "message": "request body exceeds 64 KB"
+          }
+        }
+      }
+    },
+    {
+      "name": "model_unavailable",
+      "request": {
+        "method": "PUT",
+        "path": "/api/ratings/4993",
+        "query": {},
+        "headers": {
+          "Origin": "https://intermission.example",
+          "X-Requested-With": "recs",
+          "Cookie": "session=fixture-session-token"
+        },
+        "body": {
+          "rating": 4.5
+        }
+      },
+      "response": {
+        "status": 503,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "model_unavailable",
+            "message": "the recommendation service is unavailable"
+          }
+        }
+      }
+    }
+  ]
+}

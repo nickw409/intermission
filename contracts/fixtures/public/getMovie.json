@@ -1,0 +1,117 @@
+{
+  "operationId": "getMovie",
+  "cases": [
+    {
+      "name": "ok",
+      "request": {
+        "method": "GET",
+        "path": "/api/movies/4993",
+        "query": {},
+        "headers": {}
+      },
+      "response": {
+        "status": 200,
+        "headers": {},
+        "body": {
+          "movieId": 4993,
+          "title": "Lord of the Rings: The Fellowship of the Ring, The",
+          "year": 2001,
+          "genres": [
+            "Adventure",
+            "Fantasy"
+          ],
+          "rating_count": 198,
+          "mean_rating": 4.11,
+          "tmdbId": 120,
+          "user_rating": null
+        }
+      }
+    },
+    {
+      "name": "ok_rated_by_caller",
+      "request": {
+        "method": "GET",
+        "path": "/api/movies/2571",
+        "query": {},
+        "headers": {
+          "Cookie": "session=fixture-session-token"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {},
+        "body": {
+          "movieId": 2571,
+          "title": "Matrix, The",
+          "year": 1999,
+          "genres": [
+            "Action",
+            "Sci-Fi",
+            "Thriller"
+          ],
+          "rating_count": 278,
+          "mean_rating": 4.19,
+          "tmdbId": 603,
+          "user_rating": 4.5
+        }
+      }
+    },
+    {
+      "name": "bad_movie_id",
+      "request": {
+        "method": "GET",
+        "path": "/api/movies/abc",
+        "query": {},
+        "headers": {}
+      },
+      "response": {
+        "status": 400,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "bad_request",
+            "message": "movieId must be a positive integer"
+          }
+        }
+      }
+    },
+    {
+      "name": "not_found",
+      "request": {
+        "method": "GET",
+        "path": "/api/movies/999999999",
+        "query": {},
+        "headers": {}
+      },
+      "response": {
+        "status": 404,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "not_found",
+            "message": "movie not found"
+          }
+        }
+      }
+    },
+    {
+      "name": "model_unavailable",
+      "request": {
+        "method": "GET",
+        "path": "/api/movies/4993",
+        "query": {},
+        "headers": {}
+      },
+      "response": {
+        "status": 503,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "model_unavailable",
+            "message": "the recommendation service is unavailable"
+          }
+        }
+      }
+    }
+  ]
+}

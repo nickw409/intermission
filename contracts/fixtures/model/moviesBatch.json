@@ -1,0 +1,887 @@
+{
+  "operationId": "moviesBatch",
+  "cases": [
+    {
+      "name": "ok",
+      "request": {
+        "method": "POST",
+        "path": "/v1/movies/batch",
+        "query": {},
+        "headers": {},
+        "body": {
+          "ids": [
+            260,
+            1196,
+            1210
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "movies": [
+            {
+              "movie_id": 260,
+              "title": "Star Wars: Episode IV - A New Hope",
+              "year": 1977,
+              "genres": [
+                "Action",
+                "Adventure",
+                "Sci-Fi"
+              ],
+              "tmdb_id": 11,
+              "rating_count": 251,
+              "mean_rating": 4.23
+            },
+            {
+              "movie_id": 1196,
+              "title": "Star Wars: Episode V - The Empire Strikes Back",
+              "year": 1980,
+              "genres": [
+                "Action",
+                "Adventure",
+                "Sci-Fi"
+              ],
+              "tmdb_id": 1891,
+              "rating_count": 211,
+              "mean_rating": 4.22
+            },
+            {
+              "movie_id": 1210,
+              "title": "Star Wars: Episode VI - Return of the Jedi",
+              "year": 1983,
+              "genres": [
+                "Action",
+                "Adventure",
+                "Sci-Fi"
+              ],
+              "tmdb_id": 1892,
+              "rating_count": 196,
+              "mean_rating": 4.14
+            }
+          ],
+          "missing": []
+        }
+      }
+    },
+    {
+      "name": "ok_with_missing",
+      "request": {
+        "method": "POST",
+        "path": "/v1/movies/batch",
+        "query": {},
+        "headers": {},
+        "body": {
+          "ids": [
+            4993,
+            999999999
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "movies": [
+            {
+              "movie_id": 4993,
+              "title": "Lord of the Rings: The Fellowship of the Ring, The",
+              "year": 2001,
+              "genres": [
+                "Adventure",
+                "Fantasy"
+              ],
+              "tmdb_id": 120,
+              "rating_count": 198,
+              "mean_rating": 4.11
+            }
+          ],
+          "missing": [
+            999999999
+          ]
+        }
+      }
+    },
+    {
+      "name": "recommend_als",
+      "request": {
+        "method": "POST",
+        "path": "/v1/movies/batch",
+        "query": {},
+        "headers": {},
+        "body": {
+          "ids": [
+            4993,
+            260,
+            2571,
+            1196,
+            2959,
+            296
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "movies": [
+            {
+              "movie_id": 4993,
+              "title": "Lord of the Rings: The Fellowship of the Ring, The",
+              "year": 2001,
+              "genres": [
+                "Adventure",
+                "Fantasy"
+              ],
+              "tmdb_id": 120,
+              "rating_count": 198,
+              "mean_rating": 4.11
+            },
+            {
+              "movie_id": 260,
+              "title": "Star Wars: Episode IV - A New Hope",
+              "year": 1977,
+              "genres": [
+                "Action",
+                "Adventure",
+                "Sci-Fi"
+              ],
+              "tmdb_id": 11,
+              "rating_count": 251,
+              "mean_rating": 4.23
+            },
+            {
+              "movie_id": 2571,
+              "title": "Matrix, The",
+              "year": 1999,
+              "genres": [
+                "Action",
+                "Sci-Fi",
+                "Thriller"
+              ],
+              "tmdb_id": 603,
+              "rating_count": 278,
+              "mean_rating": 4.19
+            },
+            {
+              "movie_id": 1196,
+              "title": "Star Wars: Episode V - The Empire Strikes Back",
+              "year": 1980,
+              "genres": [
+                "Action",
+                "Adventure",
+                "Sci-Fi"
+              ],
+              "tmdb_id": 1891,
+              "rating_count": 211,
+              "mean_rating": 4.22
+            },
+            {
+              "movie_id": 2959,
+              "title": "Fight Club",
+              "year": 1999,
+              "genres": [
+                "Action",
+                "Crime",
+                "Drama",
+                "Thriller"
+              ],
+              "tmdb_id": 550,
+              "rating_count": 218,
+              "mean_rating": 4.27
+            },
+            {
+              "movie_id": 296,
+              "title": "Pulp Fiction",
+              "year": 1994,
+              "genres": [
+                "Comedy",
+                "Crime",
+                "Drama",
+                "Thriller"
+              ],
+              "tmdb_id": 680,
+              "rating_count": 307,
+              "mean_rating": 4.2
+            }
+          ],
+          "missing": []
+        }
+      }
+    },
+    {
+      "name": "compare_pop_knn_als",
+      "request": {
+        "method": "POST",
+        "path": "/v1/movies/batch",
+        "query": {},
+        "headers": {},
+        "body": {
+          "ids": [
+            356,
+            593,
+            2959,
+            1196,
+            260,
+            1210,
+            4993,
+            1,
+            2571,
+            296
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "movies": [
+            {
+              "movie_id": 356,
+              "title": "Forrest Gump",
+              "year": 1994,
+              "genres": [
+                "Comedy",
+                "Drama",
+                "Romance",
+                "War"
+              ],
+              "tmdb_id": 13,
+              "rating_count": 329,
+              "mean_rating": 4.16
+            },
+            {
+              "movie_id": 593,
+              "title": "Silence of the Lambs, The",
+              "year": 1991,
+              "genres": [
+                "Crime",
+                "Horror",
+                "Thriller"
+              ],
+              "tmdb_id": 274,
+              "rating_count": 279,
+              "mean_rating": 4.16
+            },
+            {
+              "movie_id": 2959,
+              "title": "Fight Club",
+              "year": 1999,
+              "genres": [
+                "Action",
+                "Crime",
+                "Drama",
+                "Thriller"
+              ],
+              "tmdb_id": 550,
+              "rating_count": 218,
+              "mean_rating": 4.27
+            },
+            {
+              "movie_id": 1196,
+              "title": "Star Wars: Episode V - The Empire Strikes Back",
+              "year": 1980,
+              "genres": [
+                "Action",
+                "Adventure",
+                "Sci-Fi"
+              ],
+              "tmdb_id": 1891,
+              "rating_count": 211,
+              "mean_rating": 4.22
+            },
+            {
+              "movie_id": 260,
+              "title": "Star Wars: Episode IV - A New Hope",
+              "year": 1977,
+              "genres": [
+                "Action",
+                "Adventure",
+                "Sci-Fi"
+              ],
+              "tmdb_id": 11,
+              "rating_count": 251,
+              "mean_rating": 4.23
+            },
+            {
+              "movie_id": 1210,
+              "title": "Star Wars: Episode VI - Return of the Jedi",
+              "year": 1983,
+              "genres": [
+                "Action",
+                "Adventure",
+                "Sci-Fi"
+              ],
+              "tmdb_id": 1892,
+              "rating_count": 196,
+              "mean_rating": 4.14
+            },
+            {
+              "movie_id": 4993,
+              "title": "Lord of the Rings: The Fellowship of the Ring, The",
+              "year": 2001,
+              "genres": [
+                "Adventure",
+                "Fantasy"
+              ],
+              "tmdb_id": 120,
+              "rating_count": 198,
+              "mean_rating": 4.11
+            },
+            {
+              "movie_id": 1,
+              "title": "Toy Story",
+              "year": 1995,
+              "genres": [
+                "Adventure",
+                "Animation",
+                "Children",
+                "Comedy",
+                "Fantasy"
+              ],
+              "tmdb_id": 862,
+              "rating_count": 215,
+              "mean_rating": 3.92
+            },
+            {
+              "movie_id": 2571,
+              "title": "Matrix, The",
+              "year": 1999,
+              "genres": [
+                "Action",
+                "Sci-Fi",
+                "Thriller"
+              ],
+              "tmdb_id": 603,
+              "rating_count": 278,
+              "mean_rating": 4.19
+            },
+            {
+              "movie_id": 296,
+              "title": "Pulp Fiction",
+              "year": 1994,
+              "genres": [
+                "Comedy",
+                "Crime",
+                "Drama",
+                "Thriller"
+              ],
+              "tmdb_id": 680,
+              "rating_count": 307,
+              "mean_rating": 4.2
+            }
+          ],
+          "missing": []
+        }
+      }
+    },
+    {
+      "name": "cold_start_pop",
+      "request": {
+        "method": "POST",
+        "path": "/v1/movies/batch",
+        "query": {},
+        "headers": {},
+        "body": {
+          "ids": [
+            318,
+            356,
+            296
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "movies": [
+            {
+              "movie_id": 318,
+              "title": "Shawshank Redemption, The",
+              "year": 1994,
+              "genres": [
+                "Crime",
+                "Drama"
+              ],
+              "tmdb_id": 278,
+              "rating_count": 317,
+              "mean_rating": 4.43
+            },
+            {
+              "movie_id": 356,
+              "title": "Forrest Gump",
+              "year": 1994,
+              "genres": [
+                "Comedy",
+                "Drama",
+                "Romance",
+                "War"
+              ],
+              "tmdb_id": 13,
+              "rating_count": 329,
+              "mean_rating": 4.16
+            },
+            {
+              "movie_id": 296,
+              "title": "Pulp Fiction",
+              "year": 1994,
+              "genres": [
+                "Comedy",
+                "Crime",
+                "Drama",
+                "Thriller"
+              ],
+              "tmdb_id": 680,
+              "rating_count": 307,
+              "mean_rating": 4.2
+            }
+          ],
+          "missing": []
+        }
+      }
+    },
+    {
+      "name": "similar_260",
+      "request": {
+        "method": "POST",
+        "path": "/v1/movies/batch",
+        "query": {},
+        "headers": {},
+        "body": {
+          "ids": [
+            260,
+            1196,
+            1210,
+            2571
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "movies": [
+            {
+              "movie_id": 260,
+              "title": "Star Wars: Episode IV - A New Hope",
+              "year": 1977,
+              "genres": [
+                "Action",
+                "Adventure",
+                "Sci-Fi"
+              ],
+              "tmdb_id": 11,
+              "rating_count": 251,
+              "mean_rating": 4.23
+            },
+            {
+              "movie_id": 1196,
+              "title": "Star Wars: Episode V - The Empire Strikes Back",
+              "year": 1980,
+              "genres": [
+                "Action",
+                "Adventure",
+                "Sci-Fi"
+              ],
+              "tmdb_id": 1891,
+              "rating_count": 211,
+              "mean_rating": 4.22
+            },
+            {
+              "movie_id": 1210,
+              "title": "Star Wars: Episode VI - Return of the Jedi",
+              "year": 1983,
+              "genres": [
+                "Action",
+                "Adventure",
+                "Sci-Fi"
+              ],
+              "tmdb_id": 1892,
+              "rating_count": 196,
+              "mean_rating": 4.14
+            },
+            {
+              "movie_id": 2571,
+              "title": "Matrix, The",
+              "year": 1999,
+              "genres": [
+                "Action",
+                "Sci-Fi",
+                "Thriller"
+              ],
+              "tmdb_id": 603,
+              "rating_count": 278,
+              "mean_rating": 4.19
+            }
+          ],
+          "missing": []
+        }
+      }
+    },
+    {
+      "name": "onboarding",
+      "request": {
+        "method": "POST",
+        "path": "/v1/movies/batch",
+        "query": {},
+        "headers": {},
+        "body": {
+          "ids": [
+            356,
+            4993,
+            593,
+            480
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "movies": [
+            {
+              "movie_id": 356,
+              "title": "Forrest Gump",
+              "year": 1994,
+              "genres": [
+                "Comedy",
+                "Drama",
+                "Romance",
+                "War"
+              ],
+              "tmdb_id": 13,
+              "rating_count": 329,
+              "mean_rating": 4.16
+            },
+            {
+              "movie_id": 4993,
+              "title": "Lord of the Rings: The Fellowship of the Ring, The",
+              "year": 2001,
+              "genres": [
+                "Adventure",
+                "Fantasy"
+              ],
+              "tmdb_id": 120,
+              "rating_count": 198,
+              "mean_rating": 4.11
+            },
+            {
+              "movie_id": 593,
+              "title": "Silence of the Lambs, The",
+              "year": 1991,
+              "genres": [
+                "Crime",
+                "Horror",
+                "Thriller"
+              ],
+              "tmdb_id": 274,
+              "rating_count": 279,
+              "mean_rating": 4.16
+            },
+            {
+              "movie_id": 480,
+              "title": "Jurassic Park",
+              "year": 1993,
+              "genres": [
+                "Action",
+                "Adventure",
+                "Sci-Fi",
+                "Thriller"
+              ],
+              "tmdb_id": 329,
+              "rating_count": 238,
+              "mean_rating": 3.75
+            }
+          ],
+          "missing": []
+        }
+      }
+    },
+    {
+      "name": "ratings_alice",
+      "request": {
+        "method": "POST",
+        "path": "/v1/movies/batch",
+        "query": {},
+        "headers": {},
+        "body": {
+          "ids": [
+            260,
+            2571,
+            296,
+            1,
+            318
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "movies": [
+            {
+              "movie_id": 260,
+              "title": "Star Wars: Episode IV - A New Hope",
+              "year": 1977,
+              "genres": [
+                "Action",
+                "Adventure",
+                "Sci-Fi"
+              ],
+              "tmdb_id": 11,
+              "rating_count": 251,
+              "mean_rating": 4.23
+            },
+            {
+              "movie_id": 2571,
+              "title": "Matrix, The",
+              "year": 1999,
+              "genres": [
+                "Action",
+                "Sci-Fi",
+                "Thriller"
+              ],
+              "tmdb_id": 603,
+              "rating_count": 278,
+              "mean_rating": 4.19
+            },
+            {
+              "movie_id": 296,
+              "title": "Pulp Fiction",
+              "year": 1994,
+              "genres": [
+                "Comedy",
+                "Crime",
+                "Drama",
+                "Thriller"
+              ],
+              "tmdb_id": 680,
+              "rating_count": 307,
+              "mean_rating": 4.2
+            },
+            {
+              "movie_id": 1,
+              "title": "Toy Story",
+              "year": 1995,
+              "genres": [
+                "Adventure",
+                "Animation",
+                "Children",
+                "Comedy",
+                "Fantasy"
+              ],
+              "tmdb_id": 862,
+              "rating_count": 215,
+              "mean_rating": 3.92
+            },
+            {
+              "movie_id": 318,
+              "title": "Shawshank Redemption, The",
+              "year": 1994,
+              "genres": [
+                "Crime",
+                "Drama"
+              ],
+              "tmdb_id": 278,
+              "rating_count": 317,
+              "mean_rating": 4.43
+            }
+          ],
+          "missing": []
+        }
+      }
+    },
+    {
+      "name": "movie_2571",
+      "request": {
+        "method": "POST",
+        "path": "/v1/movies/batch",
+        "query": {},
+        "headers": {},
+        "body": {
+          "ids": [
+            2571
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "movies": [
+            {
+              "movie_id": 2571,
+              "title": "Matrix, The",
+              "year": 1999,
+              "genres": [
+                "Action",
+                "Sci-Fi",
+                "Thriller"
+              ],
+              "tmdb_id": 603,
+              "rating_count": 278,
+              "mean_rating": 4.19
+            }
+          ],
+          "missing": []
+        }
+      }
+    },
+    {
+      "name": "movie_4993",
+      "request": {
+        "method": "POST",
+        "path": "/v1/movies/batch",
+        "query": {},
+        "headers": {},
+        "body": {
+          "ids": [
+            4993
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "movies": [
+            {
+              "movie_id": 4993,
+              "title": "Lord of the Rings: The Fellowship of the Ring, The",
+              "year": 2001,
+              "genres": [
+                "Adventure",
+                "Fantasy"
+              ],
+              "tmdb_id": 120,
+              "rating_count": 198,
+              "mean_rating": 4.11
+            }
+          ],
+          "missing": []
+        }
+      }
+    },
+    {
+      "name": "movie_missing",
+      "request": {
+        "method": "POST",
+        "path": "/v1/movies/batch",
+        "query": {},
+        "headers": {},
+        "body": {
+          "ids": [
+            999999999
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "movies": [],
+          "missing": [
+            999999999
+          ]
+        }
+      }
+    },
+    {
+      "name": "empty_ids",
+      "request": {
+        "method": "POST",
+        "path": "/v1/movies/batch",
+        "query": {},
+        "headers": {},
+        "body": {
+          "ids": []
+        }
+      },
+      "response": {
+        "status": 400,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "error": {
+            "code": "bad_request",
+            "message": "ids must contain 1-200 movie ids"
+          }
+        }
+      }
+    },
+    {
+      "name": "invalid_json",
+      "request": {
+        "method": "POST",
+        "path": "/v1/movies/batch",
+        "query": {},
+        "headers": {},
+        "rawBody": "{not json"
+      },
+      "response": {
+        "status": 400,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "error": {
+            "code": "invalid_json",
+            "message": "request body is not valid JSON"
+          }
+        }
+      }
+    },
+    {
+      "name": "model_unavailable",
+      "request": {
+        "method": "POST",
+        "path": "/v1/movies/batch",
+        "query": {},
+        "headers": {},
+        "body": {
+          "ids": [
+            260,
+            1196,
+            1210
+          ]
+        }
+      },
+      "response": {
+        "status": 503,
+        "headers": {
+          "X-Model-Version": "none"
+        },
+        "body": {
+          "error": {
+            "code": "model_unavailable",
+            "message": "no verified artifact is loaded"
+          }
+        }
+      }
+    }
+  ]
+}

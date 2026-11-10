@@ -1,0 +1,41 @@
+{
+  "operationId": "healthz",
+  "cases": [
+    {
+      "name": "ok",
+      "request": {
+        "method": "GET",
+        "path": "/healthz",
+        "query": {},
+        "headers": {}
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "status": "ok"
+        }
+      }
+    },
+    {
+      "name": "unavailable",
+      "request": {
+        "method": "GET",
+        "path": "/healthz",
+        "query": {},
+        "headers": {}
+      },
+      "response": {
+        "status": 503,
+        "headers": {
+          "X-Model-Version": "none"
+        },
+        "body": {
+          "status": "unavailable"
+        }
+      }
+    }
+  ]
+}

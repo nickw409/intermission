@@ -1,0 +1,1 @@
+{ "k": 64, "lambda": 0.05, "lr": 0.007, "lr_decay": 0.95, "max_epochs": 40, "patience": 3, "init_sd": 0.1 }

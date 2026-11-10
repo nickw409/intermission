@@ -1,0 +1,171 @@
+{
+  "aggregates": {
+    "coverage@10": 0.1534
+  },
+  "cold_item_share": 0.0123,
+  "config": {
+    "features": "tfidf_tags+genres"
+  },
+  "counts": {
+    "n_items": 87585,
+    "n_train_ratings": 30411630,
+    "n_users": 200948,
+    "users_evaluated": 183412,
+    "users_without_relevant": 17536
+  },
+  "created_at": "2026-11-09T21:12:00Z",
+  "dataset": "ml-32m",
+  "eval_seconds": 35.2,
+  "evaluated_on": "test",
+  "foldin_jaccard@10": null,
+  "git_sha": "0288606",
+  "metrics": {
+    "map@10": {
+      "ci95": [
+        0.0132,
+        0.0146
+      ],
+      "mean": 0.0139
+    },
+    "mean_pop_rank@10": {
+      "ci95": [
+        4111.8,
+        4129.8
+      ],
+      "mean": 4120.8
+    },
+    "ndcg@10": {
+      "ci95": [
+        0.0189,
+        0.0207
+      ],
+      "mean": 0.0198
+    },
+    "precision@10": {
+      "ci95": [
+        0.0138,
+        0.015
+      ],
+      "mean": 0.0144
+    },
+    "recall@10": {
+      "ci95": [
+        0.0176,
+        0.0198
+      ],
+      "mean": 0.0187
+    },
+    "recall@50": {
+      "ci95": [
+        0.0597,
+        0.0625
+      ],
+      "mean": 0.0611
+    }
+  },
+  "model": "content",
+  "peak_rss_bytes": null,
+  "per_k": {
+    "ndcg": [
+      [
+        1,
+        0.0118
+      ],
+      [
+        5,
+        0.0153
+      ],
+      [
+        10,
+        0.0198
+      ],
+      [
+        20,
+        0.0228
+      ],
+      [
+        50,
+        0.0228
+      ]
+    ],
+    "precision": [
+      [
+        1,
+        0.0322
+      ],
+      [
+        5,
+        0.0184
+      ],
+      [
+        10,
+        0.0144
+      ],
+      [
+        20,
+        0.0113
+      ],
+      [
+        50,
+        0.0082
+      ]
+    ],
+    "recall": [
+      [
+        1,
+        0.0071
+      ],
+      [
+        5,
+        0.0172
+      ],
+      [
+        10,
+        0.0252
+      ],
+      [
+        20,
+        0.0369
+      ],
+      [
+        50,
+        0.0611
+      ]
+    ]
+  },
+  "rating_baselines": null,
+  "rating_metrics": null,
+  "run_id": "2026-11-09T21-12-00Z_content",
+  "schema_version": 1,
+  "seeds": {
+    "bootstrap": 42,
+    "model": 42,
+    "parity": 42,
+    "split": 42
+  },
+  "slices": {
+    "cold_users": {
+      "ndcg@10": {
+        "ci95": [
+          0.0212,
+          0.0254
+        ],
+        "mean": 0.0233
+      },
+      "train_ratings_lt": 20,
+      "users": 41203
+    }
+  },
+  "split": {
+    "min_ratings": 10,
+    "seed": 42,
+    "test_fraction": 0.2,
+    "test_max": 10,
+    "test_min": 1,
+    "val_fraction": 0.2
+  },
+  "split_hash": "3f1c00000000000000000000000000000000000000000000000000000000a9e2",
+  "train_seconds": 58.0,
+  "training_curve": [],
+  "training_curve_metric": ""
+}

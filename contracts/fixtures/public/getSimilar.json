@@ -1,0 +1,112 @@
+{
+  "operationId": "getSimilar",
+  "cases": [
+    {
+      "name": "ok",
+      "request": {
+        "method": "GET",
+        "path": "/api/movies/260/similar",
+        "query": {
+          "model": "knn",
+          "k": "3"
+        },
+        "headers": {}
+      },
+      "response": {
+        "status": 200,
+        "headers": {},
+        "body": {
+          "model": "knn",
+          "model_version": "2026-11-09T21-14-03Z",
+          "movieId": 260,
+          "items": [
+            {
+              "movieId": 1196,
+              "title": "Star Wars: Episode V - The Empire Strikes Back",
+              "year": 1980,
+              "similarity": 0.62
+            },
+            {
+              "movieId": 1210,
+              "title": "Star Wars: Episode VI - Return of the Jedi",
+              "year": 1983,
+              "similarity": 0.55
+            },
+            {
+              "movieId": 2571,
+              "title": "Matrix, The",
+              "year": 1999,
+              "similarity": 0.31
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "unknown_model",
+      "request": {
+        "method": "GET",
+        "path": "/api/movies/260/similar",
+        "query": {
+          "model": "als",
+          "k": "3"
+        },
+        "headers": {}
+      },
+      "response": {
+        "status": 400,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "unknown_model",
+            "message": "similar supports knn and content"
+          }
+        }
+      }
+    },
+    {
+      "name": "not_found",
+      "request": {
+        "method": "GET",
+        "path": "/api/movies/999999999/similar",
+        "query": {
+          "model": "knn",
+          "k": "3"
+        },
+        "headers": {}
+      },
+      "response": {
+        "status": 404,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "not_found",
+            "message": "movie not found"
+          }
+        }
+      }
+    },
+    {
+      "name": "model_unavailable",
+      "request": {
+        "method": "GET",
+        "path": "/api/movies/260/similar",
+        "query": {
+          "model": "knn",
+          "k": "3"
+        },
+        "headers": {}
+      },
+      "response": {
+        "status": 503,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "model_unavailable",
+            "message": "the recommendation service is unavailable"
+          }
+        }
+      }
+    }
+  ]
+}

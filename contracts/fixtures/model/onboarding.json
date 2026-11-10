@@ -1,0 +1,115 @@
+{
+  "operationId": "onboarding",
+  "cases": [
+    {
+      "name": "ok",
+      "request": {
+        "method": "POST",
+        "path": "/v1/onboarding",
+        "query": {},
+        "headers": {},
+        "body": {
+          "n": 4,
+          "exclude": [
+            260,
+            2571,
+            296,
+            1,
+            318
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "movie_ids": [
+            356,
+            4993,
+            593,
+            480
+          ]
+        }
+      }
+    },
+    {
+      "name": "invalid_json",
+      "request": {
+        "method": "POST",
+        "path": "/v1/onboarding",
+        "query": {},
+        "headers": {},
+        "rawBody": "{not json"
+      },
+      "response": {
+        "status": 400,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "error": {
+            "code": "invalid_json",
+            "message": "request body is not valid JSON"
+          }
+        }
+      }
+    },
+    {
+      "name": "bad_n",
+      "request": {
+        "method": "POST",
+        "path": "/v1/onboarding",
+        "query": {},
+        "headers": {},
+        "body": {
+          "n": 0
+        }
+      },
+      "response": {
+        "status": 400,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "error": {
+            "code": "bad_request",
+            "message": "n must be between 1 and 100"
+          }
+        }
+      }
+    },
+    {
+      "name": "model_unavailable",
+      "request": {
+        "method": "POST",
+        "path": "/v1/onboarding",
+        "query": {},
+        "headers": {},
+        "body": {
+          "n": 4,
+          "exclude": [
+            260,
+            2571,
+            296,
+            1,
+            318
+          ]
+        }
+      },
+      "response": {
+        "status": 503,
+        "headers": {
+          "X-Model-Version": "none"
+        },
+        "body": {
+          "error": {
+            "code": "model_unavailable",
+            "message": "no verified artifact is loaded"
+          }
+        }
+      }
+    }
+  ]
+}

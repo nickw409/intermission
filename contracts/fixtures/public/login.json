@@ -1,0 +1,157 @@
+{
+  "operationId": "login",
+  "cases": [
+    {
+      "name": "ok",
+      "request": {
+        "method": "POST",
+        "path": "/api/auth/login",
+        "query": {},
+        "headers": {
+          "Origin": "https://intermission.example",
+          "X-Requested-With": "recs"
+        },
+        "body": {
+          "username": "alice",
+          "password": "correct horse battery"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Set-Cookie": "session=fixture-session-token; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000"
+        },
+        "body": {
+          "username": "alice",
+          "rating_count": 5,
+          "created_at": 1794256680
+        }
+      }
+    },
+    {
+      "name": "invalid_json",
+      "request": {
+        "method": "POST",
+        "path": "/api/auth/login",
+        "query": {},
+        "headers": {
+          "Origin": "https://intermission.example",
+          "X-Requested-With": "recs"
+        },
+        "rawBody": "{not json"
+      },
+      "response": {
+        "status": 400,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "invalid_json",
+            "message": "request body is not valid JSON"
+          }
+        }
+      }
+    },
+    {
+      "name": "invalid_credentials",
+      "request": {
+        "method": "POST",
+        "path": "/api/auth/login",
+        "query": {},
+        "headers": {
+          "Origin": "https://intermission.example",
+          "X-Requested-With": "recs"
+        },
+        "body": {
+          "username": "alice",
+          "password": "wrong password!"
+        }
+      },
+      "response": {
+        "status": 401,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "invalid_credentials",
+            "message": "invalid username or password"
+          }
+        }
+      }
+    },
+    {
+      "name": "csrf_rejected",
+      "request": {
+        "method": "POST",
+        "path": "/api/auth/login",
+        "query": {},
+        "headers": {
+          "Origin": "https://intermission.example"
+        },
+        "body": {
+          "username": "alice",
+          "password": "correct horse battery"
+        }
+      },
+      "response": {
+        "status": 403,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "csrf_rejected",
+            "message": "missing or invalid X-Requested-With or Origin"
+          }
+        }
+      }
+    },
+    {
+      "name": "body_too_large",
+      "request": {
+        "method": "POST",
+        "path": "/api/auth/login",
+        "query": {},
+        "headers": {
+          "Origin": "https://intermission.example",
+          "X-Requested-With": "recs"
+        },
+        "rawBodyBytes": 65537
+      },
+      "response": {
+        "status": 413,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "body_too_large",
+            "message": "request body exceeds 64 KB"
+          }
+        }
+      }
+    },
+    {
+      "name": "rate_limited",
+      "request": {
+        "method": "POST",
+        "path": "/api/auth/login",
+        "query": {},
+        "headers": {
+          "Origin": "https://intermission.example",
+          "X-Requested-With": "recs"
+        },
+        "body": {
+          "username": "alice",
+          "password": "correct horse battery"
+        }
+      },
+      "response": {
+        "status": 429,
+        "headers": {
+          "Retry-After": "30"
+        },
+        "body": {
+          "error": {
+            "code": "rate_limited",
+            "message": "too many requests"
+          }
+        }
+      }
+    }
+  ]
+}

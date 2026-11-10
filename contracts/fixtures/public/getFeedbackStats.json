@@ -1,0 +1,50 @@
+{
+  "operationId": "getFeedbackStats",
+  "cases": [
+    {
+      "name": "ok",
+      "request": {
+        "method": "GET",
+        "path": "/api/feedback/stats",
+        "query": {},
+        "headers": {}
+      },
+      "response": {
+        "status": 200,
+        "headers": {},
+        "body": {
+          "items": [
+            {
+              "model": "als",
+              "impressions": 1240,
+              "clicks": 87,
+              "not_interested": 21,
+              "ctr": 0.07016129032258064
+            },
+            {
+              "model": "knn",
+              "impressions": 1180,
+              "clicks": 64,
+              "not_interested": 30,
+              "ctr": 0.05423728813559322
+            },
+            {
+              "model": "pop",
+              "impressions": 1310,
+              "clicks": 41,
+              "not_interested": 55,
+              "ctr": 0.031297709923664124
+            },
+            {
+              "model": "content",
+              "impressions": 0,
+              "clicks": 0,
+              "not_interested": 0,
+              "ctr": null
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+# gitleaks config: the default ruleset, plus project-specific rules. Do not add broad allowlists;
+# if a fixture trips a rule, change the fixture to an obviously fake value instead.
+[extend]
+useDefault = true
+
+[[rules]]
+id = "tmdb-api-key"
+description = "TMDB v3 API key or v4 read token assigned in config or env files"
+regex = '''(?i)tmdb[_-]?(api[_-]?)?(key|token)\s*[:=]\s*["']?([a-z0-9]{32}|eyJ[a-zA-Z0-9_\-\.]{40,})'''
+keywords = ["tmdb"]

@@ -1,0 +1,573 @@
+openapi: 3.1.0
+info:
+  title: Intermission public API (recs-api)
+  version: 1.0.0
+  description: |
+    Served by recs-api under /api, same origin as the web UI. FROZEN after Wave 0: changes go
+    through the orchestrator and must update contracts/fixtures/public at the same time.
+
+    Conventions:
+    - Movie IDs are MovieLens movieId. Dense indices never leave the server.
+    - Every error uses the Error schema with the matching 4xx/5xx status.
+    - Mutating requests (POST, PUT, DELETE) must send `Origin` equal to the site origin and
+      `X-Requested-With: recs`, or they are rejected with 403 `csrf_rejected`.
+    - Session cookie: `session`, HttpOnly; Secure; SameSite=Lax; Path=/. Routes marked with the
+      `session` security scheme return 401 `unauthorized` without a valid session.
+    - Request bodies are capped at 64 KB (413 `body_too_large`).
+    - Every response carries `X-Request-ID`.
+servers:
+  - url: /
+security: []
+tags:
+  - name: auth
+  - name: account
+  - name: movies
+  - name: ratings
+  - name: recommendations
+  - name: models
+  - name: reports
+paths:
+  /api/auth/signup:
+    post:
+      tags: [auth]
+      operationId: signup
+      summary: Create an account and start a session.
+      description: |
+        `invite_code` is required while signup_mode = invite. Password: 10–128 characters.
+        Username: 3–32 characters of [A-Za-z0-9_.-].
+
+        Check order (frozen, so unauthenticated callers can't probe usernames):
+        1. Body shape and field rules → 400 `bad_request` / `invalid_json`.
+        2. In invite mode, the invite code is checked (without consuming it). Invalid, expired and
+           used-up codes all return the same 400 `invalid_invite`, before any username lookup.
+        3. Only then is the username checked → 409 `username_taken`. The invite is NOT consumed.
+        4. The user is created and the invite's `used_count` incremented in one transaction.
+        So `username_taken` is reachable only with a valid invite. In `open` mode it is reachable by
+        anyone; that is inherent to open signup and accepted by the owner when switching modes.
+      parameters: [{ $ref: '#/components/parameters/XRequestedWith' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SignupRequest' }
+      responses:
+        '201':
+          description: Created; Set-Cookie starts the session.
+          headers: { Set-Cookie: { $ref: '#/components/headers/SetSession' } }
+          content: { application/json: { schema: { $ref: '#/components/schemas/Me' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+  /api/auth/login:
+    post:
+      tags: [auth]
+      operationId: login
+      summary: Start a session (rotates any existing session).
+      description: |
+        Unknown username and wrong password both return 401 `invalid_credentials`, with the same
+        timing (one Argon2id hash either way). The per-account rate limiter is keyed on the
+        submitted, case-folded username whether or not the account exists, so a 429 reveals nothing.
+      parameters: [{ $ref: '#/components/parameters/XRequestedWith' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Logged in.
+          headers: { Set-Cookie: { $ref: '#/components/headers/SetSession' } }
+          content: { application/json: { schema: { $ref: '#/components/schemas/Me' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+  /api/auth/logout:
+    post:
+      tags: [auth]
+      operationId: logout
+      security: [{ session: [] }]
+      parameters: [{ $ref: '#/components/parameters/XRequestedWith' }]
+      responses:
+        '204': { description: Session deleted; cookie cleared. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/me:
+    get:
+      tags: [account]
+      operationId: getMe
+      security: [{ session: [] }]
+      responses:
+        '200': { description: The current user., content: { application/json: { schema: { $ref: '#/components/schemas/Me' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    delete:
+      tags: [account]
+      operationId: deleteMe
+      summary: Delete the account and everything it owns.
+      security: [{ session: [] }]
+      parameters: [{ $ref: '#/components/parameters/XRequestedWith' }]
+      responses:
+        '204': { description: Deleted; cookie cleared. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/movies/search:
+    get:
+      tags: [movies]
+      operationId: searchMovies
+      summary: Case- and accent-insensitive title search; prefix matches first, then by popularity.
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 100 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 20 } }
+      responses:
+        '200': { description: Matches., content: { application/json: { schema: { $ref: '#/components/schemas/MovieList' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '503': { $ref: '#/components/responses/ModelUnavailable' }
+  /api/movies/{movieId}:
+    get:
+      tags: [movies]
+      operationId: getMovie
+      parameters: [{ $ref: '#/components/parameters/MovieId' }]
+      responses:
+        '200': { description: Movie details., content: { application/json: { schema: { $ref: '#/components/schemas/Movie' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/ModelUnavailable' }
+  /api/movies/{movieId}/similar:
+    get:
+      tags: [movies]
+      operationId: getSimilar
+      parameters:
+        - { $ref: '#/components/parameters/MovieId' }
+        - { name: model, in: query, schema: { type: string, enum: [knn, content], default: knn } }
+        - { $ref: '#/components/parameters/K' }
+      responses:
+        '200': { description: Neighbours., content: { application/json: { schema: { $ref: '#/components/schemas/SimilarResponse' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/ModelUnavailable' }
+  /api/onboarding:
+    get:
+      tags: [movies]
+      operationId: getOnboarding
+      summary: Popular, genre-diverse movies the user hasn't rated.
+      security: [{ session: [] }]
+      parameters:
+        - { name: n, in: query, schema: { type: integer, minimum: 1, maximum: 60, default: 30 } }
+      responses:
+        '200': { description: Movies to rate., content: { application/json: { schema: { $ref: '#/components/schemas/MovieList' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ModelUnavailable' }
+  /api/ratings:
+    get:
+      tags: [ratings]
+      operationId: listRatings
+      summary: The user's ratings, newest first. Titles come from recs-api's movie cache, so this works while recs-model is down.
+      security: [{ session: [] }]
+      responses:
+        '200': { description: Ratings., content: { application/json: { schema: { $ref: '#/components/schemas/RatingList' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/ratings/{movieId}:
+    put:
+      tags: [ratings]
+      operationId: putRating
+      summary: Create or update a rating (0.5–5.0 in 0.5 steps). At most 5,000 ratings per user.
+      description: |
+        Unknown movie → 404 `not_found`. A 5,001st rating → 409 `too_many_ratings`.
+        recs-api validates the movie against its own movie cache (a SQLite table filled from every
+        recs-model `/v1/movies/batch`, search, onboarding and recommendation response it sees), so
+        rating a movie the site has shown keeps working while recs-model is down. Only a movie
+        recs-api has never seen, while recs-model is down, returns 503 `model_unavailable`.
+      security: [{ session: [] }]
+      parameters: [{ $ref: '#/components/parameters/MovieId' }, { $ref: '#/components/parameters/XRequestedWith' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/PutRatingRequest' } } }
+      responses:
+        '200': { description: Saved., content: { application/json: { schema: { $ref: '#/components/schemas/Rating' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '503': { $ref: '#/components/responses/ModelUnavailable' }
+    delete:
+      tags: [ratings]
+      operationId: deleteRating
+      security: [{ session: [] }]
+      parameters: [{ $ref: '#/components/parameters/MovieId' }, { $ref: '#/components/parameters/XRequestedWith' }]
+      responses:
+        '204': { description: Deleted (also when there was no rating). }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/recommend:
+    get:
+      tags: [recommendations]
+      operationId: recommend
+      summary: Top-k for one model. With fewer than 5 ratings, cold_start is true and popularity results are returned.
+      security: [{ session: [] }]
+      parameters:
+        - { name: model, in: query, schema: { $ref: '#/components/schemas/ModelName' } }
+        - { $ref: '#/components/parameters/K' }
+      responses:
+        '200': { description: Recommendations., headers: { X-Model-Version: { $ref: '#/components/headers/ModelVersion' } }, content: { application/json: { schema: { $ref: '#/components/schemas/RecommendResponse' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/ModelUnavailable' }
+  /api/recommend/compare:
+    get:
+      tags: [recommendations]
+      operationId: compare
+      summary: One list per model for the side-by-side view.
+      security: [{ session: [] }]
+      parameters:
+        - name: models
+          in: query
+          required: true
+          description: Comma-separated, 1–5 distinct model names.
+          schema: { type: string, maxLength: 64, pattern: '^[a-z_]+(,[a-z_]+){0,4}$', examples: ['pop,knn,als'] }
+        - { $ref: '#/components/parameters/K' }
+      responses:
+        '200': { description: Lists., headers: { X-Model-Version: { $ref: '#/components/headers/ModelVersion' } }, content: { application/json: { schema: { $ref: '#/components/schemas/CompareResponse' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/ModelUnavailable' }
+  /api/feedback:
+    post:
+      tags: [recommendations]
+      operationId: postFeedback
+      summary: Online feedback (phase 6).
+      security: [{ session: [] }]
+      parameters: [{ $ref: '#/components/parameters/XRequestedWith' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/FeedbackRequest' } } }
+      responses:
+        '204': { description: Recorded. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+  /api/feedback/stats:
+    get:
+      tags: [recommendations]
+      operationId: getFeedbackStats
+      summary: Click-through rate per model, aggregated over all users (phase 6; Evaluation page).
+      responses:
+        '200': { description: Per-model counts., content: { application/json: { schema: { $ref: '#/components/schemas/FeedbackStats' } } } }
+  /api/models:
+    get:
+      tags: [models]
+      operationId: listModels
+      responses:
+        '200': { description: Loaded models., content: { application/json: { schema: { $ref: '#/components/schemas/ModelsResponse' } } } }
+        '503': { $ref: '#/components/responses/ModelUnavailable' }
+  /api/reports:
+    get:
+      tags: [reports]
+      operationId: listReports
+      responses:
+        '200': { description: "Run report summaries, newest first.", content: { application/json: { schema: { $ref: '#/components/schemas/ReportList' } } } }
+  /api/reports/{runId}:
+    get:
+      tags: [reports]
+      operationId: getReport
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema: { type: string, pattern: '^[A-Za-z0-9_-]{1,100}$' }
+          description: Only IDs present in the listing are served (recs-api never builds a file path from user input beyond an exact match against its listing).
+      responses:
+        '200':
+          description: |
+            The full run report. For schema_version 1 the body validates against
+            contracts/report.schema.json. Reports with a schema_version recs-api doesn't know are
+            served as-is; the UI must refuse to render unknown majors.
+          content: { application/json: { schema: { $ref: '#/components/schemas/AnyReport' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/posters/{movieId}:
+    get:
+      tags: [movies]
+      operationId: getPoster
+      summary: Poster proxied from TMDB (w342) and cached on disk. Never 5xx; returns an SVG placeholder on any failure.
+      description: Upstream TMDB fetches are globally rate limited; when the limit is hit, uncached posters get the placeholder (still 200), so the TMDB quota and the disk cache can't be drained.
+      parameters: [{ $ref: '#/components/parameters/MovieId' }]
+      responses:
+        '200':
+          description: Image.
+          content:
+            image/jpeg: { schema: { type: string, format: binary } }
+            image/svg+xml: { schema: { type: string } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+  /healthz:
+    get:
+      operationId: healthz
+      summary: Liveness and model-loaded check. Reveals nothing beyond up or down.
+      responses:
+        '200': { description: Up., content: { application/json: { schema: { $ref: '#/components/schemas/Health' } } } }
+        '503': { description: Degraded (model unavailable)., content: { application/json: { schema: { $ref: '#/components/schemas/Health' } } } }
+components:
+  securitySchemes:
+    session: { type: apiKey, in: cookie, name: session }
+  parameters:
+    MovieId: { name: movieId, in: path, required: true, schema: { type: integer, minimum: 1, maximum: 2147483647 } }
+    K: { name: k, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+    XRequestedWith: { name: X-Requested-With, in: header, required: true, schema: { type: string, const: recs } }
+  headers:
+    SetSession: { description: 'session=<token>; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000', schema: { type: string } }
+    ModelVersion: { description: Artifact version that produced the response., schema: { type: string } }
+  responses:
+    BadRequest: { description: "Invalid input (bad_request, invalid_json, invalid_invite, unknown_model).", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    Unauthorized: { description: No valid session (unauthorized) or bad login (invalid_credentials)., content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    Forbidden: { description: CSRF check failed (csrf_rejected)., content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    NotFound: { description: not_found., content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    Conflict: { description: username_taken or too_many_ratings., content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    TooLarge: { description: body_too_large., content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    RateLimited: { description: rate_limited (with Retry-After)., headers: { Retry-After: { schema: { type: integer } } }, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    ModelUnavailable: { description: model_unavailable — recs-model is down or timed out., content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+  schemas:
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code: { $ref: '#/components/schemas/ErrorCode' }
+            message: { type: string }
+    ErrorCode:
+      type: string
+      enum: [bad_request, invalid_json, body_too_large, unauthorized, invalid_credentials, csrf_rejected,
+             invalid_invite, username_taken, too_many_ratings, not_found, unknown_model,
+             rate_limited, model_unavailable, internal]
+    ModelName:
+      type: string
+      description: hybrid and mmr are reserved for phase 6 and are not loaded before then (unknown_model).
+      enum: [pop, pop_count, knn, content, mf, als, hybrid, mmr]
+    SignupRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username: { type: string, minLength: 3, maxLength: 32, pattern: '^[A-Za-z0-9_.-]+$' }
+        password: { type: string, minLength: 10, maxLength: 128 }
+        invite_code: { type: string, maxLength: 64 }
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username: { type: string, maxLength: 64 }
+        password: { type: string, maxLength: 128 }
+    Me:
+      type: object
+      additionalProperties: false
+      required: [username, rating_count, created_at]
+      properties:
+        username: { type: string }
+        rating_count: { type: integer, minimum: 0 }
+        created_at: { type: integer, description: Unix seconds }
+    MovieSummary:
+      type: object
+      additionalProperties: false
+      required: [movieId, title, year, genres]
+      properties:
+        movieId: { type: integer }
+        title: { type: string }
+        year: { type: [integer, 'null'] }
+        genres: { type: array, items: { type: string } }
+    Movie:
+      type: object
+      additionalProperties: false
+      required: [movieId, title, year, genres, rating_count, mean_rating, tmdbId, user_rating]
+      properties:
+        movieId: { type: integer }
+        title: { type: string }
+        year: { type: [integer, 'null'] }
+        genres: { type: array, items: { type: string } }
+        rating_count: { type: integer, minimum: 0 }
+        mean_rating: { type: [number, 'null'] }
+        tmdbId: { type: [integer, 'null'] }
+        user_rating: { type: [number, 'null'], description: "The caller's rating if logged in and rated, else null. Responses that include a session-dependent value are sent with Cache-Control: private, no-store." }
+    MovieList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/MovieSummary' } }
+    SimilarItem:
+      type: object
+      additionalProperties: false
+      required: [movieId, title, year, similarity]
+      properties:
+        movieId: { type: integer }
+        title: { type: string }
+        year: { type: [integer, 'null'] }
+        similarity: { type: number }
+    SimilarResponse:
+      type: object
+      additionalProperties: false
+      required: [model, model_version, movieId, items]
+      properties:
+        model: { type: string, enum: [knn, content] }
+        model_version: { type: string }
+        movieId: { type: integer }
+        items: { type: array, items: { $ref: '#/components/schemas/SimilarItem' } }
+    Rating:
+      type: object
+      additionalProperties: false
+      required: [movieId, title, year, rating, updated_at]
+      properties:
+        movieId: { type: integer }
+        title: { type: string }
+        year: { type: [integer, 'null'] }
+        rating: { $ref: '#/components/schemas/RatingValue' }
+        updated_at: { type: integer, description: Unix seconds }
+    RatingValue: { type: number, minimum: 0.5, maximum: 5.0, multipleOf: 0.5 }
+    RatingList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Rating' } }
+    PutRatingRequest:
+      type: object
+      additionalProperties: false
+      required: [rating]
+      properties:
+        rating: { $ref: '#/components/schemas/RatingValue' }
+    Because:
+      type: object
+      additionalProperties: false
+      required: [movieId, title, weight]
+      properties:
+        movieId: { type: integer }
+        title: { type: string }
+        weight: { type: number }
+    RecItem:
+      type: object
+      additionalProperties: false
+      required: [movieId, title, year, score, because]
+      properties:
+        movieId: { type: integer }
+        title: { type: string }
+        year: { type: [integer, 'null'] }
+        score: { type: number }
+        because: { type: array, maxItems: 3, items: { $ref: '#/components/schemas/Because' } }
+    RecommendResponse:
+      type: object
+      additionalProperties: false
+      required: [model, model_version, items, cold_start]
+      properties:
+        model: { $ref: '#/components/schemas/ModelName', description: The model that produced the items (pop when cold_start). }
+        model_version: { type: string }
+        items: { type: array, items: { $ref: '#/components/schemas/RecItem' } }
+        cold_start: { type: boolean }
+    CompareResponse:
+      type: object
+      additionalProperties: false
+      required: [model_version, cold_start, results]
+      properties:
+        model_version: { type: string }
+        cold_start: { type: boolean }
+        results:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [model, items]
+            properties:
+              model: { $ref: '#/components/schemas/ModelName' }
+              items: { type: array, items: { $ref: '#/components/schemas/RecItem' } }
+    FeedbackRequest:
+      type: object
+      additionalProperties: false
+      required: [movieId, model, action]
+      properties:
+        movieId: { type: integer, minimum: 1 }
+        model: { $ref: '#/components/schemas/ModelName' }
+        action: { type: string, enum: [impression, click, not_interested] }
+    ModelsResponse:
+      type: object
+      additionalProperties: false
+      required: [artifact_version, trained_at, models, default_model]
+      properties:
+        artifact_version: { type: string }
+        trained_at: { type: string, format: date-time }
+        default_model: { $ref: '#/components/schemas/ModelName' }
+        models: { type: array, items: { $ref: '#/components/schemas/ModelName' } }
+    Estimate:
+      type: object
+      additionalProperties: false
+      required: [mean, ci95]
+      properties:
+        mean: { type: number }
+        ci95: { type: array, minItems: 2, maxItems: 2, items: { type: number } }
+    AnyReport:
+      type: object
+      required: [schema_version]
+      properties:
+        schema_version: { type: integer }
+    ReportSummary:
+      type: object
+      additionalProperties: false
+      description: For a report with an unknown schema_version, only run_id and schema_version are reliable; every other field is null and the UI shows it as unsupported.
+      required: [run_id, schema_version, model, dataset, evaluated_on, created_at, config, headline]
+      properties:
+        run_id: { type: string }
+        schema_version: { type: integer }
+        model: { type: [string, 'null'] }
+        dataset: { type: [string, 'null'] }
+        evaluated_on: { type: [string, 'null'], enum: [test, validation, null] }
+        created_at: { type: [string, 'null'], format: date-time }
+        config: { type: [object, 'null'], description: "The run's model config (labels runs in the run picker, e.g. k = 32 vs 128)." }
+        headline:
+          type: [object, 'null']
+          additionalProperties: false
+          required: ['ndcg@10', 'recall@50', 'coverage@10']
+          properties:
+            'ndcg@10': { $ref: '#/components/schemas/Estimate' }
+            'recall@50': { $ref: '#/components/schemas/Estimate' }
+            'coverage@10': { type: number }
+    ReportList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/ReportSummary' } }
+    Health:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: { type: string, enum: [ok, degraded], description: degraded = recs-api is up but recs-model is unavailable. }
+    FeedbackStats:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [model, impressions, clicks, not_interested, ctr]
+            properties:
+              model: { $ref: '#/components/schemas/ModelName' }
+              impressions: { type: integer, minimum: 0 }
+              clicks: { type: integer, minimum: 0 }
+              not_interested: { type: integer, minimum: 0 }
+              ctr: { type: [number, 'null'], description: clicks / impressions; null with no impressions. }

@@ -1,0 +1,163 @@
+{
+  "operationId": "postFeedback",
+  "cases": [
+    {
+      "name": "ok",
+      "request": {
+        "method": "POST",
+        "path": "/api/feedback",
+        "query": {},
+        "headers": {
+          "Origin": "https://intermission.example",
+          "X-Requested-With": "recs",
+          "Cookie": "session=fixture-session-token"
+        },
+        "body": {
+          "movieId": 2959,
+          "model": "als",
+          "action": "not_interested"
+        }
+      },
+      "response": {
+        "status": 204,
+        "headers": {}
+      }
+    },
+    {
+      "name": "bad_action",
+      "request": {
+        "method": "POST",
+        "path": "/api/feedback",
+        "query": {},
+        "headers": {
+          "Origin": "https://intermission.example",
+          "X-Requested-With": "recs",
+          "Cookie": "session=fixture-session-token"
+        },
+        "body": {
+          "movieId": 2959,
+          "model": "als",
+          "action": "love"
+        }
+      },
+      "response": {
+        "status": 400,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "bad_request",
+            "message": "action must be impression, click or not_interested"
+          }
+        }
+      }
+    },
+    {
+      "name": "unauthorized",
+      "request": {
+        "method": "POST",
+        "path": "/api/feedback",
+        "query": {},
+        "headers": {
+          "Origin": "https://intermission.example",
+          "X-Requested-With": "recs"
+        },
+        "body": {
+          "movieId": 2959,
+          "model": "als",
+          "action": "not_interested"
+        }
+      },
+      "response": {
+        "status": 401,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "unauthorized",
+            "message": "not logged in"
+          }
+        }
+      }
+    },
+    {
+      "name": "csrf_rejected",
+      "request": {
+        "method": "POST",
+        "path": "/api/feedback",
+        "query": {},
+        "headers": {
+          "Origin": "https://intermission.example",
+          "Cookie": "session=fixture-session-token"
+        },
+        "body": {
+          "movieId": 2959,
+          "model": "als",
+          "action": "not_interested"
+        }
+      },
+      "response": {
+        "status": 403,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "csrf_rejected",
+            "message": "missing or invalid X-Requested-With or Origin"
+          }
+        }
+      }
+    },
+    {
+      "name": "body_too_large",
+      "request": {
+        "method": "POST",
+        "path": "/api/feedback",
+        "query": {},
+        "headers": {
+          "Origin": "https://intermission.example",
+          "X-Requested-With": "recs",
+          "Cookie": "session=fixture-session-token"
+        },
+        "rawBodyBytes": 65537
+      },
+      "response": {
+        "status": 413,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "body_too_large",
+            "message": "request body exceeds 64 KB"
+          }
+        }
+      }
+    },
+    {
+      "name": "rate_limited",
+      "request": {
+        "method": "POST",
+        "path": "/api/feedback",
+        "query": {},
+        "headers": {
+          "Origin": "https://intermission.example",
+          "X-Requested-With": "recs",
+          "Cookie": "session=fixture-session-token"
+        },
+        "body": {
+          "movieId": 2959,
+          "model": "als",
+          "action": "click"
+        }
+      },
+      "response": {
+        "status": 429,
+        "headers": {
+          "Retry-After": "30"
+        },
+        "body": {
+          "error": {
+            "code": "rate_limited",
+            "message": "too many requests"
+          }
+        }
+      }
+    }
+  ]
+}

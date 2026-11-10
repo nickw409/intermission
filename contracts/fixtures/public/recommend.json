@@ -1,0 +1,225 @@
+{
+  "operationId": "recommend",
+  "cases": [
+    {
+      "name": "ok",
+      "request": {
+        "method": "GET",
+        "path": "/api/recommend",
+        "query": {
+          "model": "als",
+          "k": "3"
+        },
+        "headers": {
+          "Cookie": "session=fixture-session-token"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "model": "als",
+          "model_version": "2026-11-09T21-14-03Z",
+          "items": [
+            {
+              "movieId": 4993,
+              "title": "Lord of the Rings: The Fellowship of the Ring, The",
+              "year": 2001,
+              "score": 0.83,
+              "because": [
+                {
+                  "movieId": 260,
+                  "title": "Star Wars: Episode IV - A New Hope",
+                  "weight": 0.41
+                },
+                {
+                  "movieId": 2571,
+                  "title": "Matrix, The",
+                  "weight": 0.22
+                }
+              ]
+            },
+            {
+              "movieId": 1196,
+              "title": "Star Wars: Episode V - The Empire Strikes Back",
+              "year": 1980,
+              "score": 0.79,
+              "because": [
+                {
+                  "movieId": 260,
+                  "title": "Star Wars: Episode IV - A New Hope",
+                  "weight": 0.52
+                }
+              ]
+            },
+            {
+              "movieId": 2959,
+              "title": "Fight Club",
+              "year": 1999,
+              "score": 0.71,
+              "because": [
+                {
+                  "movieId": 2571,
+                  "title": "Matrix, The",
+                  "weight": 0.38
+                },
+                {
+                  "movieId": 296,
+                  "title": "Pulp Fiction",
+                  "weight": 0.3
+                }
+              ]
+            }
+          ],
+          "cold_start": false
+        }
+      }
+    },
+    {
+      "name": "ok_cold_start",
+      "request": {
+        "method": "GET",
+        "path": "/api/recommend",
+        "query": {
+          "model": "als",
+          "k": "3"
+        },
+        "headers": {
+          "Cookie": "session=fixture-session-token-bob"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "model": "pop",
+          "model_version": "2026-11-09T21-14-03Z",
+          "items": [
+            {
+              "movieId": 318,
+              "title": "Shawshank Redemption, The",
+              "year": 1994,
+              "score": 4.37,
+              "because": []
+            },
+            {
+              "movieId": 356,
+              "title": "Forrest Gump",
+              "year": 1994,
+              "score": 4.12,
+              "because": []
+            },
+            {
+              "movieId": 296,
+              "title": "Pulp Fiction",
+              "year": 1994,
+              "score": 4.11,
+              "because": []
+            }
+          ],
+          "cold_start": true
+        }
+      }
+    },
+    {
+      "name": "unknown_model",
+      "request": {
+        "method": "GET",
+        "path": "/api/recommend",
+        "query": {
+          "model": "svd",
+          "k": "3"
+        },
+        "headers": {
+          "Cookie": "session=fixture-session-token"
+        }
+      },
+      "response": {
+        "status": 400,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "unknown_model",
+            "message": "unknown model \"svd\""
+          }
+        }
+      }
+    },
+    {
+      "name": "unauthorized",
+      "request": {
+        "method": "GET",
+        "path": "/api/recommend",
+        "query": {
+          "model": "als",
+          "k": "3"
+        },
+        "headers": {}
+      },
+      "response": {
+        "status": 401,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "unauthorized",
+            "message": "not logged in"
+          }
+        }
+      }
+    },
+    {
+      "name": "rate_limited",
+      "request": {
+        "method": "GET",
+        "path": "/api/recommend",
+        "query": {
+          "model": "als",
+          "k": "3"
+        },
+        "headers": {
+          "Cookie": "session=fixture-session-token"
+        }
+      },
+      "response": {
+        "status": 429,
+        "headers": {
+          "Retry-After": "30"
+        },
+        "body": {
+          "error": {
+            "code": "rate_limited",
+            "message": "too many requests"
+          }
+        }
+      }
+    },
+    {
+      "name": "model_unavailable",
+      "request": {
+        "method": "GET",
+        "path": "/api/recommend",
+        "query": {
+          "model": "als",
+          "k": "3"
+        },
+        "headers": {
+          "Cookie": "session=fixture-session-token"
+        }
+      },
+      "response": {
+        "status": 503,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "model_unavailable",
+            "message": "the recommendation service is unavailable"
+          }
+        }
+      }
+    }
+  ]
+}

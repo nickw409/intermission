@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://intermission.local/contracts/comparison.schema.json",
+  "title": "Paired comparison of two runs",
+  "description": "Written by `recs-train compare --a <run_id> --b <run_id>` to data/reports/comparisons/<a>__vs__<b>.json. Both runs must share split_hash and evaluated_on. Paired bootstrap over the users common to both (users with a relevant item for ranking metrics). Aggregates only \u2014 safe to publish. FROZEN after Wave 0.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "a",
+    "b",
+    "split_hash",
+    "evaluated_on",
+    "resamples",
+    "seed",
+    "metrics"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "a": {
+      "type": "object",
+      "required": [
+        "run_id",
+        "model"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "run_id": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        }
+      }
+    },
+    "b": {
+      "type": "object",
+      "required": [
+        "run_id",
+        "model"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "run_id": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        }
+      }
+    },
+    "split_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "evaluated_on": {
+      "enum": [
+        "test",
+        "validation"
+      ]
+    },
+    "resamples": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "seed": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "metrics": {
+      "type": "object",
+      "description": "Keyed by metric name (ndcg@10, recall@50, ..., rmse when both runs predict ratings). delta = a \u2212 b (for rmse, a lower value is better).",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "users",
+          "mean_delta",
+          "ci95",
+          "excludes_zero"
+        ],
+        "properties": {
+          "users": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "mean_delta": {
+            "type": "number"
+          },
+          "ci95": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": {
+              "type": "number"
+            }
+          },
+          "excludes_zero": {
+            "type": "boolean"
+          }
+        }
+      }
+    }
+  }
+}

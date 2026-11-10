@@ -98,22 +98,22 @@ early (⏩).
 
 | ID | Workstream | Owns (exclusive write) | Phase |
 |---|---|---|---|
-| S | Spine (orchestrator) | top-level CMake, presets, `contracts/`, `core/include/recs/*.hpp` (interfaces), wiring files, `tests/fixtures/`, `.gitignore`, `tools/` | 0 |
-| A | Data & ingest | `core/src/data/`, `core/src/sparse/`, `train/cmd_ingest.cpp`, `tests/core/data/`, `tests/core/sparse/` | 0 |
+| S | Spine (orchestrator) | top-level CMake, presets, `cmake/`, `contracts/`, `configs/`, `core/include/recs/*.hpp` (interfaces), `core/src/{util,foldin,sparse}/`, `core/src/data/make_dataset.cpp`, `core/src/models/registry.cpp`, `api/cmd/recs-api/main.go`, `api/internal/{app,apperr,reqid,contractsdir}/`, `api/internal/modelclient/{client.go,fake/}`, `api/Makefile`, `web/src/routes.tsx`, `web/src/api/`, `train/main.cpp`, `train/commands.hpp`, `tests/support/`, `tests/fixtures/`, `tests/core/spine/`, `.github/`, `.gitignore`, `.gitleaks.toml`, `tools/` | 0 |
+| A | Data & ingest | `core/src/data/{csv,movielens,cache}.cpp`, `train/cmd_ingest.cpp`, `tests/core/data/` | 0 |
 | B | Split, metrics, bootstrap, reports | `core/src/split/`, `core/src/eval/`, `tests/core/split/`, `tests/core/eval/` | 0 |
-| C | Popularity, recommend(), artifact I/O, eval CLI | `core/src/models/popularity.*`, `core/src/recommend.cpp`, `core/src/artifact/`, `train/cmd_train.cpp`, `train/cmd_eval.cpp`, `tests/core/models/popularity/`, `tests/core/artifact/` | 0 |
+| C | Popularity, recommend(), artifact I/O, evaluator + reports, train/eval CLI | `core/src/models/popularity.cpp`, `core/src/models/recommend.cpp`, `core/src/artifact/`, `core/src/report/`, `train/cmd_train.cpp`, `train/cmd_eval.cpp`, `train/cmd_compare.cpp`, `tests/core/models/popularity/`, `tests/core/recommend/`, `tests/core/artifact/`, `tests/core/report/`, `tests/core/integration_tiny/` | 0 |
 | D | Item-KNN | `core/src/models/item_knn.*`, `tests/core/models/item_knn/` | 1 |
 | E | Content-based (TF-IDF + genres; genome if present) | `core/src/models/content.*`, `tests/core/models/content/` | 1 |
-| F | MF-SGD | `core/src/models/mf_sgd.*`, `tests/core/models/mf_sgd/` | 3 ⏩ |
-| G | Implicit ALS | `core/src/models/als.*`, `tests/core/models/als/` | 4 ⏩ |
+| F | MF-SGD | `core/src/models/mf_sgd.cpp`, `core/src/synthetic/low_rank.cpp`, `tests/core/models/mf_sgd/` | 3 ⏩ |
+| G | Implicit ALS | `core/src/models/als.cpp`, `core/src/synthetic/implicit.cpp`, `tests/core/models/als/` | 4 ⏩ |
 | H | recs-model service | `model-service/**`, `tests/model-service/`, `tests/fuzz/model/` | 2 ⏩ |
 | I | Go foundation: db, migrations, auth, sessions, invites, CSRF, rate limit, httpx | `api/internal/{db,auth,invites,ratelimit,httpx}/`, `api/migrations/`, `api/cmd/recs-api/admin*.go` | 2 ⏩ |
-| J | Go product: ratings, modelclient, rec cache, posters, reports, movies, export-ratings | `api/internal/{ratings,modelclient,posters,reports,movies,recommend,export}/` | 2 ⏩ |
+| J | Go product: ratings, modelclient HTTP client, movie cache, rec cache, posters, reports, movies (incl. `/healthz`, `/api/models`, `/api/onboarding`), export-ratings | `api/internal/{ratings,moviecache,posters,reports,movies,recommend,export}/`, `api/internal/modelclient/http.go` | 2 ⏩ |
 | K | Web app: shell, auth, onboarding, For You, Compare, Movie, My ratings, How it works | `web/src/` except `web/src/pages/evaluation/` | 2 ⏩ |
 | L | Web Evaluation page | `web/src/pages/evaluation/`, `web/src/lib/reports/` | 2 ⏩ |
 | M | Deploy & ops: Dockerfiles, compose, Caddyfile, CI images, release/rollback, timers, backups, runbooks, alerts | `deploy/**`, `.github/workflows/release.yml` | 2 ⏩ |
 | N | Integration & hardening: cross-service contract tests, e2e robustness, load test, degradation | `tests/integration/**`, `tests/load/` | 2 |
-| P | Retrain loop & hot swap | `train/cmd_retrain.cpp`, `model-service/swap/` (handed over from H), `tests/integration/retrain/` | 5 |
+| P | Retrain loop & hot swap | `train/cmd_retrain.cpp`, `core/src/data/merge.cpp`, `model-service/swap/` (handed over from H), `tests/integration/retrain/` | 5 |
 | Q | Hybrid, MMR, feedback | `core/src/models/hybrid.*`, `core/src/rerank/`, `api/internal/feedback/` | 6 |
 
 ---
