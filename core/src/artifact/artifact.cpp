@@ -39,6 +39,7 @@
 #include <sstream>
 
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <nlohmann/json.hpp>
@@ -52,6 +53,12 @@ namespace {
 constexpr std::string_view kCatalogMagic = "RECSCAT1";
 constexpr std::uint32_t kCatalogVersion = 1;
 constexpr int kFormatVersion = 1;
+
+// Read limits (audit SA2-5). CURRENT holds one version name (at most 100 characters) and a newline.
+// A real manifest is a few KiB (one SHA-256 line per file plus the model configs); 4 MiB leaves
+// ample headroom while stopping a planted multi-GiB file from being read into memory.
+constexpr std::size_t kMaxCurrentBytes = 256;
+constexpr std::size_t kMaxManifestBytes = std::size_t{4} << 20;
 
 // A version (and a model name) is one safe path component: [A-Za-z0-9][A-Za-z0-9._-]{0,99}.
 bool valid_component(std::string_view s) {
@@ -230,10 +237,42 @@ Manifest manifest_from_json(const nlohmann::json& j) {
   return m;
 }
 
-std::string read_whole(const fs::path& p) {
-  std::ifstream in(p, std::ios::binary);
-  if (!in) throw ArtifactError("cannot read " + p.string());
-  return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+// Reads a small control file (CURRENT, manifest.json) with hard limits: the final path component
+// is opened with O_NOFOLLOW (a symlink is rejected, not followed), it must be a regular file
+// (O_NONBLOCK keeps a planted FIFO from blocking the open), and it may hold at most `max_bytes`.
+std::string read_small_file(const fs::path& p, std::size_t max_bytes) {
+  const int fd = ::open(p.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+  if (fd < 0) {
+    const int err = errno;
+    if (err == ELOOP) throw ArtifactError(p.string() + " is a symlink");
+    throw ArtifactError("cannot read " + p.string() + ": " + std::strerror(err));
+  }
+  struct Closer {
+    int fd;
+    ~Closer() { ::close(fd); }
+  } closer{fd};
+  struct stat st {};
+  if (::fstat(fd, &st) != 0) throw ArtifactError("cannot stat " + p.string() + ": " + std::strerror(errno));
+  if (!S_ISREG(st.st_mode)) throw ArtifactError(p.string() + " is not a regular file");
+  if (static_cast<std::uint64_t>(st.st_size) > max_bytes) {
+    throw ArtifactError(p.string() + " is larger than " + std::to_string(max_bytes) + " bytes");
+  }
+  // Read up to one byte past the limit, so a file that grows after fstat is caught too.
+  std::string out;
+  char buf[4096];
+  for (;;) {
+    const ssize_t n = ::read(fd, buf, sizeof buf);
+    if (n < 0) {
+      if (errno == EINTR) continue;
+      throw ArtifactError("cannot read " + p.string() + ": " + std::strerror(errno));
+    }
+    if (n == 0) break;
+    out.append(buf, static_cast<std::size_t>(n));
+    if (out.size() > max_bytes) {
+      throw ArtifactError(p.string() + " is larger than " + std::to_string(max_bytes) + " bytes");
+    }
+  }
+  return out;
 }
 
 // Every regular file under `dir` except the top-level manifest.json, as '/'-separated relative
@@ -350,7 +389,7 @@ LoadedArtifact load_artifact(const fs::path& dir) {
   if (!fs::is_directory(dir)) throw ArtifactError("artifact directory not found: " + dir.string());
   nlohmann::json j;
   try {
-    j = nlohmann::json::parse(read_whole(dir / "manifest.json"));
+    j = nlohmann::json::parse(read_small_file(dir / "manifest.json", kMaxManifestBytes));
   } catch (const nlohmann::json::exception& e) {
     throw ArtifactError(std::string("manifest.json does not parse: ") + e.what());
   }
@@ -421,8 +460,12 @@ void write_current(const fs::path& root, const std::string& version) {
 
 std::optional<std::string> read_current(const fs::path& root) {
   const fs::path file = root / "CURRENT";
-  if (!fs::exists(file)) return std::nullopt;
-  std::string s = read_whole(file);
+  // symlink_status: a dangling symlink is an error below, not "no CURRENT".
+  std::error_code ec;
+  const auto st = fs::symlink_status(file, ec);
+  if (st.type() == fs::file_type::not_found) return std::nullopt;
+  if (ec) throw ArtifactError("cannot stat " + file.string() + ": " + ec.message());
+  std::string s = read_small_file(file, kMaxCurrentBytes);
   if (!s.empty() && s.back() == '\n') s.pop_back();
   if (!valid_component(s) || s == "CURRENT") throw ArtifactError("CURRENT holds an invalid version");
   return s;
