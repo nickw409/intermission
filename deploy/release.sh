@@ -60,7 +60,7 @@ deploy() {
 
 if deploy "$tag"; then
   {
-    [[ -f "$HISTORY" ]] && grep -v "^$tag " "$HISTORY" || true
+    if [[ -f "$HISTORY" ]]; then grep -v "^$tag " "$HISTORY" || true; fi  # grep: 1 = no other lines
     printf '%s %s\n' "$tag" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   } | tail -n 5 > "$HISTORY.tmp"
   mv -f "$HISTORY.tmp" "$HISTORY"
