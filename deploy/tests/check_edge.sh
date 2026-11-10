@@ -83,7 +83,7 @@ expect() { # expect NAME VALUE
   local v; v="$(hdr "$scratch/h" "$1")"
   [[ "$v" == "$2" ]] && pass "$1: $v" || fail "$1 is '$v', want '$2'"
 }
-expect Content-Security-Policy "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'"
+expect Content-Security-Policy "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'; form-action 'self'; base-uri 'none'"
 expect X-Content-Type-Options nosniff
 expect Referrer-Policy strict-origin-when-cross-origin
 v="$(hdr "$scratch/h" Strict-Transport-Security)"
@@ -157,7 +157,7 @@ code="$(get /api/posters/1)"
 [[ "$code" == 200 ]] && pass "/api/posters/1 -> 200" || fail "/api/posters/1 returned $code"
 expect Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; sandbox"
 get /api/me >/dev/null
-expect Content-Security-Policy "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'"
+expect Content-Security-Policy "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'; form-action 'self'; base-uri 'none'"
 
 echo "== HTTP/1.1 only: no h2c (SA3-1)"
 ver="$(curl -s -o /dev/null --max-time 5 --http2-prior-knowledge -w '%{http_version}' -H "Host: $host" "$base/" || true)"
