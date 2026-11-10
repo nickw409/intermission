@@ -9,6 +9,7 @@
 //  - coverage@10: a single population number, no CI;
 //  - RMSE / MAE: ratios of per-user sums (sqrt(Σ sq_err / Σ n) and Σ abs_err / Σ n), bootstrapped
 //    by resampling users (recs::bootstrap_ratio_ci), so every held-out rating weighs the same.
+//  - users without a held-out rating are not resampling units for RMSE / MAE (they add nothing).
 // A metric with no contributing users is written as mean 0 with CI [0, 0] where the schema needs a
 // number, and as null where the schema allows it (the cold-user slice).
 //
@@ -58,10 +59,19 @@ nlohmann::json mean_ci(const std::vector<double>& values, const EvalOptions& opt
   return estimate_json(bootstrap_ci(values, opt.bootstrap_resamples, opt.bootstrap_seed), what);
 }
 
-nlohmann::json rating_errors_json(const std::vector<double>& sq, const std::vector<double>& abs_err,
-                                  const std::vector<double>& count, const EvalOptions& opt) {
+// Users without a held-out rating add nothing to either sum, so they are left out of the
+// resampling units (otherwise a resample could draw only such users and have no ratio at all).
+nlohmann::json rating_errors_json(const std::vector<double>& sq_all, const std::vector<double>& abs_all,
+                                  const std::vector<double>& count_all, const EvalOptions& opt) {
+  std::vector<double> sq, abs_err, count;
   double n = 0.0;
-  for (double c : count) n += c;
+  for (std::size_t j = 0; j < count_all.size(); ++j) {
+    if (count_all[j] <= 0.0) continue;
+    sq.push_back(sq_all[j]);
+    abs_err.push_back(abs_all[j]);
+    count.push_back(count_all[j]);
+    n += count_all[j];
+  }
   nlohmann::json rmse = estimate_json({}, "rmse");
   nlohmann::json mae = estimate_json({}, "mae");
   if (n > 0.0) {
