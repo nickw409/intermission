@@ -1,0 +1,38 @@
+# Build context for every image in deploy/docker/ is the repo root.
+# Keep the context small, and keep data, secrets and local state out of every image.
+.git
+.github
+.claude
+**/.env
+**/.env.*
+!**/.env.example
+**/*.pem
+**/*.key
+
+# Data (MovieLens licence, user data) and local state: never in an image.
+data
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/*.sqlite*
+deploy/history
+deploy/history.lock
+
+# Build outputs and dependency caches (rebuilt inside the builder stages).
+build*
+out
+api/bin
+web/dist
+**/node_modules
+
+# Fuzzing, profiling and editor files.
+crash-*
+leak-*
+timeout-*
+oom-*
+**/*.profraw
+**/*.prof
+.vscode
+.idea
+**/.DS_Store
+**/*.swp

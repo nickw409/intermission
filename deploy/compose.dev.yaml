@@ -1,0 +1,19 @@
+# Development overrides: the same images and hardening as production, plus
+#   - debug logging,
+#   - the local Caddyfile and the local web build (web/dist) mounted read-only, so
+#     `npm --prefix web run build` and Caddyfile edits apply after `docker compose restart caddy`
+#     without rebuilding the image.
+# Plain HTTP on 127.0.0.1:8080 (no Funnel); set RECS_SITE_ORIGIN=http://localhost:8080 in .env
+# and browse to http://localhost:8080.
+#
+#   docker compose -f deploy/compose.yaml -f deploy/compose.dev.yaml up
+services:
+  caddy:
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ../web/dist:/srv/www:ro
+
+  api:
+    environment:
+      RECS_LOG_LEVEL: debug
+      RECS_SITE_ORIGIN: ${RECS_SITE_ORIGIN:-http://localhost:8080}

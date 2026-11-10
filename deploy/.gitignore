@@ -1,0 +1,5 @@
+# Local deploy state (never commit). The root .gitignore already ignores .env files;
+# repeated here so this directory is safe on its own.
+.env
+history
+history.lock

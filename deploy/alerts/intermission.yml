@@ -1,0 +1,66 @@
+# Alert rules for the spec's alerts ("Operations: deploy, observe, recover"):
+#   site down 5 min; 5xx > 1% over 10 min; /api/recommend p99 > 250 ms over 10 min;
+#   nightly export, retrain or backup failed; disk > 85%.
+#
+# Metric names this file expects (reconcile with recs-api when its /metrics lands):
+#   recs_api_http_requests_total{route, code}             counter, route = ServeMux pattern
+#   recs_api_http_request_duration_seconds_bucket{route}  histogram
+#   intermission_job_last_status{task}                    0 = ok, 1 = failed   (deploy/nightly.sh)
+#   intermission_job_last_success_timestamp_seconds{task}                       (deploy/nightly.sh)
+#   node_filesystem_*                                     node-exporter
+# The public /healthz is also watched every 5 minutes by the external uptime monitor, which
+# catches the case where this whole host (and Prometheus with it) is down.
+
+groups:
+  - name: intermission
+    rules:
+      - alert: SiteDown
+        expr: up{job="api"} == 0
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: recs-api has been unreachable for 5 minutes
+          runbook: deploy/runbooks/rollback.md
+
+      - alert: High5xxRate
+        expr: |
+          sum(rate(recs_api_http_requests_total{code=~"5.."}[10m]))
+            / clamp_min(sum(rate(recs_api_http_requests_total[10m])), 1e-9) > 0.01
+        for: 10m
+        labels: { severity: page }
+        annotations:
+          summary: More than 1% of recs-api responses are 5xx (10-minute window)
+          runbook: deploy/runbooks/rollback.md
+
+      - alert: RecommendP99High
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le) (rate(recs_api_http_request_duration_seconds_bucket{route=~"GET /api/recommend.*"}[10m]))
+          ) > 0.25
+        for: 10m
+        labels: { severity: warn }
+        annotations:
+          summary: /api/recommend p99 latency above 250 ms (10-minute window)
+
+      - alert: NightlyJobFailed
+        expr: intermission_job_last_status{task=~"export|retrain|backup"} != 0
+        labels: { severity: warn }
+        annotations:
+          summary: 'Nightly {{ $labels.task }} failed'
+          runbook: deploy/runbooks/nightly-jobs.md
+
+      - alert: NightlyJobStale
+        expr: time() - intermission_job_last_success_timestamp_seconds{task=~"export|retrain|backup"} > 36 * 3600
+        labels: { severity: warn }
+        annotations:
+          summary: 'Nightly {{ $labels.task }} has not succeeded for 36 hours'
+          runbook: deploy/runbooks/nightly-jobs.md
+
+      - alert: DiskAbove85Percent
+        expr: |
+          1 - node_filesystem_avail_bytes{fstype=~"ext[234]|xfs|btrfs|zfs"}
+            / node_filesystem_size_bytes{fstype=~"ext[234]|xfs|btrfs|zfs"} > 0.85
+        for: 15m
+        labels: { severity: warn }
+        annotations:
+          summary: 'Disk {{ $labels.mountpoint }} is more than 85% full'

@@ -1,0 +1,219 @@
+# Intermission production stack (spec: "Hosting and deployment", "Operations").
+#
+#   docker compose -f deploy/compose.yaml up -d                       # caddy, api, model
+#   docker compose -f deploy/compose.yaml run --rm train retrain      # profile "jobs"
+#   docker compose -f deploy/compose.yaml run --rm backup             # profile "jobs"
+#   docker compose -f deploy/compose.yaml --profile monitoring up -d  # Prometheus + Grafana
+#
+# Settings come from deploy/.env (gitignored; copy deploy/.env.example). TAG selects the image
+# set (short git SHA) and is written by deploy/release.sh.
+#
+# Hardening applied to every service: non-root user, read-only root filesystem, all
+# capabilities dropped, no-new-privileges, memory and PID limits, rotated logs. The only port
+# published on the host is caddy's, on loopback (127.0.0.1:8080) for Tailscale Funnel.
+#
+# UIDs/GIDs (fixed; deploy/init-data.sh creates the host directories with matching owners):
+#   10000 recs group (model socket)   10001 recs-api / recs-backup   10002 recs-model
+#   10003 recs-train                  10004 caddy
+
+name: intermission
+
+x-hardening: &hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options: { max-size: "50m", max-file: "2" }
+
+x-job: &job
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  restart: "no"
+  network_mode: none
+  logging:
+    driver: json-file
+    options: { max-size: "50m", max-file: "2" }
+
+services:
+  caddy:
+    <<: *hardening
+    image: intermission-web:${TAG:?set TAG in deploy/.env (deploy/release.sh does this)}
+    user: "10004:10004"
+    ports:
+      - "127.0.0.1:${RECS_HTTP_PORT:-8080}:8080"
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    networks: [frontend, backend]
+    depends_on: [api]
+    mem_limit: 256m
+    pids_limit: 256
+
+  api:
+    <<: *hardening
+    image: intermission-api:${TAG:?set TAG in deploy/.env}
+    command: ["serve"]
+    user: "10001:10001"
+    group_add: ["10000"] # recs: may connect to the model socket
+    environment:
+      RECS_ADDR: "0.0.0.0:8081" # reachable only on the internal backend network
+      RECS_DB_PATH: /srv/data/db/app.db
+      RECS_MODEL_SOCKET: /run/recs/model.sock
+      RECS_REPORTS_DIR: /srv/data/reports
+      RECS_EXPORTS_DIR: /srv/data/exports
+      RECS_POSTER_CACHE_DIR: /srv/data/posters
+      RECS_SITE_ORIGIN: ${RECS_SITE_ORIGIN:?set RECS_SITE_ORIGIN in deploy/.env}
+      RECS_SIGNUP_MODE: ${RECS_SIGNUP_MODE:-invite}
+      RECS_LOG_LEVEL: ${RECS_LOG_LEVEL:-info}
+      TMDB_API_KEY: ${TMDB_API_KEY:-}
+      TMPDIR: /tmp
+    volumes:
+      - ${RECS_DATA_DIR:-../data}/db:/srv/data/db
+      - ${RECS_DATA_DIR:-../data}/exports:/srv/data/exports
+      - ${RECS_DATA_DIR:-../data}/posters:/srv/data/posters
+      - ${RECS_DATA_DIR:-../data}/reports:/srv/data/reports:ro
+      - model-socket:/run/recs
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    # backend: caddy -> api (internal, no egress). egress: TMDB poster fetches only.
+    networks: [backend, egress]
+    depends_on: [model]
+    mem_limit: 768m
+    pids_limit: 512
+    stop_grace_period: 15s
+
+  model:
+    <<: *hardening
+    image: intermission-model:${TAG:?set TAG in deploy/.env}
+    command: ["--socket", "/run/recs/model.sock", "--artifacts", "/srv/data/artifacts"]
+    user: "10002:10000" # primary group recs, so the 0660 socket is reachable by recs-api
+    # recs-model only speaks over the Unix socket: no network at all.
+    network_mode: none
+    environment:
+      OMP_NUM_THREADS: ${MODEL_OMP_THREADS:-2}
+    volumes:
+      - ${RECS_ARTIFACTS_DIR:-${RECS_DATA_DIR:-../data}/artifacts}:/srv/data/artifacts:ro
+      - model-socket:/run/recs
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    mem_limit: ${MODEL_MEM_LIMIT:-4g}
+    pids_limit: 256
+    stop_grace_period: 15s
+
+  # Batch job: `docker compose run --rm train <ingest|train|eval|retrain> ...`.
+  # Reads files and writes files only; no network. Low CPU weight and the first OOM victim,
+  # so training never starves the site.
+  train:
+    <<: *job
+    profiles: [jobs]
+    image: intermission-train:${TAG:?set TAG in deploy/.env}
+    user: "10003:10003"
+    environment:
+      OMP_NUM_THREADS: ${TRAIN_OMP_THREADS:-4}
+    volumes:
+      - ${RECS_DATA_DIR:-../data}/artifacts:/srv/data/artifacts
+      - ${RECS_DATA_DIR:-../data}/reports:/srv/data/reports
+      - ${RECS_DATA_DIR:-../data}/reports-private:/srv/data/reports-private
+      - ${RECS_DATA_DIR:-../data}/cache:/srv/data/cache
+      - ${RECS_DATA_DIR:-../data}/raw:/srv/data/raw:ro
+      - ${RECS_DATA_DIR:-../data}/exports:/srv/data/exports:ro
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cpu_shares: 128
+    oom_score_adj: 500
+    mem_limit: ${TRAIN_MEM_LIMIT:-12g}
+    pids_limit: 256
+
+  # Batch job: nightly SQLite backup (VACUUM INTO + integrity_check, 7 daily + 4 weekly).
+  backup:
+    <<: *job
+    profiles: [jobs]
+    image: intermission-backup:${TAG:?set TAG in deploy/.env}
+    user: "10001:10001"
+    command: ["backup", "--db", "/srv/data/db/app.db", "--dir", "/srv/data/backups"]
+    volumes:
+      - ${RECS_DATA_DIR:-../data}/db:/srv/data/db
+      - ${RECS_DATA_DIR:-../data}/backups:/srv/data/backups
+    mem_limit: 512m
+    pids_limit: 64
+
+  # ---- optional monitoring profile: loopback only, reach it over the tailnet (see runbook) ----
+  prometheus:
+    <<: *hardening
+    profiles: [monitoring]
+    image: prom/prometheus:v3.16.0-distroless@sha256:e8b8fb0e336fe0affce6f9ea347b11d24975465fd3ba8119420186679c3efd5f
+    user: "65532:65532"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      - --web.listen-address=0.0.0.0:9090
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./alerts:/etc/prometheus/alerts:ro
+      - prometheus-data:/prometheus
+    networks: [backend, monitoring]
+    mem_limit: 1g
+    pids_limit: 256
+
+  grafana:
+    <<: *hardening
+    profiles: [monitoring]
+    image: grafana/grafana:13.2.5-distroless@sha256:7bd4a6c9fa5425e722654c56f4fc8404ed042a89542fdb6d963177b6d80497ec
+    user: "472:472"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in deploy/.env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_PATHS_PROVISIONING: /etc/grafana/provisioning
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./monitoring/grafana-datasource.yml:/etc/grafana/provisioning/datasources/prometheus.yml:ro
+      - grafana-data:/var/lib/grafana
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    networks: [monitoring]
+    mem_limit: 512m
+    pids_limit: 256
+
+  # Host disk usage and the nightly jobs' status file (textfile collector).
+  node-exporter:
+    <<: *hardening
+    profiles: [monitoring]
+    image: prom/node-exporter:v1.12.1-distroless@sha256:8c9bac11973b94b59be88d6e11fee4429aa743c8846cdc75d65b18db33f6a106
+    user: "65532:65532"
+    command:
+      - --path.rootfs=/host
+      - --collector.textfile.directory=/textfile
+      - --collector.disable-defaults
+      - --collector.filesystem
+      - --collector.textfile
+      - --collector.meminfo
+      - --collector.loadavg
+    volumes:
+      - /:/host:ro
+      - ${RECS_DATA_DIR:-../data}/ops/textfile:/textfile:ro
+    networks: [monitoring]
+    mem_limit: 128m
+    pids_limit: 64
+
+volumes:
+  # Shared by api and model only. Directory 0750 recs-model:recs; socket 0660.
+  model-socket:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  frontend: {}
+  backend:
+    internal: true
+  egress: {}
+  # Plain bridge: Prometheus and Grafana publish loopback-only ports, which Docker cannot do
+  # from internal-only networks.
+  monitoring: {}

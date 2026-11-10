@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the Intermission restore drill on the 1st of each month
+
+[Timer]
+# After the nightly backup has finished.
+OnCalendar=*-*-01 05:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

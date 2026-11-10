@@ -1,0 +1,17 @@
+# Monthly restore drill (deploy/restore-drill.sh). Same placeholders as
+# intermission-nightly.service.
+[Unit]
+Description=Intermission monthly restore drill
+Wants=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+User=@USER@
+WorkingDirectory=@REPO@
+ExecStart=@REPO@/deploy/restore-drill.sh
+Nice=10
+TimeoutStartSec=30min
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
