@@ -33,7 +33,7 @@ jobs:
         with: { persist-credentials: false }
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with: { node-version: '24', cache: npm, cache-dependency-path: tools/contracts/package-lock.json }
-      - run: npm ci
+      - run: npm ci --ignore-scripts
         working-directory: tools/contracts
       - run: npm run validate
         working-directory: tools/contracts
@@ -62,7 +62,7 @@ jobs:
       - name: Validate reports written by the test run
         run: |
           if [ -d build/${{ matrix.preset }}/test-reports ]; then
-            npm ci --prefix tools/contracts
+            npm ci --ignore-scripts --prefix tools/contracts
             node tools/contracts/validate-reports.mjs build/${{ matrix.preset }}/test-reports
           else
             echo "no test-reports directory yet"
@@ -93,7 +93,7 @@ jobs:
         with: { persist-credentials: false }
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with: { node-version: '24', cache: npm, cache-dependency-path: web/package-lock.json }
-      - run: npm ci
+      - run: npm ci --ignore-scripts
         working-directory: web
       - run: npm run check
         working-directory: web

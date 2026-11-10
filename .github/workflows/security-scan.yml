@@ -1,0 +1,58 @@
+# Weekly vulnerability scan (audit finding SA4-1), so new advisories surface even when
+# nothing is pushed. Runs the same checks as CI plus image scans of every shipped base image
+# and the Caddy binary. Every action and image is pinned (public repo: supply-chain hygiene).
+name: security-scan
+on:
+  schedule:
+    - cron: '17 6 * * 1'   # Mondays 06:17 UTC
+  workflow_dispatch:
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: govulncheck
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [api, deploy/tools/recs-backup]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version: '1.27.3', cache-dependency-path: '${{ matrix.module }}/go.sum' }
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+        working-directory: ${{ matrix.module }}
+
+  npm:
+    name: npm audit
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: [web, tools/contracts]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with: { node-version: '24' }
+      - run: npm audit --omit=dev
+        working-directory: ${{ matrix.dir }}
+
+  images:
+    name: trivy (base images)
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - caddy:2.11.9@sha256:0c2243efcf437ab7f7a978f1027fcf0d4f9be8a75df27b1b3fbc5dbe0ffa8cf0
+          - gcr.io/distroless/cc-debian13:nonroot@sha256:cc66d222f0a7ec996b78a99fe76a969bc80b539a5016ad866c14d1949bc6d0ab
+          - gcr.io/distroless/static-debian13:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329
+    steps:
+      # Trivy 0.69.3 pinned by digest (0.69.4 was a compromised release; do not float the tag).
+      - name: Scan for fixable HIGH/CRITICAL
+        run: |
+          docker run --rm aquasec/trivy:0.69.3@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c \
+            image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --no-progress "${{ matrix.image }}"
