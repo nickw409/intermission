@@ -15,6 +15,9 @@
 #   2. fuzz:    -max_total_time=<seconds>; new coverage goes to a scratch corpus, never into the
 #               committed one, so the tree stays clean. Crash/leak/timeout inputs are written to
 #               $FUZZ_OUT/<harness>/ for triage.
+# seconds = 0 runs the replay only (deterministic; what the required CI check uses).
+# FUZZ_SEED=<n> fixes libFuzzer's seed for the fuzz step (it is printed either way).
+# On a failure the last lines of the log are printed, so CI output shows the cause.
 # Every harness needs a committed corpus (tests/fuzz/<group>/corpus/<harness>/); a missing one is
 # a failure. Exits non-zero if any harness fails either step. Summary lines:
 # "<harness> replay|fuzz ok|FAIL".
@@ -24,6 +27,11 @@ shopt -s nullglob
 seconds="${1:-60}"
 filter="${2:-.}"
 per_input_timeout=25  # seconds; libFuzzer reports a slower input as a timeout
+seed="${FUZZ_SEED:-$(( (RANDOM << 15 | RANDOM) + 1 ))}"
+[[ "$seconds" =~ ^[0-9]+$ ]] || { echo "seconds must be a whole number" >&2; exit 1; }
+[[ "$seed" =~ ^[0-9]+$ ]] || { echo "FUZZ_SEED must be a whole number" >&2; exit 1; }
+if [[ "$seconds" -gt 0 ]]; then echo "fuzz seed: $seed (rerun with FUZZ_SEED=$seed)"; fi
+fail_tail() { echo "---- last lines of $1"; tail -n 40 "$1" | sed 's/^/    /'; echo "----"; }
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 build="${FUZZ_BUILD:-$root/build/fuzz}"
 if [[ ! -d "$build" ]]; then
@@ -84,16 +92,19 @@ for g in "${groups[@]}"; do
       echo "$name replay ok"
     else
       echo "$name replay FAIL (log: $out/replay.log)"
+      fail_tail "$out/replay.log"
       failed=1
       continue
     fi
 
-    if "$bin" -max_total_time="$seconds" -timeout="$per_input_timeout" -rss_limit_mb=2048 -print_final_stats=1 \
+    [[ "$seconds" -eq 0 ]] && continue
+    if "$bin" -seed="$seed" -max_total_time="$seconds" -timeout="$per_input_timeout" -rss_limit_mb=2048 -print_final_stats=1 \
          -artifact_prefix="$out/" "$out/new" "$corpus" >"$out/fuzz.log" 2>&1; then
       execs="$(grep -o 'stat::number_of_executed_units: *[0-9]*' "$out/fuzz.log" | grep -o '[0-9]*$' || echo '?')"
       echo "$name fuzz ok (${seconds}s, $execs execs)"
     else
       echo "$name fuzz FAIL (log: $out/fuzz.log; inputs in $out/)"
+      fail_tail "$out/fuzz.log"
       failed=1
     fi
   done

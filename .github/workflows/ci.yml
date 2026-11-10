@@ -14,6 +14,7 @@ concurrency:
 jobs:
   secrets:
     name: secrets (gitleaks)
+    timeout-minutes: 5
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -27,6 +28,7 @@ jobs:
         run: ./gitleaks git --config .gitleaks.toml --redact --verbose --exit-code 1 .
 
   contracts:
+    timeout-minutes: 10
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -40,6 +42,7 @@ jobs:
 
   cpp:
     name: cpp (${{ matrix.preset }})
+    timeout-minutes: 40
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -54,20 +57,24 @@ jobs:
         with:
           path: build/${{ matrix.preset }}/_deps
           key: deps-${{ matrix.preset }}-${{ hashFiles('cmake/deps.cmake') }}
-      # Compiler cache: a PR recompiles only the translation units it changed. PR runs
-      # restore the newest cache from main (caches are scoped per branch, main's are shared).
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # Compiler cache: a PR recompiles only the translation units it changed. Every run
+      # restores the newest cache from main; only pushes to main save one, so PR pushes never
+      # evict main's entries (caches are scoped per branch; main's are readable by PRs).
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .ccache
           key: ccache-${{ matrix.preset }}-${{ github.sha }}
           restore-keys: ccache-${{ matrix.preset }}-
       - run: >-
           cmake --preset ${{ matrix.preset }} -DRECS_GIT_SHA=${{ github.sha }}
-          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-      - run: cmake --build --preset ${{ matrix.preset }}
-        env: { CCACHE_DIR: '${{ github.workspace }}/.ccache', CCACHE_MAXSIZE: 400M, CCACHE_BASEDIR: '${{ github.workspace }}' }
-      - run: ccache --show-stats
-        env: { CCACHE_DIR: '${{ github.workspace }}/.ccache' }
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+      - run: ccache -z && cmake --build --preset ${{ matrix.preset }} && ccache --show-stats
+        env: { CCACHE_DIR: '${{ github.workspace }}/.ccache', CCACHE_MAXSIZE: 1G, CCACHE_BASEDIR: '${{ github.workspace }}' }
+      - if: github.event_name == 'push'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .ccache
+          key: ccache-${{ matrix.preset }}-${{ github.sha }}
       - run: ctest --preset ${{ matrix.preset }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with: { node-version: '24', cache: npm, cache-dependency-path: tools/contracts/package-lock.json }
@@ -82,6 +89,7 @@ jobs:
 
   cpp-fuzz-build:
     name: cpp (fuzz build)
+    timeout-minutes: 30
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -91,22 +99,31 @@ jobs:
         with:
           path: build/fuzz/_deps
           key: deps-fuzz-${{ hashFiles('cmake/deps.cmake') }}
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .ccache
           key: ccache-fuzz-${{ github.sha }}
           restore-keys: ccache-fuzz-
       - run: >-
-          cmake --preset fuzz
-          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-          && cmake --build --preset fuzz
-        env: { CCACHE_DIR: '${{ github.workspace }}/.ccache', CCACHE_MAXSIZE: 400M, CCACHE_BASEDIR: '${{ github.workspace }}' }
-      # Replay every committed corpus (regression inputs must still pass), then fuzz each
-      # harness briefly. Longer runs are logged in docs/plans/jobs.md with the commit SHA.
-      - name: Fuzz replay and short run (20 s per harness)
-        run: tools/fuzz/replay.sh 20
+          cmake --preset fuzz -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          && ccache -z && cmake --build --preset fuzz && ccache --show-stats
+        env: { CCACHE_DIR: '${{ github.workspace }}/.ccache', CCACHE_MAXSIZE: 1G, CCACHE_BASEDIR: '${{ github.workspace }}' }
+      - if: github.event_name == 'push'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .ccache
+          key: ccache-fuzz-${{ github.sha }}
+      # Deterministic gate: every committed corpus input (including saved crash regressions)
+      # must still pass. Random fuzzing runs weekly in security-scan.yml with a recorded seed,
+      # so this required check can't fail on luck.
+      - name: Replay fuzz corpora
+        run: tools/fuzz/replay.sh 0
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with: { name: fuzz-out, path: build/fuzz/fuzz-out, retention-days: 7 }
 
   go:
+    timeout-minutes: 20
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -116,6 +133,7 @@ jobs:
       - run: make -C api check
 
   web:
+    timeout-minutes: 15
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
