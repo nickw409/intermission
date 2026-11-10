@@ -575,13 +575,14 @@ TEST_CASE("MF fills config defaults from configs/mf.json values", "[mf]") {
   CHECK(model->predicts_ratings());
   model->fit(s.train, recs::Config{{"max_epochs", 2}}, recs::TrainContext{});
   const auto cfg = model->config();
-  CHECK(cfg.at("k") == 64);
-  CHECK(cfg.at("lambda") == 0.05);
-  CHECK(cfg.at("lr") == 0.007);
-  CHECK(cfg.at("lr_decay") == 0.95);
+  CHECK(cfg.at("k") == 128);
+  CHECK(cfg.at("lambda") == 0.12);
+  CHECK(cfg.at("lr") == 0.02);
+  CHECK(cfg.at("lr_decay") == 0.995);
   CHECK(cfg.at("max_epochs") == 2);
-  CHECK(cfg.at("patience") == 3);
-  CHECK(cfg.at("init_sd") == 0.1);
+  CHECK(cfg.at("patience") == 50);
+  CHECK(cfg.at("init_sd") == 0.05);
+  CHECK(cfg.at("user_init_sd") == 0.0);
   CHECK(model->n_items() == 20);
   CHECK(model->training_curve().size() == 2);
   CHECK(model->training_curve_metric() == "train_rmse");
@@ -591,7 +592,8 @@ TEST_CASE("MF rejects invalid configs", "[mf]") {
   const auto s = recs::synthetic::low_rank_explicit(10, 10, 2, 0.1, 0.5, 0.0, 1);
   for (const auto& bad : {recs::Config{{"k", 0}}, recs::Config{{"lr", -1.0}},
                           recs::Config{{"lambda", -0.1}}, recs::Config{{"lr_decay", 0.0}},
-                          recs::Config{{"max_epochs", 0}}, recs::Config{{"bogus", 1}}}) {
+                          recs::Config{{"max_epochs", 0}}, recs::Config{{"user_init_sd", -0.1}},
+                          recs::Config{{"bogus", 1}}}) {
     INFO(bad.dump());
     auto model = recs::make_mf_sgd();
     CHECK_THROWS_AS(model->fit(s.train, bad, recs::TrainContext{}), std::invalid_argument);
