@@ -65,7 +65,10 @@ type Store struct {
 }
 
 // New returns a Store over d.
-func New(d *db.DB) *Store { return &Store{db: d, now: time.Now} }
+func New(d *db.DB) *Store { return NewWithClock(d, time.Now) }
+
+// NewWithClock returns a Store that reads the time from now.
+func NewWithClock(d *db.DB, now func() time.Time) *Store { return &Store{db: d, now: now} }
 
 // Create mints a code usable uses times, expiring after expiresIn (0 means
 // never), and returns it. Only its hash is stored, so this is the one time

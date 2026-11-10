@@ -29,24 +29,36 @@ var (
 //
 // Field-level rules (lengths, patterns) are the caller's job.
 func DecodeJSON(r *http.Request, v any) error {
+	data, err := ReadBody(r)
+	if err != nil {
+		return err
+	}
+	return DecodeJSONBytes(data, v)
+}
+
+// ReadBody reads the whole request body, at most MaxBodyBytes. A larger body
+// is ErrBodyTooLarge; a failed read is ErrInvalidJSON.
+func ReadBody(r *http.Request) ([]byte, error) {
 	if r.ContentLength > MaxBodyBytes {
-		return ErrBodyTooLarge
+		return nil, ErrBodyTooLarge
 	}
 	if r.Body == nil {
-		return ErrInvalidJSON
+		return nil, nil
 	}
 	data, err := io.ReadAll(http.MaxBytesReader(nil, r.Body, MaxBodyBytes))
 	if err != nil {
 		var tooBig *http.MaxBytesError
 		if errors.As(err, &tooBig) {
-			return ErrBodyTooLarge
+			return nil, ErrBodyTooLarge
 		}
-		return ErrInvalidJSON
+		return nil, ErrInvalidJSON
 	}
-	return decodeBytes(data, v)
+	return data, nil
 }
 
-func decodeBytes(data []byte, v any) error {
+// DecodeJSONBytes decodes exactly one JSON value from data into v, rejecting
+// unknown fields; errors as for DecodeJSON. Fuzz targets call it directly.
+func DecodeJSONBytes(data []byte, v any) error {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
