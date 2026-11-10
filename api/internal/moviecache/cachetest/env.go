@@ -79,8 +79,8 @@ func NewEnv(t testing.TB, model modelclient.Client, register ...func(*http.Serve
 		Logger: slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		DB:     d,
 		Model:  model,
-		Movies: moviecache.New(d, model),
 	}
+	deps.Movies = moviecache.New(d, model, moviecache.WithLogger(deps.Logger))
 	mux := http.NewServeMux()
 	for _, r := range register {
 		r(mux, deps)

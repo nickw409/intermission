@@ -174,7 +174,18 @@ func (c *httpClient) do(ctx context.Context, method, u string, payload []byte) (
 	if id := reqid.FromContext(ctx); reqid.Valid(id) {
 		req.Header.Set(reqid.Header, id)
 	}
-	return c.http.Do(req)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		// *url.Error embeds the full request URL, which carries the search
+		// query. Keep only the underlying cause so it never reaches logs or
+		// callers (callers already know the method and path).
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
+		return nil, err
+	}
+	return resp, nil
 }
 
 // isConnError reports whether err (from http.Client.Do, so no response was
