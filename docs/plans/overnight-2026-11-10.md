@@ -15,6 +15,9 @@ Stop conditions (only the affected task stops; the others keep going):
 - Downloaded ml-latest-small and ml-32m (MD5 verified). ml-32m counts match the spec exactly: 32,000,204 ratings, 87,585 movies, 200,948 users.
 - Spine: C++ build (debug+ASan/UBSan, release, clang fuzz presets; all green), frozen headers, contracts (public.yaml, model.yaml, report.schema.json, artifact.md), report fixtures, tiny dataset, CSV edge-case fixtures, configs, CI workflow, gitleaks config, Dependabot, SECURITY.md, pre-commit hook.
 
+- PR #1 (Wave 0 spine) passed all 7 CI jobs and was merged; tagged `spine-v1`. Branch protection on `main`: 7 required checks, no force-pushes, no deletions.
+- Wave 1 started: A1 (ingest), B1 (split + metrics), C1 (popularity + evaluator), I1 (Go auth). K1 and L1 (web) start as slots free up (4-agent limit).
+
 ## Decisions made without the owner (please review)
 
 | # | Decision | Why | Easy to change? |
@@ -33,6 +36,9 @@ Stop conditions (only the affected task stops; the others keep going):
 | 13 | Signup checks the invite before the username, and doesn't consume the invite on `username_taken`; the login limiter is keyed on the submitted username whether or not it exists. | Prevents unauthenticated username probing (spec: signup/login errors indistinguishable). In `open` signup mode, username_taken is inherently visible. | — |
 | 14 | Model names `hybrid` and `mmr` reserved in the contracts now; `GET /api/feedback/stats` added for the phase 6 CTR chart. | Avoids editing frozen contracts in phase 6. | — |
 | 15 | KNN/content implement a "batch path" (`score_trained_user`) used for the fold-in-equals-batch gate and fold-in Jaccard. | The spec's Model interface had no batch path to compare against. | — |
+| 16 | The split hash covers the train/validation/test assignment only, not rating values (as the frozen header says). | A value-only change can't move a rating between sets; recording a separate dataset checksum would need a report schema bump. | Yes (schema v2). |
+| 17 | Leakage guard: the split drops a user's tags on their own test movies from `train` (and on validation movies from `train_minus_val`). | A user's tag on a held-out movie reveals that they watched it; the content model builds TF-IDF from tags. | Yes, but changes content-model numbers. |
+| 18 | `roc_auc` ignores positives that are also excluded. | Header was ambiguous; throwing would abort the ALS gate on overlapping sets. | Yes. |
 | 10 | GitHub Actions pinned to commit SHAs; gitleaks 8.30.1 runs in CI with a checksum check. | Public repo supply-chain hygiene. | — |
 
 - An independent reviewer checked the interfaces against the spec before freezing: 5 blockers, 9 should-fix. All blockers and should-fix items were fixed (decisions 2, 6, 11–15 below came from it; also: rating-baseline and paired-comparison outputs, an explicit byte-identical exclusion list, a frozen export format `contracts/export.md`, input limits on compare/feedback/posters, ROC AUC for the ALS gate, and the spine now implements the sparse helpers and `make_dataset` so Wave 1 tasks don't block each other).

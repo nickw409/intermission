@@ -46,8 +46,9 @@ double mean_popularity_rank(const std::vector<std::vector<ItemIdx>>& lists,
                             const std::vector<std::uint32_t>& ranks, std::size_t k);
 
 /// ROC AUC of `scores` (one per item) for separating `positives` from every other item not in
-/// `exclude` (ties count 1/2). Used by the ALS planted-structure gate. Returns 0.5 if either class
-/// is empty.
+/// `exclude` (ties count 1/2). Items in `exclude` are ignored entirely, including any positive
+/// that also appears in `exclude`. Used by the ALS planted-structure gate. Returns 0.5 if either
+/// class is empty after exclusion.
 double roc_auc(std::span<const float> scores, std::span<const ItemIdx> positives,
                std::span<const ItemIdx> exclude);
 
