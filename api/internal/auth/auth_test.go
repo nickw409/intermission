@@ -184,11 +184,11 @@ func TestSignupFieldRules(t *testing.T) {
 		{"abc", goodPass, ""},
 		{strings.Repeat("z", 32), goodPass, ""},
 		{"A.b-c_9", goodPass, ""},
-		{"tenrunes", strings.Repeat("é", 10), ""},        // 10 characters, 20 bytes
-		{"maxlen", strings.Repeat("p", 128), ""},           // 128 characters
-		{"maxrunes", strings.Repeat("€", 128), ""},         // 128 characters, 384 bytes
-		{"inv64", goodPass, strings.Repeat("x", 64)},       // ignored in open mode, but within maxLength
-		{"spaces", "  ten spaces and more  ", ""},          // passwords are not trimmed
+		{"tenrunes", strings.Repeat("é", 10), ""},    // 10 characters, 20 bytes
+		{"maxlen", strings.Repeat("p", 128), ""},     // 128 characters
+		{"maxrunes", strings.Repeat("€", 128), ""},   // 128 characters, 384 bytes
+		{"inv64", goodPass, strings.Repeat("x", 64)}, // ignored in open mode, but within maxLength
+		{"spaces", "  ten spaces and more  ", ""},    // passwords are not trimmed
 	}
 	for _, b := range ok {
 		if rec := h.do("POST", "/api/auth/signup", b, ""); rec.Code != 201 {

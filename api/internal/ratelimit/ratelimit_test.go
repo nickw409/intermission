@@ -119,7 +119,9 @@ func TestMiddlewareWrites429WithRetryAfter(t *testing.T) {
 	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") != "30" {
 		t.Fatalf("second = %d, Retry-After %q", rec.Code, rec.Header().Get("Retry-After"))
 	}
-	var body struct{ Error struct{ Code, Message string } }
+	var body struct {
+		Error struct{ Code, Message string }
+	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body.Error.Code != "rate_limited" || body.Error.Message != "too many requests" {
 		t.Fatalf("body = %s", rec.Body.String())
 	}
