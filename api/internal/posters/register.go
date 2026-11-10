@@ -206,7 +206,13 @@ func (h *handler) fetchAndRecord(ctx context.Context, id int64) ([]byte, error) 
 			h.negative.add(id)
 		case errors.Is(err, errLimited):
 		case errors.Is(err, context.Canceled):
-			// Never remember a cancellation as "no poster".
+			// Defensive: ctx is detached (WithoutCancel), but a cancellation
+			// must never be remembered as "no poster".
+		case errors.Is(err, context.DeadlineExceeded) || isTimeout(err):
+			// TMDB was slow: worth retrying soon, so logged but not
+			// negatively cached (the upstream limiter bounds retries).
+			h.logger.WarnContext(ctx, "posters: TMDB timed out", "request_id", reqid.FromContext(ctx),
+				"movie_id", id, "err", h.scrub(err))
 		case errors.As(err, &tr):
 			h.logger.WarnContext(ctx, "posters: movie lookup failed", "request_id", reqid.FromContext(ctx),
 				"movie_id", id, "err", h.scrub(err))
@@ -248,7 +254,16 @@ func (g *flightGroup) do(id int64, fn func() ([]byte, error)) *flight {
 	c := &flight{done: make(chan struct{})}
 	g.calls[id] = c
 	go func() {
-		c.img, c.err = fn()
+		func() {
+			// A panic in fn would otherwise kill the process (this goroutine
+			// has no http.Server recovery) and strand every waiter.
+			defer func() {
+				if v := recover(); v != nil {
+					c.img, c.err = nil, fmt.Errorf("poster fetch panicked: %v", v)
+				}
+			}()
+			c.img, c.err = fn()
+		}()
 		g.mu.Lock()
 		delete(g.calls, id)
 		g.mu.Unlock()
@@ -407,6 +422,13 @@ func (h *handler) scrub(err error) string {
 	return s
 }
 
+// isTimeout reports whether err is a network timeout (the http.Client's own
+// Timeout surfaces this way rather than as context.DeadlineExceeded).
+func isTimeout(err error) bool {
+	var ne interface{ Timeout() bool }
+	return errors.As(err, &ne) && ne.Timeout()
+}
+
 // isJPEG checks the JPEG start-of-image marker.
 func isJPEG(b []byte) bool {
 	return len(b) > 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF
@@ -427,7 +449,7 @@ func writePlaceholder(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "image/svg+xml")
 	w.Header().Set("Cache-Control", "public, max-age=300")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; sandbox")
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, placeholderSVG)
 }

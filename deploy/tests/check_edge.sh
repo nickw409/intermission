@@ -151,7 +151,7 @@ grep -qi '<!doctype html' "$scratch/b" && fail "missing asset served index.html"
 echo "== recs-api's sandbox CSP kept on posters (SA5-7)"
 code="$(get /api/posters/1)"
 [[ "$code" == 200 ]] && pass "/api/posters/1 -> 200" || fail "/api/posters/1 returned $code"
-expect Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'; sandbox"
+expect Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; sandbox"
 get /api/me >/dev/null
 expect Content-Security-Policy "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'"
 
