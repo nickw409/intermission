@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nickw409/intermission/api/internal/app"
@@ -110,6 +111,7 @@ type handler struct {
 	timeout   time.Duration
 	cache     *diskCache
 	negative  *negCache
+	flights   flightGroup
 }
 
 func register(mux *http.ServeMux, d *app.Deps, o options) {
@@ -174,26 +176,85 @@ func (h *handler) serve(w http.ResponseWriter, r *http.Request) {
 		writePlaceholder(w)
 		return
 	}
-	img, err := h.fetch(r.Context(), id)
+	// The fetch is shared by every request for this movie that arrives while
+	// it runs, and is detached from this request: a client that gives up
+	// doesn't cancel it (so its outcome, poster or not, is still recorded
+	// for the next client), and h.timeout still bounds it.
+	call := h.flights.do(id, func() ([]byte, error) {
+		return h.fetchAndRecord(context.WithoutCancel(r.Context()), id)
+	})
+	select {
+	case <-call.done:
+	case <-r.Context().Done():
+		return // nobody is listening
+	}
+	if call.err != nil {
+		writePlaceholder(w)
+		return
+	}
+	writeJPEG(w, call.img)
+}
+
+// fetchAndRecord fetches id's poster and records the outcome in the disk
+// cache or the negative cache. ctx is not cancelled by the client.
+func (h *handler) fetchAndRecord(ctx context.Context, id int64) ([]byte, error) {
+	img, err := h.fetch(ctx, id)
 	if err != nil {
 		var tr transient
 		switch {
 		case errors.Is(err, errNoPoster):
 			h.negative.add(id)
 		case errors.Is(err, errLimited):
+		case errors.Is(err, context.Canceled):
+			// Never remember a cancellation as "no poster".
 		case errors.As(err, &tr):
-			h.logger.WarnContext(r.Context(), "posters: movie lookup failed", "request_id", reqid.FromContext(r.Context()),
+			h.logger.WarnContext(ctx, "posters: movie lookup failed", "request_id", reqid.FromContext(ctx),
 				"movie_id", id, "err", h.scrub(err))
 		default:
 			h.negative.add(id)
-			h.logger.WarnContext(r.Context(), "posters: fetch failed", "request_id", reqid.FromContext(r.Context()),
+			h.logger.WarnContext(ctx, "posters: fetch failed", "request_id", reqid.FromContext(ctx),
 				"movie_id", id, "err", h.scrub(err))
 		}
-		writePlaceholder(w)
-		return
+		return nil, err
 	}
 	h.cache.put(id, img)
-	writeJPEG(w, img)
+	return img, nil
+}
+
+// flightGroup runs at most one fetch per movie ID at a time; callers that
+// arrive while one runs share its result (a minimal singleflight).
+type flightGroup struct {
+	mu    sync.Mutex
+	calls map[int64]*flight
+}
+
+type flight struct {
+	done chan struct{} // closed when img and err are set
+	img  []byte
+	err  error
+}
+
+// do starts fn for id unless a call for id is already running, and returns
+// the call to wait on.
+func (g *flightGroup) do(id int64, fn func() ([]byte, error)) *flight {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if c, ok := g.calls[id]; ok {
+		return c
+	}
+	if g.calls == nil {
+		g.calls = make(map[int64]*flight)
+	}
+	c := &flight{done: make(chan struct{})}
+	g.calls[id] = c
+	go func() {
+		c.img, c.err = fn()
+		g.mu.Lock()
+		delete(g.calls, id)
+		g.mu.Unlock()
+		close(c.done)
+	}()
+	return c
 }
 
 // Outcomes of fetch other than success. errNoPoster (no TMDB id, unknown
