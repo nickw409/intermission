@@ -62,7 +62,8 @@ func runAdminTo(ctx context.Context, d *app.Deps, args []string, out io.Writer) 
 	if err != nil {
 		return err
 	}
-	d.Logger.Info("invite created", "uses", *uses, "expires_in", lifetime.String(), "note", *note)
+	// The note names a person (personal data): log only whether one was set.
+	d.Logger.Info("invite created", "uses", *uses, "expires_in", lifetime.String(), "note_set", *note != "")
 	_, err = fmt.Fprintln(out, code)
 	return err
 }
