@@ -31,17 +31,7 @@
 	}
 }
 
-:8080 {
-	# JSON access log on stdout. Caddy redacts Cookie, Set-Cookie and Authorization by default.
-	log {
-		output stdout
-		format json
-	}
-
-	encode zstd gzip
-
-	# Applied to every response, including proxied ones (defer = run when the response is
-	# written, after the upstream's own headers).
+(security_headers) {
 	header {
 		defer
 		Strict-Transport-Security "max-age=31536000"
@@ -52,6 +42,21 @@
 		-Via
 		-X-Powered-By
 	}
+}
+
+:8080 {
+	# JSON access log on stdout. Caddy redacts Cookie, Set-Cookie and Authorization by default.
+	log {
+		output stdout
+		format json
+	}
+
+	encode zstd gzip
+
+	# Applied to every response, including proxied ones (defer = run when the response is
+	# written, after the upstream's own headers). Errors Caddy raises itself are answered by
+	# handle_errors below, which imports the same headers.
+	import security_headers
 
 	# Internal endpoints are never proxied (recs-api's /metrics is scraped on the internal
 	# network only). Matched before the SPA fallback so they 404 instead of returning index.html.
@@ -93,5 +98,24 @@
 		header @html Cache-Control "no-cache"
 		try_files {path} /index.html
 		file_server
+	}
+
+	# Errors raised by Caddy itself (not by recs-api): above all the 64 KB body cap, but also an
+	# unreachable recs-api. They get the security headers, no Server header, an X-Request-ID
+	# and, for the body cap, the public API's Error shape (contracts/public.yaml: 413
+	# body_too_large), the same answer recs-api gives.
+	handle_errors {
+		import security_headers
+		header X-Request-ID {http.request.uuid}
+		header Cache-Control no-store
+		@too_large expression {err.status_code} == 413
+		handle @too_large {
+			header Content-Type application/json
+			# Caddy's 64KB is 64,000 bytes (recs-api's own cap is 64 KiB = 65,536 bytes).
+			respond `{"error":{"code":"body_too_large","message":"request body exceeds 64,000 bytes"}}` 413
+		}
+		handle {
+			respond "" {err.status_code}
+		}
 	}
 }
