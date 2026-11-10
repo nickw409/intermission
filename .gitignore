@@ -10,13 +10,17 @@
 .env.*
 !.env.example
 *.pem
-*.key
+# Private keys: at the top level and under deploy/ (TLS is Funnel's, so none are expected).
+/*.key
+/deploy/**/*.key
 
 # Logs, backups and archives (may hold personal data)
 *.log
-logs/
+/logs/
+/deploy/logs/
 *.bak
-backups/
+/backups/
+/deploy/backups/
 *.tar
 *.tar.*
 *.zst
@@ -33,10 +37,14 @@ backups/
 compile_commands.json
 
 # Fuzzing and profiling output
-crash-*
-leak-*
-timeout-*
-oom-*
+/crash-*
+/tests/fuzz/**/crash-*
+/leak-*
+/tests/fuzz/**/leak-*
+/timeout-*
+/tests/fuzz/**/timeout-*
+/oom-*
+/tests/fuzz/**/oom-*
 *.profraw
 *.prof
 
