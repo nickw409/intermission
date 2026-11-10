@@ -10,7 +10,7 @@ import { TextField } from '../components/TextField';
 import { friendlyMessage } from '../lib/errors';
 
 export const RETENTION_NOTE =
-  'Nightly backups keep a copy for up to 5 weeks and training exports for up to 7 days before they are removed.';
+  'Copies in nightly backups and training exports are removed on a rolling schedule, normally within 5 weeks.';
 
 interface DeleteAccountDialogProps {
   username: string;

@@ -8,7 +8,7 @@ import { renderApp } from '../test/render';
 import { server } from '../test/setup';
 
 const RETENTION =
-  'Nightly backups keep a copy for up to 5 weeks and training exports for up to 7 days before they are removed.';
+  'Copies in nightly backups and training exports are removed on a rolling schedule, normally within 5 weeks.';
 
 /** Signs in as alice (getMe fixture), opens the account menu and the delete-account dialog. */
 async function openDeleteDialog(path = '/ratings') {
@@ -85,6 +85,8 @@ describe('delete account', () => {
     expect(await screen.findByRole('link', { name: 'Log in' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /alice/ })).not.toBeInTheDocument();
     expect(router.state.location.pathname).toBe('/login');
+    // Wait for the login page itself; checking earlier would pass before it could show the notice.
+    expect(await screen.findByRole('heading', { level: 1, name: 'Log in' })).toBeInTheDocument();
     expect(screen.queryByText('Your account has been deleted.')).not.toBeInTheDocument();
   });
 
