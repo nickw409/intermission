@@ -94,7 +94,11 @@ func Wrap(h http.Handler, d *app.Deps) http.Handler {
 					}
 				}
 			}()
-			inner.ServeHTTP(sw, r)
+			var out http.ResponseWriter = sw
+			if unmatchedAPI(h, r) {
+				out = &apiFallbackWriter{ResponseWriter: sw}
+			}
+			inner.ServeHTTP(out, r)
 		}()
 
 		route := r.Pattern // set by http.ServeMux on match
@@ -114,6 +118,50 @@ func Wrap(h http.Handler, d *app.Deps) http.Handler {
 		logger.LogAttrs(ctx, slog.LevelInfo, "request", attrs...)
 	})
 }
+
+// unmatchedAPI reports whether r is under /api/ and matches no registered
+// pattern of h (an *http.ServeMux), so the mux itself will answer 404 or
+// 405 in plain text.
+func unmatchedAPI(h http.Handler, r *http.Request) bool {
+	mux, ok := h.(*http.ServeMux)
+	if !ok || !strings.HasPrefix(r.URL.Path, "/api/") {
+		return false
+	}
+	_, pattern := mux.Handler(r)
+	return pattern == ""
+}
+
+// apiFallbackWriter turns the mux's plain-text 404 and 405 into the
+// contract's Error JSON (security audit SA3-5): 404 not_found, and 405
+// with code bad_request (the contract has no method_not_allowed code) and
+// the mux's Allow header kept. Any other response passes through.
+type apiFallbackWriter struct {
+	http.ResponseWriter
+	replaced bool
+}
+
+func (w *apiFallbackWriter) WriteHeader(code int) {
+	switch code {
+	case http.StatusNotFound:
+		w.replaced = true
+		apperr.WriteError(w.ResponseWriter, code, apperr.CodeNotFound, "not found")
+	case http.StatusMethodNotAllowed:
+		w.replaced = true
+		apperr.WriteError(w.ResponseWriter, code, apperr.CodeBadRequest, "method not allowed")
+	default:
+		w.ResponseWriter.WriteHeader(code)
+	}
+}
+
+func (w *apiFallbackWriter) Write(b []byte) (int, error) {
+	if w.replaced {
+		return len(b), nil // the mux's text body; the JSON is already out
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+// Unwrap lets http.ResponseController reach the underlying writer.
+func (w *apiFallbackWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // requestInfo is filled in by handlers for the access log.
 type requestInfo struct {
