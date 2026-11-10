@@ -39,7 +39,7 @@ func TestPruneProtectsLatestAndExpiresUndatable(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, LatestName), []byte(latest), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := prune(dir, t0, ""); err != nil {
+	if _, err := prune(dir, t0, ""); err != nil {
 		t.Fatal(err)
 	}
 	if !exists(dir, latest) {
@@ -53,8 +53,9 @@ func TestPruneProtectsLatestAndExpiresUndatable(t *testing.T) {
 	}
 }
 
-// The clock stepped back three days: every existing export now looks
-// future-dated. They are expired; the one just written survives.
+// PR #42 re-review 1: the clock stepped back three days, so every existing
+// export looks future-dated. They are real recent exports: kept, reported,
+// and the one just written survives too.
 func TestExportAfterClockStepBack(t *testing.T) {
 	d := cachetest.OpenDB(t)
 	dir := t.TempDir()
@@ -68,8 +69,36 @@ func TestExportAfterClockStepBack(t *testing.T) {
 		t.Fatal("the export just written was pruned")
 	}
 	for _, n := range ahead {
-		if exists(dir, n) {
-			t.Errorf("export dated %s (in the future) kept", n)
+		if !exists(dir, n) {
+			t.Errorf("export dated %s (ahead of the clock) deleted", n)
+		}
+	}
+	if len(res.FutureDated) != 2 {
+		t.Errorf("FutureDated = %v, want both", res.FutureDated)
+	}
+}
+
+// PR #42 re-review 3: a LATEST that names a missing or non-export file does
+// not use up one of the Keep slots of real exports.
+func TestBrokenLatestDoesNotReduceKept(t *testing.T) {
+	for _, target := range []string{"ratings-2026-01-01T00-00-00Z.csv", "notes.txt"} {
+		dir := t.TempDir()
+		var names []string
+		for i := 1; i <= Keep; i++ {
+			names = append(names, exportFile(t0.Add(-time.Duration(i)*time.Hour)))
+		}
+		writeFiles(t, dir, names...)
+		writeFiles(t, dir, "notes.txt")
+		if err := os.WriteFile(filepath.Join(dir, LatestName), []byte(target), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := prune(dir, t0, ""); err != nil {
+			t.Fatal(err)
+		}
+		for _, n := range names {
+			if !exists(dir, n) {
+				t.Errorf("LATEST=%s: export %s pruned although only %d exist", target, n, Keep)
+			}
 		}
 	}
 }

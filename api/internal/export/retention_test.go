@@ -25,8 +25,8 @@ func TestExportsOlderThanAWeekPruned(t *testing.T) {
 		7*24*time.Hour - time.Second: true,
 		7 * 24 * time.Hour:           false, // nothing a week old survives
 		30 * 24 * time.Hour:          false,
-		-time.Hour:                   true,  // within the allowed clock skew
-		-2 * 24 * time.Hour:          false, // the clock stepped back, or a bad name
+		-time.Hour:                   true, // within the allowed clock skew
+		-2 * 24 * time.Hour:          true, // dated ahead: the clock stepped back; kept, warned about
 	}
 	for age := range ages {
 		if err := os.WriteFile(filepath.Join(dir, exportFile(t0.Add(-age))), []byte("x"), 0o600); err != nil {
@@ -59,7 +59,7 @@ func TestPruneKeepsNewestExportWhateverItsAge(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := prune(dir, t0, ""); err != nil {
+	if _, err := prune(dir, t0, ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, newest)); err != nil {
