@@ -1,0 +1,68 @@
+# Unit tests for the alert rules: promtool test rules deploy/tests/alerts.test.yml
+# (run in CI by .github/workflows/release.yml). Times are relative to the start of each test.
+rule_files:
+  - ../alerts/intermission.yml
+
+evaluation_interval: 1m
+
+tests:
+  # A failed restore drill fires JobFailed; a failed nightly step does too; ok steps don't.
+  - interval: 1m
+    input_series:
+      - series: 'intermission_job_last_status{task="restore_drill"}'
+        values: '1x10'
+      - series: 'intermission_job_last_status{task="backup"}'
+        values: '1x10'
+      - series: 'intermission_job_last_status{task="export"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: JobFailed
+        exp_alerts:
+          - exp_labels: { severity: warn, task: restore_drill }
+            exp_annotations:
+              summary: 'restore_drill failed on its last run'
+              runbook: deploy/runbooks/nightly-jobs.md
+          - exp_labels: { severity: warn, task: backup }
+            exp_annotations:
+              summary: 'backup failed on its last run'
+              runbook: deploy/runbooks/nightly-jobs.md
+
+  # Restore drill: stale after 35 days without a successful run, not before.
+  # Last success at t=0 (Unix time 0 in the test clock).
+  - interval: 1d
+    input_series:
+      - series: 'intermission_job_last_success_timestamp_seconds{task="restore_drill"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 34d
+        alertname: RestoreDrillStale
+        exp_alerts: []
+      - eval_time: 36d
+        alertname: RestoreDrillStale
+        exp_alerts:
+          - exp_labels: { severity: warn, task: restore_drill }
+            exp_annotations:
+              summary: 'The restore drill has not passed for 35 days'
+              runbook: deploy/runbooks/restore.md
+      # The monthly drill is not judged by the 36-hour nightly rule.
+      - eval_time: 36d
+        alertname: NightlyJobStale
+        exp_alerts: []
+
+  # Nightly steps: stale after 36 hours.
+  - interval: 1h
+    input_series:
+      - series: 'intermission_job_last_success_timestamp_seconds{task="backup"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 35h
+        alertname: NightlyJobStale
+        exp_alerts: []
+      - eval_time: 37h
+        alertname: NightlyJobStale
+        exp_alerts:
+          - exp_labels: { severity: warn, task: backup }
+            exp_annotations:
+              summary: 'Nightly backup has not succeeded for 36 hours'
+              runbook: deploy/runbooks/nightly-jobs.md

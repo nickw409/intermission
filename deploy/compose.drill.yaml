@@ -1,0 +1,19 @@
+# Override for the restore drill and the deploy gate tests (deploy/restore-drill.sh,
+# deploy/tests/). Run as a separate compose project; everything writable lives in throwaway
+# named volumes, so `docker compose down -v` removes it all and production data is never
+# written. Production backups, reports and artifacts are mounted read-only.
+services:
+  api:
+    volumes:
+      - drill-db:/srv/data/db
+      - drill-exports:/srv/data/exports
+      - drill-posters:/srv/data/posters
+  backup:
+    volumes:
+      - drill-db:/srv/data/db
+      - ${RECS_DATA_DIR:-../data}/backups:/srv/data/backups:ro
+
+volumes:
+  drill-db:
+  drill-exports:
+  drill-posters:

@@ -7,3 +7,5 @@ Run at most one ml-32m job at a time, release builds only.
 | download ml-32m | done | 2026-11-10 | MD5 verified; 32,000,205 lines in ratings.csv (incl. header) |
 | ml-32m ingest + cache (A1 `[ml32m]` test, release) | done | 2026-11-10 | exact counts 32,000,204 / 87,585 / 200,948 / 2,000,072 tags; parse 11.1 s, cache save 3.4 s, cache load 5.5 s, cache 574 MiB, peak RSS 2.42 GB |
 | ml-32m item-KNN fit (D, release, 4 threads) | done | 2026-11-10 | 32.7 s fit, peak RSS 1.81 GB; 23,350 items with neighbour lists, 2,335,000 entries |
+| ml-32m content fit (E, release, 4 threads) | done | 2026-11-10 | 1.86 s fit, +0.2 GB; 83,131 of 87,585 movies scoreable; ~1.3 ms scoring per user |
+| ml-32m ALS fit (G, release, 4 threads, k=64, 15 iters) | done | 2026-11-10 | 159.7 s (machine load ~12), peak RSS 1.79 GiB; objective 2.58e8 → 1.21e8 monotone; parity 1.0 |
