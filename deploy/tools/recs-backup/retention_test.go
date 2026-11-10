@@ -24,9 +24,9 @@ func TestBackupsOlderThan35DaysPruned(t *testing.T) {
 		filepath.Join(b, "weekly", "app-2026-10-01.db"): false,
 		filepath.Join(b, "weekly", "app-2026-08-01.db"): false,
 		// Dated in the future (clock stepped back, bad name) or not a date at all.
-		filepath.Join(b, "daily", "app-2026-11-11.db"):  true,  // tomorrow: within the allowed skew
-		filepath.Join(b, "daily", "app-2026-11-13.db"):  false, // three days ahead
-		filepath.Join(b, "weekly", "app-2027-01-01.db"): false,
+		filepath.Join(b, "daily", "app-2026-11-11.db"):  true, // tomorrow: within the allowed skew
+		filepath.Join(b, "daily", "app-2026-11-13.db"):  true, // three days ahead: the clock stepped back; kept, reported
+		filepath.Join(b, "weekly", "app-2027-01-01.db"): true,
 		filepath.Join(b, "daily", "app-2026-13-45.db"):  false, // matches the pattern, no such date
 	}
 	for p := range files {
@@ -58,7 +58,7 @@ func TestPruneKeepsNewestWhateverItsAge(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	removed, err := prune(dir, 7, day("2026-11-10"), "")
+	removed, _, err := prune(dir, 7, day("2026-11-10"), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,16 +70,22 @@ func TestPruneKeepsNewestWhateverItsAge(t *testing.T) {
 	}
 }
 
-// The clock stepped back three days: today's backup is written under an
-// older date than the existing copies. They count as expired; the file just
-// written is kept even though it is not the newest name.
+// PR #42 re-review 1: the host clock steps back three days (real date
+// 2026-11-10, clock says 2026-11-07). Every real daily and weekly copy must
+// survive; the ones now dated ahead are reported, not deleted.
 func TestBackupAfterClockStepBack(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "app.db")
 	makeDB(t, dbPath)
 	b := filepath.Join(dir, "b")
-	ahead := []string{filepath.Join(b, "daily", "app-2026-11-12.db"), filepath.Join(b, "daily", "app-2026-11-13.db")}
-	for _, p := range ahead {
+	var real []string
+	for _, d := range []string{"2026-11-04", "2026-11-05", "2026-11-06", "2026-11-07", "2026-11-08", "2026-11-09", "2026-11-10"} {
+		real = append(real, filepath.Join(b, "daily", "app-"+d+".db"))
+	}
+	for _, d := range []string{"2026-10-20", "2026-10-27", "2026-11-03", "2026-11-10"} {
+		real = append(real, filepath.Join(b, "weekly", "app-"+d+".db"))
+	}
+	for _, p := range real {
 		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -87,19 +93,32 @@ func TestBackupAfterClockStepBack(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	res, err := backup(context.Background(), dbPath, b, 7, 4, day("2026-11-10"))
+	res, err := backup(context.Background(), dbPath, b, 7, 4, day("2026-11-07"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(res.Daily); err != nil {
-		t.Fatalf("the backup just written was pruned: %v", err)
-	}
-	for _, p := range ahead {
-		if _, err := os.Stat(p); !os.IsNotExist(err) {
-			t.Errorf("%s (dated ahead of the clock) kept", filepath.Base(p))
+	for _, p := range real {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s/%s deleted after the clock stepped back", filepath.Base(filepath.Dir(p)), filepath.Base(p))
 		}
 	}
-	if got, err := latest(b); err != nil || filepath.Base(got) != filepath.Base(res.Daily) {
-		t.Errorf("latest = %s, %v; want the backup just written", got, err)
+	if len(res.Removed) != 0 {
+		t.Errorf("removed %v", res.Removed)
+	}
+	wantFuture := []string{
+		filepath.Join(b, "daily", "app-2026-11-09.db"), filepath.Join(b, "daily", "app-2026-11-10.db"),
+		filepath.Join(b, "weekly", "app-2026-11-10.db"),
+	}
+	for _, p := range wantFuture {
+		found := false
+		for _, f := range res.FutureDated {
+			found = found || f == p
+		}
+		if !found {
+			t.Errorf("%s not reported as future-dated (got %v)", p, res.FutureDated)
+		}
+	}
+	if res.Warning == "" {
+		t.Error("no warning about the clock")
 	}
 }
