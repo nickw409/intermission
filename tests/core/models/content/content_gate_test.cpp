@@ -113,7 +113,19 @@ struct SeedResult {
 std::vector<SeedResult> one_genre_user(const Config& cfg, bool check) {
   std::vector<SeedResult> per_seed;
   recs::testing::for_seeds(20, 2026, [&](Rng& rng, std::uint64_t) {
-    const auto cat = genre_catalog(rng, 120, Primary::kUniform);
+    // The user rates 8 comedies, so the catalog needs at least 15 for 7 to remain unrated:
+    // otherwise "7 of 10 in-genre" is impossible for any model. Catalogs with fewer are redrawn
+    // from the same seeded stream (rejection sampling; the generator itself is unchanged).
+    constexpr std::size_t kRated = 8, kMinComedies = kRated + 7;
+    const auto n_comedies = [](const Dataset& d) {
+      return static_cast<std::size_t>(std::count_if(d.movies.begin(), d.movies.end(),
+                                                    [](const MovieMeta& m) { return has_genre(m, "Comedy"); }));
+    };
+    auto cat = genre_catalog(rng, 120, Primary::kUniform);
+    for (int attempt = 0; n_comedies(cat.ds) < kMinComedies; ++attempt) {
+      REQUIRE(attempt < 100);
+      cat = genre_catalog(rng, 120, Primary::kUniform);
+    }
     const auto& ds = cat.ds;
     auto model = make_content();
     model->fit(ds, cfg, TrainContext{});
@@ -123,9 +135,10 @@ std::vector<SeedResult> one_genre_user(const Config& cfg, bool check) {
     std::vector<ItemIdx> comedies;
     for (ItemIdx i = 0; i < ds.n_items(); ++i)
       if (has_genre(ds.movies[i], "Comedy")) comedies.push_back(i);
-    REQUIRE(comedies.size() >= 12);
+    REQUIRE(comedies.size() >= kMinComedies);
     rng.shuffle(comedies.begin(), comedies.end());
     const std::vector<float> values{5.0f, 4.5f, 4.5f, 4.0f, 4.0f, 3.5f, 3.0f, 2.5f};
+    REQUIRE(values.size() == kRated);
     std::vector<Rating> ratings;
     for (std::size_t k = 0; k < values.size(); ++k) ratings.push_back({comedies[k], values[k], 1});
 
@@ -144,6 +157,7 @@ std::vector<SeedResult> one_genre_user(const Config& cfg, bool check) {
     }
     INFO("comedy share of candidates = " << comedy_candidates << "/" << candidates);
     REQUIRE(static_cast<double>(comedy_candidates) / static_cast<double>(candidates) < 0.35);
+    REQUIRE(comedy_candidates >= 7);  // the gate is reachable on this seed
 
     const auto in_genre = std::count_if(top.begin(), top.end(),
                                         [&](ItemIdx i) { return has_genre(ds.movies[i], "Comedy"); });
@@ -157,15 +171,14 @@ std::vector<SeedResult> one_genre_user(const Config& cfg, bool check) {
 
 // Spec Phase 1 gate, with the default config. The user's ratings are mixed (5 down to 2.5), all
 // within one genre: a profile centered on the user's own mean cancels the genre every rated movie
-// shares and fails this (0-6 of 10 over these seeds); see USER PROFILE in content.cpp.
+// shares and fails this (0 of 20 seeds reach 7); see USER PROFILE in content.cpp.
 TEST_CASE("Content gate: a user who rated only one genre gets >= 7 of 10 recommendations in it",
           "[content][gate][phase1]") {
   one_genre_user(Config::object(), true);
 }
 
-// Stronger than the gate, and true on every seed: the one-genre user is recommended every unrated
-// movie of the genre, up to 10. (On two of the 20 seeds only 6 unrated comedies exist, so the
-// gate's 7 of 10 cannot be reached there by any model.)
+// Stronger than the gate: the one-genre user is recommended every unrated movie of the genre, up
+// to 10.
 TEST_CASE("Content: a user who rated only one genre gets every unrated movie of it, up to 10",
           "[content][behaviour]") {
   for (const auto& r : one_genre_user(Config::object(), false))
