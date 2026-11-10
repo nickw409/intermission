@@ -30,6 +30,7 @@ type Observation struct {
 	Headers     map[string]string `json:"headers"`
 	Body        json.RawMessage   `json:"body"`
 	ContentType string            `json:"contentType"`
+	BodyBytes   int               `json:"bodyBytes"`
 }
 
 // Recorder collects observations; safe for concurrent use.
@@ -117,9 +118,16 @@ func (rec *Recorder) Do(t *testing.T, client *http.Client, base string, req Requ
 	for k := range resp.Header {
 		hdrs[strings.ToLower(k)] = resp.Header.Get(k)
 	}
+	// Session tokens never reach the observations file: only the fact that a cookie was set
+	// (contract checks need its presence on signup and login).
+	for _, k := range []string{"set-cookie", "cookie"} {
+		if _, ok := hdrs[k]; ok {
+			hdrs[k] = "[redacted]"
+		}
+	}
 	ob := Observation{
 		Spec: req.Spec, OperationID: req.Op, Case: req.Name, Method: req.Method, Path: req.Path,
-		Status: resp.StatusCode, Headers: hdrs, ContentType: resp.Header.Get("Content-Type"),
+		Status: resp.StatusCode, Headers: hdrs, ContentType: resp.Header.Get("Content-Type"), BodyBytes: len(data),
 	}
 	if strings.HasPrefix(ob.ContentType, "application/json") && json.Valid(data) {
 		ob.Body = data

@@ -81,6 +81,7 @@ func creds(user, pass string) map[string]string {
 }
 
 func TestPublicContract(t *testing.T) {
+	needStack(t)
 	anon := newPublicClient(t)
 	alice := newPublicClient(t)
 	const pass = "correct horse battery"
@@ -273,6 +274,22 @@ func TestPublicContract(t *testing.T) {
 		}
 	}
 	checkResp(t, "login rate limited", loginLimited, 429, "rate_limited")
+
+	// ---- the 5,000-rating cap ----
+	// The tiny catalog has 30 movies, so alice's other 4,995 ratings are written straight into
+	// the scratch app.db (ratings.movie_id has no foreign key; recs-api checks the catalog only
+	// when a rating is written through it). Then the real recs-api must refuse a 5,001st movie
+	// and still accept re-rating one she has.
+	if err := env.seedRatings("alice", 5000); err != nil {
+		t.Fatalf("seed ratings: %v", err)
+	}
+	alice.expect("putRating", "5,001st rating", "PUT", "/api/ratings/6", `{"rating":4}`, 409, "too_many_ratings")
+	alice.expect("putRating", "re-rate at the cap", "PUT", "/api/ratings/1", `{"rating":3.5}`, 200, "")
+	r = alice.expect("getMe", "me at the cap", "GET", "/api/me", nil, 200, "")
+	r.JSON(t, &me)
+	if me.RatingCount != 5000 {
+		t.Errorf("rating_count at the cap = %d, want 5000", me.RatingCount)
+	}
 
 	// ---- logout and delete ----
 	bob := newPublicClient(t)

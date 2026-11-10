@@ -5,7 +5,7 @@
 // Each line of the input is one observed exchange, written by tests/integration (Go):
 //   { "spec": "model"|"public", "operationId", "case", "method", "path",
 //     "status", "headers": { lower-case name: value }, "body": <parsed JSON or null>,
-//     "contentType" }
+//     "contentType", "bodyBytes" }
 //
 // For every observation:
 //   - the operation exists in contracts/<spec>.yaml, and method and path match its template;
@@ -14,9 +14,11 @@
 //   - every response header the contract declares for that status is present;
 //   - model spec: every response carries X-Model-Version (contract rule) and X-Request-ID;
 //     public spec: every response carries X-Request-ID.
+//   - the path is routed to this operation and no other: a literal template segment
+//     (/api/movies/search) wins over a parameter ({movieId}), as in recs-api's router;
+//   - a response whose contract declares no content has no body.
 // With --require-coverage, every operation (minus the listed phase-6 exclusions) must have been
-// observed, and every documented status must have been observed or be listed in WAIVED with a
-// reason. A coverage table is printed either way.
+// observed with every documented status. A coverage table is printed either way.
 //
 // Uses the pinned ajv/yaml from tools/contracts (run `npm ci` there first).
 
@@ -40,12 +42,6 @@ const OPENAPI_KEYWORDS = ['openapi', 'info', 'servers', 'security', 'tags', 'pat
 // Operations outside this gate: phase 6 (feedback) is not built yet; recs-api does not
 // register those routes.
 const EXCLUDED = { public: new Set(['postFeedback', 'getFeedbackStats']), model: new Set() };
-
-// Documented statuses that a black-box run against the real services cannot produce, with the
-// reason. Each is covered by the owning package's unit tests instead.
-const WAIVED = {
-  'public putRating 409': 'too_many_ratings needs 5,000 ratings; the tiny catalog has 30 movies (api/internal/ratings tests cover it)',
-};
 
 const args = process.argv.slice(2);
 const file = args.find((a) => !a.startsWith('--'));
@@ -89,8 +85,11 @@ for (const [spec, doc] of Object.entries(specs)) {
   for (const [path, item] of Object.entries(doc.paths)) {
     for (const method of METHODS) {
       if (!item[method]) continue;
-      const re = new RegExp(`^${path.replace(/\{[^}]+\}/g, '[^/]+')}$`);
-      ops[spec].set(item[method].operationId, { path, method: method.toUpperCase(), op: item[method], pointer: `/paths/${escapePtr(path)}/${method}`, re });
+      // Escape regex specials in the template, then let each {param} match one path segment.
+      const escaped = path.replace(/[.*+?^$()|[\]\\]/g, '\\$&');
+      const re = new RegExp(`^${escaped.replace(/\{[^}/]+\}/g, '[^/]+')}$`);
+      const literals = path.split('/').filter((seg) => seg !== '' && !seg.startsWith('{')).length;
+      ops[spec].set(item[method].operationId, { path, method: method.toUpperCase(), op: item[method], pointer: `/paths/${escapePtr(path)}/${method}`, re, literals });
     }
   }
 }
@@ -107,7 +106,9 @@ for (const [i, line] of lines.entries()) {
   const key = `${o.spec} ${o.operationId} ${o.status}`;
   seen.set(key, (seen.get(key) ?? 0) + 1);
   if (o.method !== info.method) fail(`method should be ${info.method}`);
-  if (!info.re.test(o.path.split('?')[0])) fail(`path does not match ${info.path}`);
+  const bare = o.path.split('?')[0];
+  if (!info.re.test(bare)) fail(`path does not match ${info.path}`);
+  else if (routedTo(o.spec, o.method, bare) !== o.operationId) fail(`path is routed to ${routedTo(o.spec, o.method, bare)}, not ${o.operationId}`);
   const h = o.headers ?? {};
 
   if (o.spec === 'model' && !h['x-model-version']) fail('no X-Model-Version header (model.yaml: every response carries it)');
@@ -123,12 +124,27 @@ for (const [i, line] of lines.entries()) {
   const content = resp.content ?? {};
   const types = Object.keys(content);
   const ct = (o.contentType ?? '').split(';')[0].trim().toLowerCase();
-  if (types.length > 0 && !types.includes(ct)) { fail(`content type '${ct}' not in ${types.join(', ')}`); continue; }
+  if (types.length === 0) {
+    if ((o.bodyBytes ?? 0) > 0) fail(`contract declares no content, but the response has a ${o.bodyBytes}-byte body`);
+    continue;
+  }
+  if (!types.includes(ct)) { fail(`content type '${ct}' not in ${types.join(', ')}`); continue; }
   if (ct === 'application/json') {
     if (o.body === null || o.body === undefined) { fail('JSON body missing or unparseable'); continue; }
     const v = validator(o.spec, `${respPtr}/content/application~1json/schema`);
     if (!v(o.body)) fail(`body does not match schema: ${v.errors.map((e) => `${e.instancePath || '/'} ${e.message}`).join('; ')}`);
   }
+}
+
+// routedTo returns the operation a request would reach: among the operations with this method
+// whose template matches the path, the one with the most literal segments.
+function routedTo(spec, method, path) {
+  let best;
+  for (const [id, info] of ops[spec]) {
+    if (info.method !== method || !info.re.test(path)) continue;
+    if (!best || info.literals > best.literals) best = { id, literals: info.literals };
+  }
+  return best?.id;
 }
 
 // Coverage table.
@@ -140,14 +156,13 @@ for (const [spec, map] of Object.entries(ops)) {
     const cells = Object.keys(info.op.responses).map((s) => {
       const n = seen.get(`${spec} ${id} ${s}`) ?? 0;
       const k = `${spec} ${id} ${s}`;
-      if (n === 0 && !WAIVED[k]) missing.push(k);
-      return `${s}=${n === 0 ? (WAIVED[k] ? 'waived' : '-') : n}`;
+      if (n === 0) missing.push(k);
+      return `${s}=${n === 0 ? '-' : n}`;
     });
     console.log(`  ${spec} ${id}: ${cells.join(' ')}`);
   }
 }
 console.log(`${lines.length} observations checked`);
-for (const [k, why] of Object.entries(WAIVED)) console.log(`waived ${k}: ${why}`);
 
 if (requireCoverage && missing.length > 0) {
   for (const k of missing) errors.push(`coverage: ${k} was never observed`);

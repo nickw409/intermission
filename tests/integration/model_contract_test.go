@@ -33,6 +33,7 @@ func modelReq(op, name, method, path string, body string) request {
 const someRatings = `[{"movie_id":1,"rating":5},{"movie_id":2,"rating":4.5},{"movie_id":3,"rating":4},{"movie_id":7,"rating":3.5},{"movie_id":11,"rating":5}]`
 
 func TestModelClientEveryOperation(t *testing.T) {
+	needStack(t)
 	c := modelclient.NewHTTP(modelclient.HTTPConfig{SocketPath: env.modelSock, Timeout: 2 * time.Second})
 	ctx := reqid.WithID(context.Background(), "it-modelclient")
 	ratings := []modelclient.RatingIn{{MovieID: 1, Rating: 5}, {MovieID: 2, Rating: 4.5}, {MovieID: 3, Rating: 4}, {MovieID: 7, Rating: 3.5}, {MovieID: 11, Rating: 5}, {MovieID: 999999, Rating: 3}}
@@ -162,6 +163,7 @@ func TestModelClientEveryOperation(t *testing.T) {
 }
 
 func TestModelRawContract(t *testing.T) {
+	needStack(t)
 	client := socketClient(env.modelSock)
 	base := "http://recs-model"
 	send := func(r request) response { return do(t, client, base, r) }
@@ -279,6 +281,7 @@ func TestModelRawContract(t *testing.T) {
 // model route is 503 model_unavailable with X-Model-Version: none, and the
 // client maps that to ErrUnavailable.
 func TestModelUnavailable(t *testing.T) {
+	needStack(t)
 	empty := t.TempDir()
 	sock := filepath.Join(env.sockDir, "empty.sock")
 	cmd, err := startModel(env.modelBin, sock, empty, filepath.Join(env.work, "model-empty.log"))

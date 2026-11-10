@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/nickw409/intermission/api/integrationtest/internal/record"
+	"github.com/nickw409/intermission/api/internal/db"
 )
 
 // env is the running stack shared by every test.
@@ -54,14 +55,19 @@ type stack struct {
 
 func TestMain(m *testing.M) {
 	if os.Getenv("RECS_INTEGRATION") != "1" {
-		fmt.Println("integration tests skipped: set RECS_INTEGRATION=1 (tests/integration/run-contract.sh does)")
-		os.Exit(0)
+		// Every test calls needStack and reports SKIP (visible with -v), so a run without the
+		// opt-in never looks like a pass of the real gate.
+		os.Exit(m.Run())
 	}
 	s, err := start()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "integration setup failed:", err)
+		fmt.Fprintln(os.Stderr, "FAIL: integration setup:", err)
 		if s != nil {
 			s.stop()
+			if b, err := os.ReadFile(filepath.Join(s.work, "model.log")); err == nil && len(b) > 0 {
+				fmt.Fprintf(os.Stderr, "recs-model log (end):\n%s\n", b[max(0, len(b)-2000):])
+			}
+			s.cleanup(true)
 		}
 		os.Exit(1)
 	}
@@ -71,11 +77,36 @@ func TestMain(m *testing.M) {
 	if code == 0 {
 		code = s.validate()
 	}
-	if os.Getenv("RECS_INTEGRATION_KEEP") == "" {
-		_ = os.RemoveAll(s.work)
-	}
-	_ = os.RemoveAll(s.sockDir)
+	s.cleanup(code == 0 && os.Getenv("RECS_INTEGRATION_KEEP") == "")
 	os.Exit(code)
+}
+
+// needStack skips the test unless the opt-in stack is running.
+func needStack(t *testing.T) {
+	t.Helper()
+	if env == nil {
+		t.Skip("integration gate not run: set RECS_INTEGRATION=1 (tests/integration/run-contract.sh does)")
+	}
+}
+
+// cleanup removes the socket directory, and the scratch directory unless it should be kept
+// for debugging (on failure), in which case the logs' paths are printed.
+func (s *stack) cleanup(removeWork bool) {
+	if s.sockDir != "" {
+		_ = os.RemoveAll(s.sockDir)
+	}
+	if s.work == "" {
+		return
+	}
+	if removeWork {
+		_ = os.RemoveAll(s.work)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "kept for debugging: %s (recs-model log: %s; remove it when done)\n",
+		s.work, filepath.Join(s.work, "model.log"))
+	if s.apiStderr != nil {
+		_ = os.WriteFile(filepath.Join(s.work, "api.log"), []byte(s.apiStderr.String()), 0o600)
+	}
 }
 
 func envOr(key, def string) string {
@@ -288,6 +319,42 @@ func (s *stack) invite(uses int) (string, error) {
 		return "", fmt.Errorf("invite create: %v: %s", err, errb.String())
 	}
 	return strings.TrimSpace(out.String()), nil
+}
+
+// seedRatings tops the user's ratings up to total by writing rows for movie IDs outside the
+// catalog (1,000,001 and up) straight into the harness's own scratch app.db, in one
+// transaction, the way recs-api writes them (bumping ratings_version too).
+func (s *stack) seedRatings(username string, total int) error {
+	ctx := context.Background()
+	d, err := db.Open(ctx, filepath.Join(s.work, "app.db"))
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	tx, err := d.Writer.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var uid int64
+	var have int
+	if err := tx.QueryRowContext(ctx, "SELECT id FROM users WHERE username = ?", username).Scan(&uid); err != nil {
+		return fmt.Errorf("user %s: %w", username, err)
+	}
+	if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM ratings WHERE user_id = ?", uid).Scan(&have); err != nil {
+		return err
+	}
+	now := time.Now().Unix()
+	for i := 0; i < total-have; i++ {
+		if _, err := tx.ExecContext(ctx, "INSERT INTO ratings (user_id, movie_id, rating, updated_at) VALUES (?, ?, 3.0, ?)",
+			uid, 1_000_001+i, now); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE users SET ratings_version = ratings_version + 1 WHERE id = ?", uid); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func stopCmd(c *exec.Cmd) {

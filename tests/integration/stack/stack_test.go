@@ -36,19 +36,25 @@ import (
 )
 
 var (
-	rec    = &record.Recorder{}
-	base   string
-	origin string
-	host   string
-	invite string
+	configured bool // the run-stack.sh environment is present
+	rec        = &record.Recorder{}
+	base       string
+	origin     string
+	host       string
+	invite     string
 )
 
 func TestMain(m *testing.M) {
 	base, origin, invite = os.Getenv("RECS_STACK_URL"), os.Getenv("RECS_STACK_ORIGIN"), os.Getenv("RECS_STACK_INVITE")
-	if base == "" || origin == "" || invite == "" {
-		fmt.Println("stack tests skipped: RECS_STACK_URL, RECS_STACK_ORIGIN and RECS_STACK_INVITE are set by tests/integration/run-stack.sh")
-		os.Exit(0)
+	switch {
+	case base == "" && origin == "" && invite == "":
+		// Not opted in: every test reports SKIP (visible with -v).
+		os.Exit(m.Run())
+	case base == "" || origin == "" || invite == "":
+		fmt.Fprintln(os.Stderr, "FAIL: RECS_STACK_URL, RECS_STACK_ORIGIN and RECS_STACK_INVITE must all be set (tests/integration/run-stack.sh sets them)")
+		os.Exit(2)
 	}
+	configured = true
 	u, err := url.Parse(origin)
 	if err != nil || u.Host == "" {
 		fmt.Fprintln(os.Stderr, "bad RECS_STACK_ORIGIN:", origin)
@@ -71,6 +77,14 @@ func TestMain(m *testing.M) {
 	}
 	_ = os.RemoveAll(dir) // os.Exit skips deferred calls
 	os.Exit(code)
+}
+
+// needStack skips the test unless run-stack.sh configured a stack.
+func needStack(t *testing.T) {
+	t.Helper()
+	if !configured {
+		t.Skip("stack gate not run: tests/integration/run-stack.sh sets RECS_STACK_URL, RECS_STACK_ORIGIN and RECS_STACK_INVITE")
+	}
 }
 
 // client is one browser: its own cookie jar, the site's Host and, on
@@ -186,6 +200,7 @@ func (c *client) seenMovies() []int64 {
 }
 
 func TestRobustnessThroughCaddy(t *testing.T) {
+	needStack(t)
 	c := newClient(t)
 	c.signup(randomName("robust-"))
 	ids := c.seenMovies()
@@ -265,6 +280,7 @@ func waitHealth(t *testing.T, c *client, want int, within time.Duration) time.Du
 }
 
 func TestDegradationThroughCaddy(t *testing.T) {
+	needStack(t)
 	user := randomName("degrade-")
 	setup := newClient(t)
 	setup.signup(user)
