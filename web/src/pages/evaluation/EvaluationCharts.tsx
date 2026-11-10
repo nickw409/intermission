@@ -38,7 +38,7 @@ export default function EvaluationCharts({ runs }: { runs: RunReport[] }) {
     <>
       {groups.length > 1 && (
         <div className="field eval-group-picker">
-          <label htmlFor={selectId}>Dataset</label>
+          <label htmlFor={selectId}>Dataset and split</label>
           <select id={selectId} value={group.key} onChange={(event) => setGroupKey(event.target.value)}>
             {groups.map((g) => (
               <option key={g.key} value={g.key}>

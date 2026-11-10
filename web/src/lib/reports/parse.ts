@@ -66,7 +66,10 @@ export function parseReport(json: unknown): RunReport {
 
 type Json = Record<string, unknown>;
 
-const RUN_ID = /^[A-Za-z0-9_-]{1,100}$/;
+/** contracts/public.yaml and report.schema.json: the only run ids that may appear in a URL. */
+export const RUN_ID = /^[A-Za-z0-9_-]{1,100}$/;
+// RFC 3339 date-time (the schema's "format": "date-time"): a time zone, Z or ±hh:mm, is required.
+const RFC3339 = /^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$/;
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 
 function join(path: string, key: string | number): string {
@@ -108,7 +111,7 @@ function string(value: unknown, path: string, pattern?: RegExp): void {
 
 function dateTime(value: unknown, path: string): void {
   string(value, path);
-  if (!/^\d{4}-\d{2}-\d{2}T/.test(value as string) || Number.isNaN(Date.parse(value as string))) {
+  if (!RFC3339.test(value as string) || Number.isNaN(Date.parse(value as string))) {
     throw new InvalidReport(path, 'must be an RFC 3339 date-time');
   }
 }

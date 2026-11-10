@@ -55,7 +55,12 @@ function ndcgPlot(runs: RunReport[], { dark }: PlotContext): Plot.PlotOptions {
   if (pop) {
     const popMean = pop.metrics['ndcg@10'].mean;
     marks.push(
-      Plot.ruleX([popMean], { stroke: 'currentColor', strokeOpacity: 0.55, strokeDasharray: '4,4' }),
+      Plot.ruleX([popMean], {
+        className: 'ndcg-reference',
+        stroke: 'currentColor',
+        strokeOpacity: 0.55,
+        strokeDasharray: '4,4',
+      }),
       Plot.text([popMean], {
         x: (d: number) => d,
         frameAnchor: 'top',
@@ -70,12 +75,13 @@ function ndcgPlot(runs: RunReport[], { dark }: PlotContext): Plot.PlotOptions {
     const style = modelStyle(run.model);
     const color = modelColor(run.model, dark);
     marks.push(
-      Plot.ruleY([run], { y: 'model', x1: () => lo(e), x2: () => hi(e), stroke: color, strokeWidth: 2 }),
-      Plot.dot([run], { y: 'model', x: () => e.mean, r: 5, symbol: style.symbol, fill: color }),
+      Plot.ruleY([run], { className: 'ndcg-ci', y: 'model', x1: () => lo(e), x2: () => hi(e), stroke: color, strokeWidth: 2 }),
+      Plot.dot([run], { className: 'ndcg-mean', y: 'model', x: () => e.mean, r: 5, symbol: style.symbol, fill: color }),
     );
     if (verdict.get(run.model) === 'fails') {
       marks.push(
         Plot.text([run], {
+          className: 'ndcg-verdict',
           y: 'model',
           x: () => hi(e),
           dx: 10,
@@ -113,7 +119,6 @@ export function NdcgChart({ runs }: { runs: RunReport[] }) {
   const pop = runs.find((run) => run.model === BASELINE_MODEL);
   const failing = runs.filter((run) => verdict.get(run.model) === 'fails').map((run) => run.model);
   const best = runs.reduce((a, b) => (b.metrics['ndcg@10'].mean > a.metrics['ndcg@10'].mean ? b : a));
-
 
   const table: TableData = {
     columns: ['Model', 'NDCG@10', '95% CI', 'Against popularity'],
@@ -166,7 +171,6 @@ function recallByModelPlot(runs: RunReport[], { dark }: PlotContext): Plot.PlotO
 
 export function RecallChart({ runs }: { runs: RunReport[] }) {
   const ks = [...new Set(runs.flatMap((run) => run.per_k.recall.map(([k]) => k)))].sort((a, b) => a - b);
-
 
   const table: TableData = {
     columns: ['k', ...runs.map((run) => run.model)],
@@ -271,7 +275,6 @@ function coveragePlot(runs: RunReport[], { dark }: PlotContext): Plot.PlotOption
 
 export function CoverageChart({ runs }: { runs: RunReport[] }) {
   const widest = runs.reduce((a, b) => (b.aggregates['coverage@10'] > a.aggregates['coverage@10'] ? b : a));
-
 
   const table: TableData = {
     columns: ['Model', 'Coverage@10', 'NDCG@10', 'NDCG@10 95% CI'],
@@ -406,7 +409,6 @@ function coldUsersPlot(runs: RunReport[], { dark }: PlotContext): Plot.PlotOptio
 export function ColdUsersChart({ runs }: { runs: RunReport[] }) {
   const threshold = runs[0]?.slices.cold_users.train_ratings_lt ?? 0;
   const missing = runs.filter((run) => run.slices.cold_users['ndcg@10'] === null).map((run) => run.model);
-
 
   const table: TableData = {
     columns: ['Model', 'All users', 'All users 95% CI', 'Cold users', 'Cold users 95% CI', 'Cold users (count)'],

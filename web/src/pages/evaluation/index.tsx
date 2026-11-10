@@ -3,14 +3,30 @@
 //
 // Only schema_version 1 reports are charted. Anything else is listed under "Reports not shown"
 // with the reason, never guessed at.
-import { lazy, Suspense, useEffect, useId, useState } from 'react';
+import { Suspense, use, useEffect, useId, useState } from 'react';
 import { friendlyMessage } from '../../lib/errors';
 import { loadReports, type LoadedReports, type SkippedRun } from '../../lib/reports/load';
+import { ErrorBoundary } from './ErrorBoundary';
 
 // Observable Plot is large; only this page needs it.
 import './evaluation.css';
 
-const EvaluationCharts = lazy(() => import('./EvaluationCharts'));
+type ChartsModule = typeof import('./EvaluationCharts');
+let chartsModule: Promise<ChartsModule> | null = null;
+
+/** Imports the chart bundle once; a failed download is forgotten so "Try again" refetches it. */
+function loadChartsModule(): Promise<ChartsModule> {
+  chartsModule ??= import('./EvaluationCharts').catch((error: unknown) => {
+    chartsModule = null;
+    throw error;
+  });
+  return chartsModule;
+}
+
+function LazyCharts({ runs }: { runs: LoadedReports['runs'] }) {
+  const { default: EvaluationCharts } = use(loadChartsModule());
+  return <EvaluationCharts runs={runs} />;
+}
 
 type State = { status: 'loading' } | { status: 'error'; message: string } | { status: 'ready'; data: LoadedReports };
 
@@ -21,9 +37,9 @@ function SkippedList({ skipped }: { skipped: SkippedRun[] }) {
     <section className="eval-section eval-skipped" aria-labelledby={headingId}>
       <h2 id={headingId}>Reports not shown</h2>
       <ul>
-        {skipped.map((run) => (
-          <li key={run.run_id}>
-            <code>{run.run_id}</code>: {run.reason}
+        {skipped.map((run, i) => (
+          <li key={i}>
+            <code>{run.run_id || '(empty id)'}</code>: {run.reason}
           </li>
         ))}
       </ul>
@@ -83,15 +99,17 @@ export default function EvaluationPage() {
       )}
 
       {state.status === 'ready' && state.data.runs.length > 0 && (
-        <Suspense
-          fallback={
-            <p role="status" className="muted">
-              Loading charts…
-            </p>
-          }
-        >
-          <EvaluationCharts runs={state.data.runs} />
-        </Suspense>
+        <ErrorBoundary message="The charts couldn't be shown. Check your connection and try again.">
+          <Suspense
+            fallback={
+              <p role="status" className="muted">
+                Loading charts…
+              </p>
+            }
+          >
+            <LazyCharts runs={state.data.runs} />
+          </Suspense>
+        </ErrorBoundary>
       )}
 
       {state.status === 'ready' && <SkippedList skipped={state.data.skipped} />}

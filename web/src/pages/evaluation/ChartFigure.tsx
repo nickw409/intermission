@@ -3,9 +3,12 @@
 //
 // The SVG is exposed as a single image (role="img") named by the title and described by the
 // summary. The table is always in the accessibility tree; "Show data" only makes it visible.
+// Plot's tooltips follow the pointer only; keyboard and screen-reader users get every value from
+// the data table instead.
 import * as Plot from '@observablehq/plot';
 import { useEffect, useId, useRef, useState, useSyncExternalStore, type ReactNode, type RefObject } from 'react';
 import { modelStyle } from '../../lib/reports/models';
+import { ErrorBoundary } from './ErrorBoundary';
 
 // ---- Theme and size ----
 
@@ -182,8 +185,8 @@ export function DataTable({ caption, data }: { caption: string; data: TableData 
         </tr>
       </thead>
       <tbody>
-        {data.rows.map((row) => (
-          <tr key={row.header}>
+        {data.rows.map((row, i) => (
+          <tr key={i}>
             <th scope="row">{row.header}</th>
             {row.cells.map((cell, i) => (
               <td key={i}>{cell}</td>
@@ -240,7 +243,9 @@ export function ChartFigure<T>({
         </p>
       </figcaption>
       {legend && legend.length > 1 && <Legend items={legend} />}
-      <PlotSvg build={build} input={input} titleId={titleId} descriptionId={descriptionId} />
+      <ErrorBoundary message={`Couldn't draw the chart "${title}". The numbers are still in the data table below.`}>
+        <PlotSvg build={build} input={input} titleId={titleId} descriptionId={descriptionId} />
+      </ErrorBoundary>
       {notes}
       <button
         type="button"

@@ -4,11 +4,11 @@
 // one slot permanently ("color follows the entity"), so a model looks the same in every chart and
 // keeps its color when other models are filtered out. Separate light and dark steps of the same hue
 // are chosen for each theme; both sets were validated against this site's surfaces (#ffffff and
-// #1e1a17): adjacent-slot CVD separation >= 8.4 ΔE (OKLab x100), normal-vision >= 19.3 ΔE.
+// #1e1a17): every color has at least 3:1 contrast with its surface, adjacent-slot CVD separation
+// is >= 8.4 ΔE (OKLab x100) and normal-vision separation >= 18.4 ΔE. (The light orange, aqua,
+// yellow and magenta are darker steps of the reference hues, chosen to reach 3:1 on white.)
 // Six series cannot all be told apart pairwise by color alone (no palette can), so every chart
-// also encodes the model by position, marker shape or line dash, and labels marks directly.
-// Three light-mode hues are below 3:1 against white; the direct labels and data tables carry the
-// values for those.
+// also encodes the model by position, marker shape or line dash, with a legend and data table.
 
 export interface ModelStyle {
   /** Stroke/fill on the light theme. */
@@ -29,10 +29,10 @@ export const BASELINE_MODEL = 'pop';
 
 const KNOWN: Record<string, ModelStyle> = {
   pop: { light: '#2a78d6', dark: '#3987e5', symbol: 'circle', dash: '6,3' },
-  pop_count: { light: '#eb6834', dark: '#d95926', symbol: 'square', dash: '2,3' },
-  knn: { light: '#1baf7a', dark: '#199e70', symbol: 'triangle', dash: '8,3,2,3' },
-  content: { light: '#eda100', dark: '#c98500', symbol: 'diamond', dash: '12,4' },
-  mf: { light: '#e87ba4', dark: '#d55181', symbol: 'star', dash: '3,2,3,6' },
+  pop_count: { light: '#d95926', dark: '#d95926', symbol: 'square', dash: '2,3' },
+  knn: { light: '#17a072', dark: '#199e70', symbol: 'triangle', dash: '8,3,2,3' },
+  content: { light: '#bf8500', dark: '#c98500', symbol: 'diamond', dash: '12,4' },
+  mf: { light: '#d6588c', dark: '#d55181', symbol: 'star', dash: '3,2,3,6' },
   als: { light: '#008300', dark: '#008300', symbol: 'wye', dash: '' },
 };
 
@@ -68,11 +68,13 @@ function formatValue(value: unknown): string {
     : JSON.stringify(value);
 }
 
-/** `{k: 128, lambda: 0.05}` -> "k=128, lambda=0.05". */
+/** `{k: 128, lambda: 0.05}` -> "k=128, lambda=0.05"; a key the config lacks reads "k unset". */
 export function configLabel(config: object, keys: string[] = Object.keys(config).sort()): string {
   if (keys.length === 0) return 'default config';
   const values = config as Record<string, unknown>;
-  return keys.map((key) => `${key}=${formatValue(values[key])}`).join(', ');
+  return keys
+    .map((key) => (Object.hasOwn(values, key) ? `${key}=${formatValue(values[key])}` : `${key} unset`))
+    .join(', ');
 }
 
 /** "2026-11-09T22:02:10Z" -> "2026-11-09 22:02 UTC". */
@@ -101,7 +103,7 @@ export function runLabels(runs: LabelledRun[]): Map<string, string> {
   for (const [model, siblings] of byModel) {
     const allKeys = [...new Set(siblings.flatMap((run) => Object.keys(run.config)))].sort();
     const differing = allKeys.filter((key) => {
-      const seen = new Set(siblings.map((run) => formatValue((run.config as Record<string, unknown>)[key])));
+      const seen = new Set(siblings.map((run) => configLabel(run.config, [key])));
       return seen.size > 1;
     });
     for (const run of siblings) {
