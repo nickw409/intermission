@@ -20,7 +20,8 @@ namespace recs::detail {
 /// Returns a description of the first violated rule, or nullopt if `ptr` is well formed.
 inline std::optional<std::string> check_row_offsets(std::span<const std::uint64_t> ptr, std::uint64_t n_rows,
                                                     std::uint64_t nnz) {
-  if (ptr.size() != n_rows + 1) return "row offsets: size != n_rows + 1";
+  // Not `ptr.size() != n_rows + 1`: that wraps to 0 for n_rows = 2^64 - 1 and accepts an empty array.
+  if (ptr.empty() || ptr.size() - 1 != n_rows) return "row offsets: size != n_rows + 1";
   if (ptr.front() != 0) return "row offsets: first offset != 0";
   if (ptr.back() != nnz) return "row offsets: last offset != nnz";
   for (std::size_t r = 0; r + 1 < ptr.size(); ++r) {

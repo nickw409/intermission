@@ -578,8 +578,10 @@ class ItemKnn final : public Model {
     item_knn_detail::parse_config(item_knn_detail::to_config(p));  // same validation as fit()
     const std::uint64_t nnz = r.u64();
     // Size check before allocating, so a corrupt count cannot trigger a huge allocation.
+    // nnz is bounded by the file size first, so nnz * 8 below cannot overflow.
+    if (nnz > r.remaining()) throw std::runtime_error("knn: model file has the wrong size");
     const std::uint64_t expect = (static_cast<std::uint64_t>(n_items) + 1) * 8 + nnz * 8;
-    if (nnz > r.remaining() || expect != r.remaining()) throw std::runtime_error("knn: model file has the wrong size");
+    if (expect != r.remaining()) throw std::runtime_error("knn: model file has the wrong size");
 
     std::vector<std::uint64_t> ptr(static_cast<std::size_t>(n_items) + 1);
     for (auto& v : ptr) v = r.u64();

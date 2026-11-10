@@ -2,15 +2,21 @@
 // fully validated (size n+1, first 0, last nnz, non-decreasing) before any row is walked.
 // Each input below has offsets [0, 3, 1] with nnz = 1: row 0 claims three entries but only one
 // exists. Before the fix the loaders read past the end of the index array (ASan heap overflow);
-// now each must fail cleanly with an exception.
+// now each must fail cleanly, and the message shows that the whole-array offset check fired (so
+// the tests fail without the fix even in a build without ASan).
 #include <cstdint>
 #include <exception>
 #include <filesystem>
+#include <optional>
+#include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
+#include "../../../core/src/sparse/offsets.hpp"
 #include "../data/temp_dir.hpp"
 #include "recs/dataset.hpp"
 #include "recs/model.hpp"
@@ -18,6 +24,7 @@
 
 namespace {
 
+using Catch::Matchers::ContainsSubstring;
 using recs::testing::TempDir;
 
 struct Bytes {
@@ -58,7 +65,7 @@ TEST_CASE("SA2-1: knn load rejects non-monotonic row offsets before walking rows
   b.f32(0.9f);  // sims[0]
   dir.write("item_knn.bin", b.s);
   auto m = recs::make_model("knn");
-  CHECK_THROWS_AS(m->load(dir.path()), std::exception);
+  CHECK_THROWS_WITH(m->load(dir.path()), ContainsSubstring("row offsets: decrease at row 1"));
 }
 
 TEST_CASE("SA2-1: content load rejects non-monotonic row offsets before walking rows", "[security][sa2]") {
@@ -84,7 +91,7 @@ TEST_CASE("SA2-1: content load rejects non-monotonic row offsets before walking 
   b.seal();
   dir.write("features.bin", b.s);
   auto m = recs::make_model("content");
-  CHECK_THROWS_AS(m->load(dir.path()), std::exception);
+  CHECK_THROWS_WITH(m->load(dir.path()), ContainsSubstring("row offsets: decrease at row 1"));
 }
 
 TEST_CASE("SA2-1: dataset cache rejects non-monotonic row offsets before walking rows", "[security][sa2]") {
@@ -112,5 +119,20 @@ TEST_CASE("SA2-1: dataset cache rejects non-monotonic row offsets before walking
   b.s += std::string(400, '\0');  // padding so later reads stay in bounds
   b.seal();
   dir.write("ds.bin", b.s);
-  CHECK_THROWS_AS(recs::load_cache(dir / "ds.bin"), std::exception);
+  CHECK_THROWS_WITH(recs::load_cache(dir / "ds.bin"), ContainsSubstring("row offsets: decrease at row 1"));
+}
+
+TEST_CASE("check_row_offsets: every rule, and no wrap-around on n_rows + 1", "[security][sa2]") {
+  using recs::detail::check_row_offsets;
+  const std::vector<std::uint64_t> good{0, 2, 2, 5};
+  CHECK_FALSE(check_row_offsets(good, 3, 5).has_value());
+  CHECK(check_row_offsets(std::vector<std::uint64_t>{0}, 0, 0) == std::nullopt);
+  CHECK(check_row_offsets(good, 2, 5).has_value());                                     // size
+  CHECK(check_row_offsets(std::vector<std::uint64_t>{1, 2, 2, 5}, 3, 5).has_value());  // first
+  CHECK(check_row_offsets(good, 3, 4).has_value());                                     // last
+  CHECK(check_row_offsets(std::vector<std::uint64_t>{0, 3, 1, 5}, 3, 5).has_value());  // decrease
+  // n_rows = 2^64 - 1 made n_rows + 1 wrap to 0, so an empty array passed the size check and
+  // front() read from an empty span.
+  CHECK(check_row_offsets(std::span<const std::uint64_t>{}, ~std::uint64_t{0}, 0).has_value());
+  CHECK(check_row_offsets(std::span<const std::uint64_t>{}, 0, 0).has_value());
 }
