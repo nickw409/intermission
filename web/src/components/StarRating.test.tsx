@@ -165,11 +165,12 @@ describe('StarRating', () => {
   });
 
   it('has no axe violations in interactive and readonly modes', async () => {
+    // Inside a landmark, as on every real page (the shell's <main>).
     render(
-      <>
+      <main>
         <StarRating label="Your rating" value={2.5} onChange={() => {}} />
         <StarRating label="Average rating" value={4} readOnly />
-      </>,
+      </main>,
     );
     expect(await axeViolations()).toEqual([]);
   });
