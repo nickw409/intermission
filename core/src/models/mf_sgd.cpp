@@ -86,8 +86,11 @@
 //       set configs/mf.json.
 //   On ml-latest-small (users have tens of ratings, so lambda n is small) this costs about
 //   0.0015 validation RMSE (0.8946 best overall vs 0.8961 best with parity > 0.9; the bootstrap
-//   CI half-width is about 0.02). On ml-32m users have far more ratings, lambda n is larger, and
-//   the users converge in fewer epochs (configs/mf.ml-32m.tuned.json).
+//   CI half-width is about 0.02). On ml-32m the trade-off is not cheap (validation, k = 64,
+//   user_init_sd 0): lambda 0.05 reaches RMSE 0.8175 with parity 0.74-0.77 after 80-150 epochs,
+//   still improving; lambda 0.1 reaches parity 0.902 but RMSE 0.8455 (bootstrap CI half-width
+//   about 0.002; the user+item bias baseline is 0.894). The many users with few ratings (small
+//   lambda n) are the slow ones. No ml-32m config is chosen yet (pending an owner decision).
 //
 // Explanations
 //   x is linear in the residuals, x = W^{-1} sum_j z_j s_j with W = sum_j z_j z_j^T + lambda n I.
