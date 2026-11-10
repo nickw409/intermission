@@ -83,6 +83,12 @@
         },
         "seed": {
           "type": "integer"
+        },
+        "val_min": {
+          "type": "integer"
+        },
+        "val_max": {
+          "type": "integer"
         }
       }
     },

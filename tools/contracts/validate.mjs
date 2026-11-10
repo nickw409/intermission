@@ -9,6 +9,7 @@
 //   response: { status, headers: {}, body? }  — body may be {"$fixtureRef": "reports/als.json"},
 //             a path relative to contracts/fixtures/.
 
+import { reportConsistency } from './report-consistency.mjs';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -294,7 +295,10 @@ if (!existsSync(reportsDir)) {
       else if (!validateReport.errors.some((e) => e.instancePath === '/schema_version')) fail(`fixtures/reports/${f}`, `rejected, but not for schema_version: ${fmtErrors(validateReport.errors)}`);
       else unknownReports.push(report);
     } else if (!ok) fail(`fixtures/reports/${f}`, fmtErrors(validateReport.errors));
-    else validReports.push({ file: f, report });
+    else {
+      for (const pr of reportConsistency(report)) fail(`fixtures/reports/${f}`, pr);
+      validReports.push({ file: f, report });
+    }
   }
 
   // listReports must summarise every report fixture: known-major reports newest first, then

@@ -19,6 +19,8 @@ export interface IntermissionRunReport {
     test_min: number;
     test_max: number;
     seed: number;
+    val_min?: number;
+    val_max?: number;
   };
   evaluated_on: 'test' | 'validation';
   model: string;
