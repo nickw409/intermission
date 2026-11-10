@@ -410,4 +410,3 @@ func TestNoRatingPayloadInLogs(t *testing.T) {
 		t.Fatalf("no access log:\n%s", logs)
 	}
 }
-
