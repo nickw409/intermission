@@ -186,6 +186,15 @@ TEST_CASE("recs-model serves the tiny popularity artifact over a Unix socket", "
     CHECK(tl->status == 400);
     CHECK(tl->get_header_value("X-Model-Version") == kVersion);
     CHECK(json::parse(tl->body)["error"]["code"] == "body_too_large");
+    // Exactly one X-Model-Version on service responses, error responses and httplib-generated ones.
+    CHECK(v->get_header_value_count("X-Model-Version") == 1);
+    CHECK(knn->get_header_value_count("X-Model-Version") == 1);
+    CHECK(tl->get_header_value_count("X-Model-Version") == 1);
+    auto unknown = cli.Get("/v1/nope");
+    REQUIRE(unknown);
+    CHECK(unknown->status == 404);
+    CHECK(unknown->get_header_value_count("X-Model-Version") == 1);
+    CHECK(json::parse(unknown->body)["error"]["code"] == "not_found");
 
     auto bad = cli.Post("/v1/recommend", "{not json", "application/json");
     REQUIRE(bad);
@@ -251,4 +260,8 @@ TEST_CASE("TCP fallback binds loopback only; stale sockets are replaced, other f
   std::string err;
   CHECK_FALSE(s.bind({regular.string(), "", 0, 2, 0660}, &err));
   CHECK(fs::file_size(regular) == 7);
+  // sockaddr_un holds at most 107 path bytes; a longer path is refused with a clear message.
+  recs::service::HttpServer s2(svc);
+  CHECK_FALSE(s2.bind({(tmp.path / std::string(120, 's')).string(), "", 0, 2, 0660}, &err));
+  CHECK(err.find("longer than") != std::string::npos);
 }

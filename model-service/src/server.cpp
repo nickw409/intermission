@@ -14,6 +14,7 @@
 
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -91,6 +92,9 @@ bool HttpServer::bind(const ListenOptions& opts, std::string* error) {
 
   if (!opts.unix_socket.empty()) {
     const std::string& path = opts.unix_socket;
+    if (path.size() >= sizeof(sockaddr_un::sun_path)) {
+      return fail("Unix socket path is longer than " + std::to_string(sizeof(sockaddr_un::sun_path) - 1) + " bytes: " + path);
+    }
     struct stat st {};
     if (::lstat(path.c_str(), &st) == 0) {
       if (!S_ISSOCK(st.st_mode)) return fail(path + " exists and is not a socket");
