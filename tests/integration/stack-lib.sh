@@ -51,7 +51,8 @@ stack_scrub_env() {
     RECS_LOG_LEVEL TMDB_API_KEY SMOKE_USERNAME SMOKE_PASSWORD SMOKE_MODEL GRAFANA_ADMIN_PASSWORD \
     RECS_ENV_FILE RECS_LOCK_FILE RECS_HISTORY_FILE RECS_DRILL_PROJECT DRILL_PORT INTERMISSION_LOCK_HELD \
     NODE_EXPORTER_DATA_PROPAGATION MODEL_MEM_LIMIT MODEL_OMP_THREADS TRAIN_MEM_LIMIT TRAIN_OMP_THREADS
-  export RECS_DATA_DIR="$STACK_DIR/data" RECS_HTTP_PORT="$STACK_PORT" TAG="$STACK_TAG"
+  export RECS_DATA_DIR="$STACK_DIR/data" RECS_HTTP_PORT="$STACK_PORT" TAG="$STACK_TAG" \
+    RECS_CONFIG_DIR="$STACK_DIR/configs"
 }
 
 stack_dc() {
@@ -107,7 +108,7 @@ stack_train() {
   # Otherwise Docker would bind a missing path by creating it (root-owned) on the host.
   [[ -d "$RAW_DIR/$dataset" ]] || sdie "$RAW_DIR/$dataset does not exist (tools/download_movielens.sh $dataset)"
   slog "training $models on $dataset (train image $STACK_TAG)"
-  stack_dc run --rm --no-deps -v "$STACK_DIR/configs:/srv/configs:ro" train \
+  stack_dc run --rm --no-deps train \
     train --dataset "$dataset" --models "$models" --default-model "$default" \
     --config-dir /srv/configs --set-current --seed 42
 }

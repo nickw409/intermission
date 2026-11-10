@@ -8,6 +8,7 @@
 // validation data then (their epochs/iterations come from the tuned config). --on validation fits
 // on split.train_minus_val, passes the validation set to fit() for early stopping, and evaluates
 // on it. The test set is evaluated once per final config (spec: Hyperparameter tuning).
+#include "dataset_name.hpp"
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -50,9 +51,16 @@ struct EvalArgs {
   bool rating_baselines = false;
 };
 
-Config read_config(const std::string& explicit_path, const std::string& model) {
+Config read_config(const std::string& explicit_path, const std::string& model, const std::string& dataset,
+                   const std::string& on) {
   fs::path path = explicit_path;
   if (path.empty()) {
+    // eval never picks a tuned config by itself: tuning on validation must not feed on earlier
+    // tuning results, and the one-off test evaluation should name its config. Say so, though.
+    const fs::path tuned = fs::path("configs") / (model + "." + dataset + ".tuned.json");
+    if (on == "test" && fs::exists(tuned)) {
+      std::cout << "warning: " << tuned.string() << " exists but is not used; pass --config to evaluate it\n";
+    }
     path = fs::path("configs") / (model + ".json");
     if (!fs::exists(path)) {
       std::cout << "config: none given and " << path << " not found; using model defaults\n";
@@ -77,9 +85,10 @@ void print_estimate(const char* name, const nlohmann::json& e) {
 }
 
 void run_eval(const EvalArgs& a) {
+  check_dataset_name(a.dataset);
   // Everything that can fail cheaply is checked before the dataset is loaded.
   if (a.on != "test" && a.on != "validation") throw std::invalid_argument("--on must be test or validation");
-  const Config cfg = read_config(a.config, a.model);
+  const Config cfg = read_config(a.config, a.model, a.dataset, a.on);
   auto model = make_model(a.model);
   const std::string run_id = make_run_id(a.model);
   fs::create_directories(a.reports);

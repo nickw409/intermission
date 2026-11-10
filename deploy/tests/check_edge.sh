@@ -83,7 +83,8 @@ expect() { # expect NAME VALUE
   local v; v="$(hdr "$scratch/h" "$1")"
   [[ "$v" == "$2" ]] && pass "$1: $v" || fail "$1 is '$v', want '$2'"
 }
-expect Content-Security-Policy "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'"
+site_csp="default-src 'self'; img-src 'self' data:; frame-ancestors 'none'; form-action 'self'; base-uri 'none'"
+expect Content-Security-Policy "$site_csp"
 expect X-Content-Type-Options nosniff
 expect Referrer-Policy strict-origin-when-cross-origin
 v="$(hdr "$scratch/h" Strict-Transport-Security)"
@@ -125,8 +126,8 @@ code="$(get /api/auth/login -X POST "${csrf[@]}" --data-binary "@$scratch/big")"
 # no Server header, an X-Request-ID.
 grep -q '"code":"body_too_large"' "$scratch/b" && [[ "$(hdr "$scratch/h" Content-Type)" == application/json* ]] \
   && pass "413 body is the Error shape (body_too_large)" || fail "413 body is not the Error shape: $(head -c 200 "$scratch/b")"
-[[ -n "$(hdr "$scratch/h" Content-Security-Policy)" && -z "$(hdr "$scratch/h" Server)" && -n "$(hdr "$scratch/h" X-Request-ID)" ]] \
-  && pass "413 has security headers and X-Request-ID, no Server" || fail "413 headers: CSP '$(hdr "$scratch/h" Content-Security-Policy)', Server '$(hdr "$scratch/h" Server)', X-Request-ID '$(hdr "$scratch/h" X-Request-ID)'"
+[[ "$(hdr "$scratch/h" Content-Security-Policy)" == "$site_csp" && -z "$(hdr "$scratch/h" Server)" && -n "$(hdr "$scratch/h" X-Request-ID)" ]] \
+  && pass "413 has the site CSP, security headers and X-Request-ID, no Server" || fail "413 headers: CSP '$(hdr "$scratch/h" Content-Security-Policy)', Server '$(hdr "$scratch/h" Server)', X-Request-ID '$(hdr "$scratch/h" X-Request-ID)'"
 [[ "$(hdr "$scratch/h" Cache-Control)" == no-store ]] && pass "413 is Cache-Control: no-store" || fail "413 Cache-Control is '$(hdr "$scratch/h" Cache-Control)'"
 head -c 65000 /dev/zero | tr '\0' 'a' > "$scratch/big"
 code="$(get /api/auth/login -X POST "${csrf[@]}" --data-binary "@$scratch/big")"
@@ -157,7 +158,7 @@ code="$(get /api/posters/1)"
 [[ "$code" == 200 ]] && pass "/api/posters/1 -> 200" || fail "/api/posters/1 returned $code"
 expect Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; sandbox"
 get /api/me >/dev/null
-expect Content-Security-Policy "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'"
+expect Content-Security-Policy "$site_csp"
 
 echo "== HTTP/1.1 only: no h2c (SA3-1)"
 ver="$(curl -s -o /dev/null --max-time 5 --http2-prior-knowledge -w '%{http_version}' -H "Host: $host" "$base/" || true)"
@@ -277,8 +278,8 @@ echo "== errors Caddy raises itself (recs-api stopped: 502)"
 dc stop api >/dev/null 2>&1
 code="$(get /api/me)"
 [[ "$code" == 502 ]] && pass "recs-api down -> 502 from Caddy" || fail "recs-api down returned $code"
-[[ -n "$(hdr "$scratch/h" Content-Security-Policy)" && -z "$(hdr "$scratch/h" Server)" && -n "$(hdr "$scratch/h" X-Request-ID)" ]] \
-  && pass "502 has security headers and X-Request-ID, no Server" || fail "502 headers: CSP '$(hdr "$scratch/h" Content-Security-Policy)', Server '$(hdr "$scratch/h" Server)', X-Request-ID '$(hdr "$scratch/h" X-Request-ID)'"
+[[ "$(hdr "$scratch/h" Content-Security-Policy)" == "$site_csp" && -z "$(hdr "$scratch/h" Server)" && -n "$(hdr "$scratch/h" X-Request-ID)" ]] \
+  && pass "502 has the site CSP, security headers and X-Request-ID, no Server" || fail "502 headers: CSP '$(hdr "$scratch/h" Content-Security-Policy)', Server '$(hdr "$scratch/h" Server)', X-Request-ID '$(hdr "$scratch/h" X-Request-ID)'"
 [[ "$(hdr "$scratch/h" Cache-Control)" == no-store ]] && pass "502 is Cache-Control: no-store" || fail "502 Cache-Control is '$(hdr "$scratch/h" Cache-Control)'"
 
 if [[ $fails -gt 0 ]]; then
