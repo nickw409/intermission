@@ -1,0 +1,40 @@
+# Data, artifacts and local state (never commit; MovieLens license + privacy)
+/data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite*
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Builds
+/build*/
+/out/
+/web/node_modules/
+/web/dist/
+/api/bin/
+*.o
+*.a
+compile_commands.json
+
+# Fuzzing and profiling output
+crash-*
+leak-*
+timeout-*
+oom-*
+*.profraw
+*.prof
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Local Claude Code settings
+.claude/settings.local.json
