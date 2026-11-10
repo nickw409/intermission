@@ -27,6 +27,29 @@ Stop conditions (only the affected task stops; the others keep going):
 - Phase 0 signed off (`phase-0-done`, docs/phase-0.md). Phase 1 results are in docs/phase-1.md, awaiting owner decisions (KNN scoring formula; content gate).
 - Wave 3a started: long fuzz runs (libFuzzer 1 CPU-hour across 4 harnesses; Go fuzz 15 min per decoder) and the integration agent (contract tests against real services, robustness through Caddy, degradation, p99 load, deploy/rollback and restore drills).
 
+- Morning, 2026-11-10: my usage limit paused the run around 05:00; it resumed after the reset.
+- Fuzz gates passed. libFuzzer ran 4 harnesses for 900 s each with 0 crashes. Go fuzz ran 5 decoders for 15 min each, all passing. Details are in jobs.md.
+- PR #38 (the SA0 threat model) was merged.
+- PR #39 (Wave 3a integration) was merged after a code review, a test validation and a security audit. The code review failed on script safety: shell variables could point the test stacks at production data or the production compose project. All 12 fixes were made and re-reviewed. One last fix moved the drill's credentials into a 0700 directory. Gate results:
+  - N1 contract tests on both sides, with no waivers: PASS.
+  - N2 robustness through Caddy: PASS.
+  - N3 degradation (503 in ≤ 503 ms with recs-model hung): PASS.
+  - N3 load p99, threshold 75 ms: PASS at 13.4 ms on ml-32m with the tuned KNN config and 8.4 ms on ml-latest-small. Both runs used 20 concurrent cache-missing GETs and 2,000 timed requests with 0 errors.
+  - M2 deploy, rollback and restore drill: PASS.
+  - The only published port is 127.0.0.1:8080: PASS.
+- The integration run found and fixed one bug: errors raised by Caddy itself (413, 502) had no security headers and leaked `Server: Caddy`.
+- Wave 3b audit started against main 7f7cfd4, with a staging stack on 127.0.0.1:8080.
+- Wave 3b security audit is done: six independent passes (SA1–SA6) against the 7f7cfd4 images on a local staging stack, with no Funnel.
+  - Findings: no critical or high. Four medium: three fixed and re-tested; one (SA4-1) is code-fixed and also needs a repo setting from the owner.
+  - Fixes merged in four PRs, each with tests written first, an independent code review, mutation testing, and a re-test by the auditor who found the issue:
+    - #40: account deletion in the UI;
+    - #41: C++ loader bounds and fuzzing for every file parser;
+    - #42: recs-api and Caddy fixes (ID reuse, deleted-data residue, retention, logging, h2c, gzip-only and more);
+    - #43: weekly vulnerability scan, branch secret scan, deterministic fuzz-replay gate, ccache.
+  - Re-verified on 440079e (final main 621541b only adds CI): every gate passes. Load p99 is 16.8 ms on ml-32m and 9.8 ms on ml-latest-small.
+  - **The audit doc is `docs/security/audit-2026-11-10.md`. It needs the owner's decisions (§4) and signature (§7) before Funnel.**
+- Housekeeping: stale branches removed. Locally that was 19 merged agent worktrees and 39 branches; on GitHub it was 19 remote branches, all merged or superseded.
+
 ## Decisions made without the owner (please review)
 
 | # | Decision | Why | Easy to change? |
@@ -64,6 +87,23 @@ Stop conditions (only the affected task stops; the others keep going):
 5. **CSP hardening (spec change).** The spec's CSP is `default-src 'self'; img-src 'self' data:; frame-ancestors 'none'`. The deploy audit recommends adding `base-uri 'none'; form-action 'self'`. Approve to update the spec and Caddyfile.
 6. **Alert delivery.** Prometheus alert rules exist, but no notification channel is configured (no Alertmanager receiver). Pick one (email, ntfy, Discord webhook…).
 1. **gitleaks locally.** I wasn't allowed to install the gitleaks binary on your machine without asking (it's external code). CI scans every push regardless. To also scan before each commit, install it yourself (e.g. `go install github.com/zricethezav/gitleaks/v8@v8.30.1`); the pre-commit hook (`tools/hooks/pre-commit`, already enabled) uses it automatically.
+7. **Training configs aren't in the train image.** `compose run train train` would silently use the model defaults, not `configs/*.json`. Also, `deploy/runbooks/deploy.md` points to a `train/README` that doesn't exist. Options: bake `configs/` into the image, or mount it read-only. I recommend mounting it, so tuned configs don't need a rebuild.
+8. **Small edge mismatches.**
+   - Body cap: Caddy's `64KB` is 64,000 bytes, but recs-api's is 65,536.
+   - Request-ID length: recs-api accepts up to 64 characters, recs-model up to 128.
+
+   Neither is a security issue. Pick one value for each and I'll align them.
+9. **Pre-launch decisions from the security audit.** These are listed in `docs/security/audit-2026-11-10.md` §4, with a recommended answer for each:
+   - turn on Dependabot alerts;
+   - accept the login-lockout risk;
+   - accept the 499/504 on a stalled request;
+   - launch without `/metrics`;
+   - the CSP spec change;
+   - egress firewall rules;
+   - the `__Host-` cookie name;
+   - GitHub secret-scanning and Actions SHA-pinning settings;
+   - the fixture movie titles;
+   - the TMDB logo.
 
 ## Follow-ups (not blocking)
 - Deploy integration (from M): DB lives at `data/db/app.db` (directory mount for WAL) instead of the spec's `data/app.db`; recs-model runs with `network_mode: none`, so its `/metrics` needs a relay through recs-api or a dedicated listener; no alert delivery channel yet (owner picks); `recs-api admin sessions revoke-all` doesn't exist (runbook has an SQL fallback); smoke test needs `SMOKE_USERNAME`/`SMOKE_PASSWORD` in deploy/.env (account created once via invite).
@@ -72,6 +112,14 @@ Stop conditions (only the affected task stops; the others keep going):
 - `recs-train eval` run IDs omit the dataset, so the same model on two datasets within one second collides ("report already exists"). Include the dataset in the run ID suffix.
 - Web: the account menu's rating count goes stale while rating; needs a small `refreshMe()` in `web/src/auth/session.tsx` that doesn't reset the sign-in time used for session-expiry detection.
 - Rate-limit message text says "wait a minute" but Retry-After is often ~2 s; reword once with the login tests.
+- Monitoring:
+  - recs-api has no `/metrics`, though the spec requires it (SA6-2), so the Prometheus alerts can't fire.
+  - recs-backup's future-dated-file warning only reaches stdout (L-a). Wire both up together with an alert channel.
+- MF `fit()` accepts lambda < 1e-6, but `save()` refuses it, so a bad config fails only after training. Check it before fitting.
+- Local cleanup for the owner:
+  - 42 stale `/tmp/recs-fuzz-*` directories (`rm -rf /tmp/recs-fuzz-*`; run it only when no fuzzer is running);
+  - the stale `build/debug` and `build/release` trees, which hold httplib 0.18.3: reconfigure or delete them.
+- Weekly `security-scan.yml`: the Caddy Trivy job is expected to fail until upstream Caddy ships fixed x/net and klauspost/compress.
 
 ## Carry-forward for the Wave 3b security audit (from I1)
 0. (from H) cpp-httplib upgraded 0.18.3 → 0.63.0 (CVE-2025-46728: unbounded chunked bodies/headers; checksum verified); pre-routing refuses Transfer-Encoding and length-less POSTs. Residual: a ~1 byte/s trickler can hold one recs-model worker (no whole-request deadline in httplib; only the recs group can reach the socket); re-verify the pinned version and the pre-routing guards in 3b. Also re-check slow-loris behaviour through Caddy (Caddy should bound request time before it reaches recs-api).
