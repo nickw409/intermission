@@ -2,6 +2,8 @@ package posters
 
 import (
 	"container/list"
+	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -10,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -22,16 +25,24 @@ import (
 // every hit refreshes the file's modification time so the order survives a
 // restart. Writes go to a temporary file that is renamed into place, so a
 // reader never sees a partial poster.
+//
+// File I/O happens outside the mutex; only index updates hold it. After any
+// I/O the index is checked again before it is changed, because another
+// request may have evicted or replaced the entry meanwhile. The races that
+// remain can only make the index claim a file that is gone (an evicted
+// file removed just after a new copy was renamed into place); get notices
+// the missing file and drops the entry, so the disk never holds more than
+// the index accounts for once writes finish.
 type diskCache struct {
 	dir    string
 	max    int64
 	logger *slog.Logger
+	broken bool // the directory can't be used; caching is off (set once)
 
 	mu      sync.Mutex
 	total   int64
 	order   *list.List // front = most recently used; values are *diskItem
 	entries map[int64]*list.Element
-	broken  bool // the directory can't be used; caching is off
 }
 
 type diskItem struct {
@@ -88,8 +99,9 @@ func newDiskCache(dir string, max int64, logger *slog.Logger) *diskCache {
 		c.total += f.size
 	}
 	c.mu.Lock()
-	c.evictLocked()
+	evicted := c.evictLocked()
 	c.mu.Unlock()
+	c.removeFiles(evicted)
 	return c
 }
 
@@ -100,17 +112,30 @@ func (c *diskCache) path(id int64) string {
 // get returns the cached poster for id.
 func (c *diskCache) get(id int64) ([]byte, bool) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	el, ok := c.entries[id]
+	c.mu.Unlock()
 	if !ok {
 		return nil, false
 	}
-	b, err := os.ReadFile(c.path(id))
-	if err != nil || int64(len(b)) > MaxImageBytes || !isJPEG(b) {
-		c.removeLocked(el)
+
+	b, err := readImage(c.path(id))
+
+	c.mu.Lock()
+	current := c.entries[id] == el
+	if err != nil || !isJPEG(b) {
+		if current {
+			c.unindexLocked(el)
+		}
+		c.mu.Unlock()
+		if current {
+			c.removeFiles([]int64{id})
+		}
 		return nil, false
 	}
-	c.order.MoveToFront(el)
+	if current {
+		c.order.MoveToFront(el)
+	}
+	c.mu.Unlock()
 	now := time.Now()
 	_ = os.Chtimes(c.path(id), now, now)
 	return b, true
@@ -120,29 +145,14 @@ func (c *diskCache) get(id int64) ([]byte, bool) {
 // bigger than the whole cap is not stored.
 func (c *diskCache) put(id int64, data []byte) {
 	size := int64(len(data))
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.broken || size > c.max {
 		return
 	}
-	f, err := os.CreateTemp(c.dir, tmpPrefix+"*")
-	if err != nil {
+	if err := c.write(id, data); err != nil {
 		c.logger.Warn("posters: cache write failed", "err", err)
 		return
 	}
-	tmp := f.Name()
-	_, werr := f.Write(data)
-	cerr := f.Close()
-	if werr != nil || cerr != nil {
-		_ = os.Remove(tmp)
-		c.logger.Warn("posters: cache write failed", "err", firstErr(werr, cerr))
-		return
-	}
-	if err := os.Rename(tmp, c.path(id)); err != nil {
-		_ = os.Remove(tmp)
-		c.logger.Warn("posters: cache write failed", "err", err)
-		return
-	}
+	c.mu.Lock()
 	if el, ok := c.entries[id]; ok {
 		item := el.Value.(*diskItem)
 		c.total += size - item.size
@@ -152,31 +162,100 @@ func (c *diskCache) put(id int64, data []byte) {
 		c.entries[id] = c.order.PushFront(&diskItem{id: id, size: size})
 		c.total += size
 	}
-	c.evictLocked()
+	evicted := c.evictLocked()
+	c.mu.Unlock()
+	c.removeFiles(evicted)
 }
 
-// evictLocked removes least recently used posters until total <= max.
-func (c *diskCache) evictLocked() {
+// write puts data at id's path through a temporary file and a rename.
+func (c *diskCache) write(id int64, data []byte) error {
+	f, err := os.CreateTemp(c.dir, tmpPrefix+"*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	_, werr := f.Write(data)
+	cerr := f.Close()
+	if err := errors.Join(werr, cerr); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, c.path(id)); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// evictLocked drops least recently used entries from the index until
+// total <= max and returns their IDs; the caller removes the files after
+// unlocking.
+func (c *diskCache) evictLocked() []int64 {
+	var ids []int64
 	for c.total > c.max && c.order.Len() > 0 {
-		c.removeLocked(c.order.Back())
+		el := c.order.Back()
+		ids = append(ids, el.Value.(*diskItem).id)
+		c.unindexLocked(el)
 	}
+	return ids
 }
 
-func (c *diskCache) removeLocked(el *list.Element) {
+func (c *diskCache) unindexLocked(el *list.Element) {
 	item := el.Value.(*diskItem)
-	if err := os.Remove(c.path(item.id)); err != nil && !os.IsNotExist(err) {
-		c.logger.Warn("posters: cache eviction failed", "err", err)
-	}
 	c.order.Remove(el)
 	delete(c.entries, item.id)
 	c.total -= item.size
 }
 
-func firstErr(errs ...error) error {
-	for _, err := range errs {
-		if err != nil {
-			return err
+func (c *diskCache) removeFiles(ids []int64) {
+	for _, id := range ids {
+		if err := os.Remove(c.path(id)); err != nil && !os.IsNotExist(err) {
+			c.logger.Warn("posters: cache eviction failed", "err", err)
 		}
 	}
-	return nil
+}
+
+func (c *diskCache) bytes() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.total
+}
+
+// readImage reads a cached poster with openRegular, refusing files over
+// MaxImageBytes.
+func readImage(path string) ([]byte, error) {
+	f, err := openRegular(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, MaxImageBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > MaxImageBytes {
+		return nil, errors.New("cached poster too large")
+	}
+	return b, nil
+}
+
+// openRegular opens path for reading only if its last component is not a
+// symlink (O_NOFOLLOW) and the opened file is a regular file (checked on the
+// open descriptor). O_NONBLOCK keeps a FIFO from blocking the open; it is
+// then refused as not regular.
+func openRegular(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		f.Close()
+		return nil, errors.New("not a regular file")
+	}
+	return f, nil
 }

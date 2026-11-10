@@ -24,8 +24,12 @@ import (
 // How a poster is served (spec: "Posters"):
 //
 //  1. The movie ID is parsed (digits only) and the disk cache checked.
-//  2. Its TMDB ID comes from the movie cache (moviecache; recs-model fills
-//     misses).
+//     IDs in the short-lived negative cache (no poster to be had: unknown
+//     movie, no TMDB id, no TMDB poster, a failed fetch) stop here too.
+//  2. A token is taken from a global lookup limiter, then the TMDB ID comes
+//     from the movie cache (moviecache; recs-model fills misses). The
+//     limiter comes first so a loop over random IDs can't turn into a flood
+//     of recs-model calls.
 //  3. One token is taken from a global upstream limiter, so a crawler can't
 //     drain the TMDB quota or churn the disk cache.
 //  4. TMDB's API gives the poster path for the movie; the path must look
@@ -58,6 +62,18 @@ const (
 // requests per second.
 var UpstreamLimit = ratelimit.Config{Every: 100 * time.Millisecond, Burst: 20}
 
+// LookupLimit is the global budget for poster requests that miss both disk
+// caches and need a movie lookup: 40 per second, bursts of 100 (a page of
+// posters nobody has viewed yet).
+var LookupLimit = ratelimit.Config{Every: 25 * time.Millisecond, Burst: 100}
+
+// Negative cache: how long a movie without a poster is remembered, and how
+// many such movies at most.
+const (
+	negativeTTL     = 10 * time.Minute
+	negativeEntries = 50_000
+)
+
 // placeholderSVG is served whenever a real poster can't be (contracts/
 // fixtures/public/getPoster.json, ok_placeholder).
 const placeholderSVG = `<svg xmlns="http://www.w3.org/2000/svg" width="342" height="513" viewBox="0 0 342 513"><rect width="342" height="513" fill="#2b2b2b"/></svg>`
@@ -76,8 +92,10 @@ func Register(mux *http.ServeMux, d *app.Deps) {
 type options struct {
 	apiBase   string // default defaultAPIBase
 	imageBase string // default defaultImageBase
-	limiter   *ratelimit.Global
+	limiter   *ratelimit.Global // upstream (TMDB); default UpstreamLimit
+	lookup    *ratelimit.Global // movie lookups; default LookupLimit
 	timeout   time.Duration
+	now       func() time.Time // negative-cache clock
 }
 
 type handler struct {
@@ -88,8 +106,10 @@ type handler struct {
 	imageBase *url.URL
 	client    *http.Client
 	limiter   *ratelimit.Global
+	lookup    *ratelimit.Global
 	timeout   time.Duration
 	cache     *diskCache
+	negative  *negCache
 }
 
 func register(mux *http.ServeMux, d *app.Deps, o options) {
@@ -106,6 +126,9 @@ func register(mux *http.ServeMux, d *app.Deps, o options) {
 	if o.limiter == nil {
 		o.limiter = ratelimit.NewGlobal(UpstreamLimit)
 	}
+	if o.lookup == nil {
+		o.lookup = ratelimit.NewGlobal(LookupLimit)
+	}
 	if o.timeout <= 0 {
 		o.timeout = upstreamTimeout
 	}
@@ -121,10 +144,16 @@ func register(mux *http.ServeMux, d *app.Deps, o options) {
 		apiBase:   apiBase,
 		imageBase: imageBase,
 		limiter:   o.limiter,
+		lookup:    o.lookup,
 		timeout:   o.timeout,
 		cache:     newDiskCache(d.Config.PosterCacheDir, d.Config.PosterCacheMaxByte, logger),
+		negative:  newNegCache(negativeEntries, negativeTTL, o.now),
 	}
+	// No proxy from the environment: requests go straight to the TMDB hosts.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
 	h.client = &http.Client{
+		Transport:     transport,
 		Timeout:       o.timeout,
 		CheckRedirect: h.checkRedirect,
 	}
@@ -141,9 +170,22 @@ func (h *handler) serve(w http.ResponseWriter, r *http.Request) {
 		writeJPEG(w, img)
 		return
 	}
+	if h.key == "" || h.negative.has(id) {
+		writePlaceholder(w)
+		return
+	}
 	img, err := h.fetch(r.Context(), id)
 	if err != nil {
-		if !errors.Is(err, errNoPoster) {
+		var tr transient
+		switch {
+		case errors.Is(err, errNoPoster):
+			h.negative.add(id)
+		case errors.Is(err, errLimited):
+		case errors.As(err, &tr):
+			h.logger.WarnContext(r.Context(), "posters: movie lookup failed", "request_id", reqid.FromContext(r.Context()),
+				"movie_id", id, "err", h.scrub(err))
+		default:
+			h.negative.add(id)
 			h.logger.WarnContext(r.Context(), "posters: fetch failed", "request_id", reqid.FromContext(r.Context()),
 				"movie_id", id, "err", h.scrub(err))
 		}
@@ -154,20 +196,31 @@ func (h *handler) serve(w http.ResponseWriter, r *http.Request) {
 	writeJPEG(w, img)
 }
 
-// errNoPoster is an expected miss (no key, no TMDB ID, no poster, limit
-// reached); it is not logged.
-var errNoPoster = errors.New("no poster")
+// Outcomes of fetch other than success. errNoPoster (no TMDB id, unknown
+// movie, no poster) is remembered in the negative cache and not logged;
+// errLimited is neither; a transient error (the movie lookup itself
+// failed, e.g. recs-model down) is logged but not remembered; any other
+// error (a TMDB failure) is logged and remembered.
+var (
+	errNoPoster = errors.New("no poster")
+	errLimited  = errors.New("rate limited")
+)
+
+type transient struct{ err error }
+
+func (t transient) Error() string { return t.err.Error() }
+func (t transient) Unwrap() error { return t.err }
 
 // fetch runs steps 2-5 above.
 func (h *handler) fetch(ctx context.Context, id int64) ([]byte, error) {
-	if h.key == "" {
-		return nil, errNoPoster
+	if allowed, _ := h.lookup.Allow(); !allowed {
+		return nil, errLimited
 	}
 	res, err := h.movies.Get(ctx, []int64{id})
 	m, ok := res.Movies[id]
 	if !ok {
 		if err != nil {
-			return nil, fmt.Errorf("movie lookup: %w", err)
+			return nil, transient{fmt.Errorf("movie lookup: %w", err)}
 		}
 		return nil, errNoPoster
 	}
@@ -175,7 +228,7 @@ func (h *handler) fetch(ctx context.Context, id int64) ([]byte, error) {
 		return nil, errNoPoster
 	}
 	if allowed, _ := h.limiter.Allow(); !allowed {
-		return nil, errNoPoster
+		return nil, errLimited
 	}
 	ctx, cancel := context.WithTimeout(ctx, h.timeout)
 	defer cancel()

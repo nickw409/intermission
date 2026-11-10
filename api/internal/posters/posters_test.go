@@ -21,7 +21,7 @@ import (
 	"github.com/nickw409/intermission/api/internal/ratelimit"
 )
 
-const testKey = "SECRET-TMDB-KEY-0123456789abcdef"
+const testKey = "test-tmdb-key-not-real"
 
 // jpeg returns a fake JPEG of n bytes (correct magic, filler body).
 func jpeg(n int, fill byte) []byte {
@@ -96,8 +96,10 @@ type env struct {
 type setup struct {
 	key      string
 	maxBytes int64
-	limiter  *ratelimit.Global
+	limiter  *ratelimit.Global // upstream (TMDB) limiter
+	lookup   *ratelimit.Global // per-route limiter before the movie lookup
 	timeout  time.Duration
+	now      func() time.Time
 }
 
 func newEnv(t *testing.T, s setup) *env {
@@ -118,7 +120,9 @@ func newEnv(t *testing.T, s setup) *env {
 			apiBase:   f.api.URL,
 			imageBase: f.img.URL,
 			limiter:   s.limiter,
+			lookup:    s.lookup,
 			timeout:   s.timeout,
+			now:       s.now,
 		})
 	})
 	// Movies 1..50 have TMDB id 1000+id; 60 has none.
