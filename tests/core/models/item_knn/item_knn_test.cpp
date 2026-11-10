@@ -621,14 +621,17 @@ TEST_CASE("knn: load rejects a corrupt or truncated file", "[knn]") {
   //   106 sims f32[6]                                                       -> 130 bytes total
   // Rows: A=[B, C] (s' -0.7071, -0.6495), B=[A, C], C=[A, B], D=[].
   REQUIRE(bytes.size() == 130);
-  auto put_u32 = [](std::string b, std::size_t at, std::uint32_t v) {
-    for (int k = 0; k < 4; ++k) b[at + static_cast<std::size_t>(k)] = static_cast<char>((v >> (8 * k)) & 0xFF);
+  // Returns a copy of `b` with `width` little-endian bytes of v written at `at`. (replace() rather
+  // than indexing: GCC's -Wstringop-overflow misreads indexed writes into a copied std::string.)
+  auto put_le = [](std::string b, std::size_t at, std::uint64_t v, std::size_t width) {
+    std::string le;
+    for (std::size_t k = 0; k < width; ++k) le.push_back(static_cast<char>((v >> (8 * k)) & 0xFF));
+    REQUIRE(at + width <= b.size());
+    b.replace(at, width, le);
     return b;
   };
-  auto put_u64 = [](std::string b, std::size_t at, std::uint64_t v) {
-    for (int k = 0; k < 8; ++k) b[at + static_cast<std::size_t>(k)] = static_cast<char>((v >> (8 * k)) & 0xFF);
-    return b;
-  };
+  auto put_u32 = [&](std::string b, std::size_t at, std::uint32_t v) { return put_le(std::move(b), at, v, 4); };
+  auto put_u64 = [&](std::string b, std::size_t at, std::uint64_t v) { return put_le(std::move(b), at, v, 8); };
   auto put_f32 = [&](std::string b, std::size_t at, float v) { return put_u32(std::move(b), at, std::bit_cast<std::uint32_t>(v)); };
   auto get_u32 = [&](std::size_t at) {
     std::uint32_t v = 0;
