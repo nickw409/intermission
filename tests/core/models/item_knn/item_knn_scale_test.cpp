@@ -144,4 +144,9 @@ TEST_CASE("knn on ml-32m: fit time and memory", "[knn][ml32m]") {
   const auto full = recs::load_movielens(raw, "ml-32m");
   const auto f = timed_fit(full);
   report("ml-32m (full)", full, f);
+  // "Minutes, not hours" with bounded memory. Deliberately generous bounds (the first release run
+  // took 33 s with 4 threads and peaked at 1.8 GB); they catch an algorithmic regression, not noise.
+  CHECK(f.seconds < 600.0);
+  CHECK(f.peak_during > 0.0);  // /proc readable, so the bound below is meaningful
+  CHECK(f.peak_during < 8192.0);
 }

@@ -22,6 +22,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "../../../../core/src/models/item_knn_detail.hpp"
 #include "../../data/temp_dir.hpp"
@@ -31,6 +32,7 @@
 #include "recs/model.hpp"
 #include "recs/rng.hpp"
 
+using Catch::Matchers::ContainsSubstring;
 using Catch::Matchers::WithinAbs;
 using recs::Config;
 using recs::Dataset;
@@ -435,6 +437,63 @@ TEST_CASE("knn: fold_in edge cases", "[knn]") {
   CHECK_THROWS_AS(m->score(empty, wrong_size), std::invalid_argument);
   std::vector<float> out(4);
   CHECK_THROWS_AS(m->score_trained_user(4, out), std::out_of_range);
+  const std::vector<Rating> nan_rating = {{0, std::numeric_limits<float>::quiet_NaN(), 0}};
+  CHECK_THROWS_AS(m->fold_in(nan_rating), std::invalid_argument);
+}
+
+TEST_CASE("knn: score() rejects a hand-built user state with non-finite values", "[knn]") {
+  const auto m = fit_knn(hand_dataset(), kHandCfg);
+  std::vector<float> out(4);
+  recs::UserState st = m->fold_in(std::vector<Rating>{{0, 2.0f, 0}, {1, 5.0f, 0}});
+  REQUIRE_NOTHROW(m->score(st, out));
+
+  for (double bad_mean : {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity()}) {
+    recs::UserState s = st;
+    s.mean = bad_mean;
+    CHECK_THROWS_AS(m->score(s, out), std::invalid_argument);
+    CHECK_THROWS_AS(m->explain(s, 2), std::invalid_argument);
+  }
+  for (float bad_value : {std::numeric_limits<float>::quiet_NaN(), -std::numeric_limits<float>::infinity()}) {
+    recs::UserState s = st;
+    s.ratings[0].value = bad_value;
+    CHECK_THROWS_AS(m->score(s, out), std::invalid_argument);
+  }
+}
+
+// Parity with arbitrary float ratings (the website and synthetic data need not use the 0.5 grid),
+// so every centred value r - mu has a full float mantissa. This catches a path that rounds the
+// mean or the centred values through float, or computes them differently from the other path.
+// Note: the mean itself is order-independent here, because a double holds the exact sum of fewer
+// than about 2^28 float values in [0.5, 5] (the mantissas fit in 53 bits). fold_in() still sorts
+// by item, so the parity does not depend on that fact.
+TEST_CASE("knn gate 3: bit-identical parity with off-grid ratings", "[knn][gate]") {
+  recs::testing::for_seeds(60, 0xD008, [](recs::Rng& rng, std::uint64_t) {
+    const auto n_users = static_cast<std::uint32_t>(2 + rng.uniform(30));
+    const auto n_items = static_cast<std::uint32_t>(2 + rng.uniform(20));
+    std::vector<Triplet> t;
+    for (std::uint32_t u = 0; u < n_users; ++u) {
+      for (std::uint32_t i = 0; i < n_items; ++i) {
+        if (rng.uniform01() < 0.6) t.push_back(Triplet{u, i, static_cast<float>(0.5 + 4.5 * rng.uniform01()), 0});
+      }
+    }
+    const auto ds = recs::make_dataset("offgrid", n_users, n_items, std::move(t));
+    for (const auto& mode : kModes) {
+      const auto cfg = with_mode(Config{{"neighbors", 1 + rng.uniform(n_items)}, {"shrinkage", 3.0},
+                                        {"min_support", 1 + rng.uniform(3)}},
+                                 mode);
+      INFO("config " << cfg.dump());
+      const auto m = fit_knn(ds, cfg);
+      for (UserIdx u = 0; u < n_users; ++u) {
+        INFO("user " << u);
+        auto ratings = training_ratings(ds, u);
+        rng.shuffle(ratings.begin(), ratings.end());
+        const auto via_fold_in = score_of(*m, m->fold_in(ratings));
+        std::vector<float> batch(m->n_items(), 7.0f);
+        m->score_trained_user(u, batch);
+        REQUIRE(bitwise_equal(via_fold_in, batch));
+      }
+    }
+  });
 }
 
 // ---- gate 4 ---------------------------------------------------------------------------------------
@@ -555,6 +614,61 @@ TEST_CASE("knn: load rejects a corrupt or truncated file", "[knn]") {
   write(bytes);
   CHECK_NOTHROW(recs::make_item_knn()->load(dir.path()));
   CHECK_THROWS(recs::make_item_knn()->load(dir.path() / "missing"));
+
+  // Field-level corruption. Byte offsets for the hand model (4 items, 6 neighbour entries):
+  //   0 magic | 8 version | 12 n_items | 16 neighbors | 20 min_support | 24 shrinkage (f64)
+  //   32 normalize | 33 positive_only | 34 nnz (u64) | 42 offsets u64[5] | 82 ids u32[6]
+  //   106 sims f32[6]                                                       -> 130 bytes total
+  // Rows: A=[B, C] (s' -0.7071, -0.6495), B=[A, C], C=[A, B], D=[].
+  REQUIRE(bytes.size() == 130);
+  auto put_u32 = [](std::string b, std::size_t at, std::uint32_t v) {
+    for (int k = 0; k < 4; ++k) b[at + static_cast<std::size_t>(k)] = static_cast<char>((v >> (8 * k)) & 0xFF);
+    return b;
+  };
+  auto put_u64 = [](std::string b, std::size_t at, std::uint64_t v) {
+    for (int k = 0; k < 8; ++k) b[at + static_cast<std::size_t>(k)] = static_cast<char>((v >> (8 * k)) & 0xFF);
+    return b;
+  };
+  auto put_f32 = [&](std::string b, std::size_t at, float v) { return put_u32(std::move(b), at, std::bit_cast<std::uint32_t>(v)); };
+  auto get_u32 = [&](std::size_t at) {
+    std::uint32_t v = 0;
+    for (int k = 0; k < 4; ++k) v |= static_cast<std::uint32_t>(static_cast<unsigned char>(bytes[at + static_cast<std::size_t>(k)])) << (8 * k);
+    return v;
+  };
+  constexpr std::size_t kIds = 82, kSims = 106, kOffsets = 42;
+  REQUIRE(get_u32(kIds) == 1);      // A's first neighbour is B
+  REQUIRE(get_u32(kIds + 4) == 2);  // then C
+  auto rejects = [&](const std::string& b, const std::string& why) {
+    INFO("case: " << why);
+    write(b);
+    CHECK_THROWS_WITH(recs::make_item_knn()->load(dir.path()), ContainsSubstring(why));
+  };
+  rejects(put_u32(bytes, kIds, 4), "bad neighbour id");                  // out of range (n_items = 4)
+  rejects(put_u32(bytes, kIds, 0), "bad neighbour id");                  // A listing itself
+  rejects(put_u32(bytes, kIds + 4, 1), "duplicate neighbour id");        // A = [B, B]
+  rejects(put_u64(bytes, kOffsets + 16, 1), "bad row offsets");          // offsets 0, 2, 1, ...
+  rejects(put_f32(bytes, kSims, std::numeric_limits<float>::quiet_NaN()), "bad similarity value");
+  rejects(put_f32(bytes, kSims, 0.0f), "bad similarity value");
+  rejects(put_f32(bytes, kSims, 1.5f), "bad similarity value");
+  {
+    std::string pos = bytes;
+    pos[33] = 1;  // positive_only, but A's list is negative
+    rejects(pos, "bad similarity value");
+  }
+  {
+    // Swap A's two similarities: |s'| would increase along the row.
+    std::string swapped = bytes;
+    for (std::size_t k = 0; k < 4; ++k) std::swap(swapped[kSims + k], swapped[kSims + 4 + k]);
+    rejects(swapped, "out of order");
+  }
+  rejects(put_u64(bytes, 34, std::uint64_t{1} << 62), "wrong size");     // huge nnz: no allocation
+  {
+    std::string flag = bytes;
+    flag[32] = 2;  // normalize must be 0 or 1
+    rejects(flag, "bad flag byte");
+  }
+  write(bytes);
+  CHECK_NOTHROW(recs::make_item_knn()->load(dir.path()));
 }
 
 // ---- gate 6 ---------------------------------------------------------------------------------------

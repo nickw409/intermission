@@ -439,10 +439,14 @@ class ItemKnn final : public Model {
   }
 
   void score(const UserState& u, std::span<float> out) const override {
+    // A UserState may be built by hand rather than by fold_in(), so check what fold_in() would
+    // have guaranteed: a NaN or infinite input would otherwise turn into NaN scores.
+    if (!std::isfinite(u.mean)) throw std::invalid_argument("knn: user state mean is not finite");
     std::vector<double> dev(n_items_, 0.0);
     std::vector<std::uint8_t> rated(n_items_, 0);
     for (const Rating& r : u.ratings) {
       if (r.item >= n_items_) throw std::invalid_argument("knn: user state rates an unknown item");
+      if (!std::isfinite(r.value)) throw std::invalid_argument("knn: user state rating is not finite");
       dev[r.item] = static_cast<double>(r.value) - u.mean;
       rated[r.item] = 1;
     }
@@ -466,6 +470,7 @@ class ItemKnn final : public Model {
 
   Explanation explain(const UserState& u, ItemIdx item) const override {
     if (item >= n_items_) throw std::out_of_range("knn: explain item out of range");
+    if (!std::isfinite(u.mean)) throw std::invalid_argument("knn: user state mean is not finite");
     std::vector<Rating> sorted = u.ratings;
     std::sort(sorted.begin(), sorted.end(), [](const Rating& a, const Rating& b) { return a.item < b.item; });
     auto find = [&](ItemIdx j) -> const Rating* {
@@ -519,7 +524,7 @@ class ItemKnn final : public Model {
 
   // File layout (all little-endian):
   //   char[8]  magic "RECSKNN1"
-  //   u32      format version (1)
+  //   u32      format version (kFormatVersion, currently 2)
   //   u32      n_items
   //   u32      neighbors      u32 min_support      f64 shrinkage
   //   u8       normalize (0/1)  u8 positive_only (0/1)
@@ -583,10 +588,14 @@ class ItemKnn final : public Model {
     for (auto& v : sims) v = r.f32();
 
     if (ptr.front() != 0 || ptr.back() != nnz) throw std::runtime_error("knn: bad row offsets");
+    // seen_in_row[j] == i + 1 marks j as already listed in row i (catches duplicate ids).
+    std::vector<std::uint32_t> seen_in_row(n_items, 0);
     for (std::uint32_t i = 0; i < n_items; ++i) {
       if (ptr[i] > ptr[i + 1] || ptr[i + 1] - ptr[i] > p.neighbors) throw std::runtime_error("knn: bad row offsets");
       for (std::uint64_t e = ptr[i]; e < ptr[i + 1]; ++e) {
         if (items[e] >= n_items || items[e] == i) throw std::runtime_error("knn: bad neighbour id");
+        if (seen_in_row[items[e]] == i + 1) throw std::runtime_error("knn: duplicate neighbour id");
+        seen_in_row[items[e]] = i + 1;
         if (!std::isfinite(sims[e]) || sims[e] == 0.0f || std::abs(sims[e]) > 1.0f ||
             (p.positive_only && sims[e] < 0.0f)) {
           throw std::runtime_error("knn: bad similarity value");
