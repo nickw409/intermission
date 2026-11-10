@@ -1,0 +1,442 @@
+/* Shared styles for the movie pages (onboarding, For you, Compare, Movie, My ratings, How it works).
+   Uses the tokens from styles.css only. */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.page h1:focus {
+  outline: none;
+}
+
+.page--prose {
+  max-width: 46rem;
+}
+
+.lede {
+  margin: 0;
+  color: var(--text-muted);
+  max-width: 46rem;
+}
+
+.loading,
+.empty-state p {
+  margin: 0;
+}
+
+.error-message {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
+  justify-content: space-between;
+}
+
+.error-message p {
+  margin: 0;
+}
+
+.empty-state {
+  padding: var(--space-6);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  align-items: flex-start;
+}
+
+.notice {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+  border: 1px solid var(--border);
+}
+
+.notice p {
+  margin: 0;
+}
+
+.sign-in-prompt {
+  margin: 0;
+}
+
+.button--small {
+  padding: var(--space-1) var(--space-3);
+  font-size: 0.875rem;
+  min-height: 24px;
+}
+
+/* ---- Posters and cards ---- */
+
+.poster {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 2 / 3;
+  object-fit: cover;
+  border-radius: calc(var(--radius) - 2px);
+  background: var(--star-empty);
+}
+
+.poster--placeholder {
+  display: block;
+}
+
+.poster--small {
+  width: 3rem;
+  flex: none;
+}
+
+.poster--large {
+  width: min(16rem, 100%);
+  flex: none;
+}
+
+.card-grid,
+.card-row,
+.compare-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+  gap: var(--space-4);
+}
+
+.card-row {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(9rem, 10rem);
+  gap: var(--space-4);
+  overflow-x: auto;
+  padding-bottom: var(--space-2);
+}
+
+.card-grid[aria-busy='true'],
+.compare-columns[aria-busy='true'] {
+  opacity: 0.7;
+}
+
+.movie-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  height: 100%;
+  padding: var(--space-2);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.movie-card__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  align-items: flex-start;
+}
+
+.movie-card__body p {
+  margin: 0;
+}
+
+.movie-card__title {
+  font-size: 1rem;
+  margin: 0;
+}
+
+.movie-card__year,
+.genres,
+.similarity {
+  font-size: 0.875rem;
+}
+
+.because {
+  font-size: 0.875rem;
+}
+
+.rate-movie {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+/* ---- Onboarding ---- */
+
+.onboarding-progress {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-4);
+}
+
+.onboarding-progress label {
+  font-weight: 600;
+}
+
+.onboarding-progress progress {
+  width: 100%;
+  height: 0.75rem;
+  accent-color: var(--accent);
+}
+
+.onboarding-progress p {
+  margin: 0;
+}
+
+.onboarding-progress .button {
+  justify-self: start;
+}
+
+.onboarding-search {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  max-width: 100%;
+}
+
+.onboarding-search .field {
+  max-width: 28rem;
+}
+
+.search-results {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.search-results h2 {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+/* ---- Compare ---- */
+
+.page--wide {
+  max-width: none;
+}
+
+.model-picker {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-3) var(--space-4);
+  margin: 0;
+}
+
+.model-picker legend {
+  font-weight: 600;
+  padding: 0 var(--space-1);
+}
+
+.model-picker__options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  margin-top: var(--space-2);
+}
+
+.model-picker__option {
+  display: inline-flex;
+  gap: var(--space-2);
+  align-items: center;
+  min-height: 24px;
+}
+
+.compare-summary {
+  margin: 0;
+}
+
+.compare-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  gap: var(--space-4);
+}
+
+.compare-column {
+  padding: var(--space-4);
+}
+
+.compare-column h2 {
+  font-size: 1.15rem;
+}
+
+.compare-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  counter-reset: rank;
+}
+
+.compare-item {
+  display: flex;
+  gap: var(--space-2);
+  align-items: flex-start;
+  padding: var(--space-1);
+  border-left: 4px solid transparent;
+  border-radius: 4px;
+}
+
+.compare-item--shared {
+  border-left-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.compare-item__body p {
+  margin: 0;
+}
+
+.compare-item__shared {
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+/* ---- Movie page ---- */
+
+.movie-detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-6);
+  align-items: flex-start;
+}
+
+.movie-detail__body {
+  flex: 1 1 18rem;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.movie-detail__body h1 {
+  margin: 0;
+}
+
+.movie-facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-1) var(--space-4);
+  margin: 0;
+}
+
+.movie-facts dt {
+  font-weight: 600;
+}
+
+.movie-facts dd {
+  margin: 0;
+}
+
+.movie-detail__rating-label {
+  font-size: 1rem;
+  margin: 0 0 var(--space-1);
+}
+
+.similar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.similar h2 {
+  margin: 0;
+}
+
+.toggle {
+  display: inline-flex;
+  flex-wrap: wrap;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  align-self: flex-start;
+}
+
+.toggle__button {
+  font: inherit;
+  min-height: 24px;
+  padding: var(--space-2) var(--space-4);
+  background: var(--surface);
+  color: var(--text);
+  border: 0;
+  cursor: pointer;
+}
+
+.toggle__button[aria-pressed='true'] {
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+/* ---- My ratings ---- */
+
+.notice--inline {
+  margin-bottom: var(--space-2);
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+.ratings-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.ratings-table th,
+.ratings-table td {
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.sort-button {
+  font: inherit;
+  font-weight: 700;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  padding: var(--space-1) 0;
+  min-height: 24px;
+  cursor: pointer;
+  display: inline-flex;
+  gap: var(--space-1);
+  align-items: center;
+}
+
+.sort-button__arrow {
+  font-size: 0.7rem;
+  min-width: 0.8rem;
+}
+
+/* ---- How it works ---- */
+
+.model-story {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border);
+}
+
+.model-story h2 {
+  margin: 0;
+}
+
+.model-story p {
+  margin: 0;
+}
+
+.model-story__result {
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+}

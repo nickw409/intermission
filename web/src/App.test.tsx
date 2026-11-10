@@ -28,7 +28,6 @@ describe('app shell', () => {
     ['/signup', 'Sign up'],
     ['/onboarding', 'Rate some movies'],
     ['/compare', 'Compare models'],
-    ['/movies/4993', 'Movie 4993'],
     ['/ratings', 'My ratings'],
     ['/evaluation', 'Evaluation'],
     ['/how-it-works', 'How it works'],
@@ -36,5 +35,12 @@ describe('app shell', () => {
     renderAt(path);
     expect(screen.getByRole('heading', { level: 1, name: heading })).toBeInTheDocument();
     await screen.findByText('alice'); // let the shell's request settle
+  });
+
+  it('routes /movies/:movieId to the movie page', async () => {
+    renderAt('/movies/4993'); // getMovie fixture
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'The Lord of the Rings: The Fellowship of the Ring' }),
+    ).toBeInTheDocument();
   });
 });
