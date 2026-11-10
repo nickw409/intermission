@@ -111,6 +111,12 @@ code="$(get /api/auth/login -X POST "${csrf[@]}" --data-binary '{"username": "x"
 head -c 66560 /dev/zero | tr '\0' 'a' > "$scratch/big"
 code="$(get /api/auth/login -X POST "${csrf[@]}" --data-binary "@$scratch/big")"
 [[ "$code" == 413 ]] && pass "65 KB body -> 413" || fail "65 KB body returned $code"
+# Caddy's own 413 must look like recs-api's: the public Error shape, the security headers,
+# no Server header, an X-Request-ID.
+grep -q '"code":"body_too_large"' "$scratch/b" && [[ "$(hdr "$scratch/h" Content-Type)" == application/json* ]] \
+  && pass "413 body is the Error shape (body_too_large)" || fail "413 body is not the Error shape: $(head -c 200 "$scratch/b")"
+[[ -n "$(hdr "$scratch/h" Content-Security-Policy)" && -z "$(hdr "$scratch/h" Server)" && -n "$(hdr "$scratch/h" X-Request-ID)" ]] \
+  && pass "413 has security headers and X-Request-ID, no Server" || fail "413 headers: CSP '$(hdr "$scratch/h" Content-Security-Policy)', Server '$(hdr "$scratch/h" Server)', X-Request-ID '$(hdr "$scratch/h" X-Request-ID)'"
 head -c 65000 /dev/zero | tr '\0' 'a' > "$scratch/big"
 code="$(get /api/auth/login -X POST "${csrf[@]}" --data-binary "@$scratch/big")"
 [[ "$code" == 413 ]] && pass "65,000-byte body -> 413" || fail "65,000-byte body returned $code"
