@@ -1,5 +1,5 @@
 import { useRef, useState, type FormEvent } from 'react';
-import { Link, useNavigate } from 'react-router';
+import { Link, Navigate, useNavigate } from 'react-router';
 import { api } from '../../api/client';
 import { homeFor, useSession } from '../../auth/session';
 import { validateLogin, type FieldErrors, type LoginFields } from '../../auth/validation';
@@ -8,7 +8,7 @@ import { friendlyMessage } from '../../lib/errors';
 
 export default function LoginPage() {
   const navigate = useNavigate();
-  const { signedIn } = useSession();
+  const { session, signedIn } = useSession();
   const [fields, setFields] = useState<LoginFields>({ username: '', password: '' });
   const [errors, setErrors] = useState<FieldErrors<keyof LoginFields>>({});
   const [serverError, setServerError] = useState<string | null>(null);
@@ -36,6 +36,9 @@ export default function LoginPage() {
       setBusy(false);
     }
   };
+
+  // Already signed in (e.g. a bookmarked /login): nothing to do here.
+  if (session.status === 'user') return <Navigate to={homeFor(session.me)} replace />;
 
   return (
     <section className="auth-page">

@@ -36,16 +36,26 @@ function isErrorCode(value: unknown): value is ErrorCode {
   return typeof value === 'string' && Object.hasOwn(ERROR_CODES, value);
 }
 
+/** Which call failed: method, path template (e.g. `/api/ratings/{movieId}`) and when it started. */
+export interface FailedRequest {
+  method: string;
+  path: string;
+  /** performance.now() when the request was sent. */
+  startedAt: number;
+}
+
 /** A non-2xx response. Bodies that are not the contract's Error shape become code `internal`. */
 export class ApiError extends Error {
   readonly status: number;
   readonly code: ErrorCode;
+  readonly request: FailedRequest | undefined;
 
-  constructor(status: number, code: ErrorCode, message: string) {
+  constructor(status: number, code: ErrorCode, message: string, request?: FailedRequest) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
+    this.request = request;
   }
 }
 
@@ -100,7 +110,7 @@ function buildUrl(template: string, options: RawOptions): string {
   return new URL(qs ? `${path}?${qs}` : path, globalThis.location.href).toString();
 }
 
-async function toApiError(response: Response): Promise<ApiError> {
+async function toApiError(response: Response, request: FailedRequest): Promise<ApiError> {
   let body: unknown;
   try {
     body = await response.json();
@@ -109,9 +119,9 @@ async function toApiError(response: Response): Promise<ApiError> {
   }
   const error = (body as { error?: { code?: unknown; message?: unknown } } | undefined)?.error;
   if (isErrorCode(error?.code)) {
-    return new ApiError(response.status, error.code, typeof error.message === 'string' ? error.message : '');
+    return new ApiError(response.status, error.code, typeof error.message === 'string' ? error.message : '', request);
   }
-  return new ApiError(response.status, 'internal', `unexpected ${response.status} response`);
+  return new ApiError(response.status, 'internal', `unexpected ${response.status} response`, request);
 }
 
 // Site-wide observers of failed calls (e.g. the model-unavailable banner). Each caller still gets
@@ -135,10 +145,18 @@ async function request(method: Method, template: string, options: RawOptions = {
     headers['Content-Type'] = 'application/json';
     init.body = JSON.stringify(options.body);
   }
+  const startedAt = performance.now();
   const response = await fetch(buildUrl(template, options), init);
   if (!response.ok) {
-    const error = await toApiError(response);
-    for (const listener of [...errorListeners]) listener(error);
+    const error = await toApiError(response, { method: init.method ?? 'GET', path: template, startedAt });
+    for (const listener of [...errorListeners]) {
+      // A broken listener must not replace the error the caller is waiting for.
+      try {
+        listener(error);
+      } catch (listenerError) {
+        console.error('API error listener failed', listenerError);
+      }
+    }
     throw error;
   }
   if (response.status === 204) return undefined;

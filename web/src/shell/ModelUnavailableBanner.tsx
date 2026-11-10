@@ -20,13 +20,18 @@ export function ModelUnavailableBanner() {
     [],
   );
 
-  if (state !== 'shown') return null;
+  // The live region stays mounted (empty when hidden) so screen readers announce the banner
+  // when it appears.
   return (
-    <div className="banner banner--warning" role="status">
-      <p>Recommendations are temporarily unavailable. Everything else still works; please try again soon.</p>
-      <button type="button" className="button button--quiet" onClick={() => setState('dismissed')}>
-        Dismiss
-      </button>
+    <div role="status">
+      {state === 'shown' && (
+        <div className="banner banner--warning">
+          <p>Recommendations are temporarily unavailable. Everything else still works; please try again soon.</p>
+          <button type="button" className="button button--quiet" onClick={() => setState('dismissed')}>
+            Dismiss
+          </button>
+        </div>
+      )}
     </div>
   );
 }
