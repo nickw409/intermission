@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <span>
 #include <vector>
 
@@ -72,6 +73,22 @@ void half_step(const Csr& pattern, std::span<const float> F, std::size_t k, doub
 /// + lambda (trace G_X + trace G_Y).
 double objective(const Interactions& data, std::span<const float> X, std::span<const float> Y,
                  std::size_t k, double alpha, double lambda);
+
+/// Test hook: when set, the ALS model's fit() computes the full objective before training
+/// (half_step = 0) and after EVERY half-step (odd = item solve, even = user solve) and calls the
+/// hook with the current factors. Used by the "objective is non-increasing after every half-step"
+/// gate so that it observes fit() itself. Process-global and not thread-safe: tests only; it costs
+/// one objective evaluation per half-step, so leave it unset in production.
+struct HalfStepEvent {
+  int iteration = 0;   // 1-based full iteration; 0 for the initial state
+  int half_step = 0;   // 0 = initial, then 1, 2, 3, ... in training order
+  bool users = false;  // true if this half-step solved the users (false: items, or initial)
+  double objective = 0.0;
+  std::span<const float> X;  // n_users x k
+  std::span<const float> Y;  // n_items x k
+};
+using HalfStepHook = std::function<void(const HalfStepEvent&)>;
+void set_half_step_hook(HalfStepHook hook);  // pass {} to clear
 
 /// Per-item contributions to the score y_item . x_u, following Hu, Koren & Volinsky (2008) §5:
 ///   x_u = W b with W = (A + lambda I)^{-1}, so y_i . x_u = sum_j (1 + alpha) y_i^T W y_j.

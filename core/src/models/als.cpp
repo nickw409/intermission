@@ -308,6 +308,15 @@ double objective(const Interactions& data, std::span<const float> X, std::span<c
   return all_pairs + interactions + lambda * reg;
 }
 
+namespace {
+HalfStepHook& hook_storage() {
+  static HalfStepHook hook;
+  return hook;
+}
+}  // namespace
+
+void set_half_step_hook(HalfStepHook hook) { hook_storage() = std::move(hook); }
+
 std::vector<double> contributions(std::span<const double> G, std::span<const float> F, std::size_t k,
                                   std::span<const std::uint32_t> rows, double alpha, double lambda,
                                   std::uint32_t item) {
@@ -334,6 +343,8 @@ std::vector<double> contributions(std::span<const double> G, std::span<const flo
 namespace {
 
 namespace ad = als_detail;
+
+const ad::HalfStepHook& half_step_hook() { return ad::hook_storage(); }
 
 static_assert(std::endian::native == std::endian::little, "factor files are written in host byte order");
 
@@ -386,11 +397,20 @@ class AlsModel final : public Model {
     for (auto& x : X) x = static_cast<float>(p.init_sd * rng.normal());
     for (auto& y : Y) y = static_cast<float>(p.init_sd * rng.normal());
 
+    // Test hook (als_detail.hpp): report the objective before training and after every half-step.
+    const ad::HalfStepHook& hook = half_step_hook();
+    const auto report = [&](int iteration, int half_step, bool users, double objective) {
+      if (hook) hook({iteration, half_step, users, objective, X, Y});
+    };
+    if (hook) report(0, 0, false, ad::objective(data, X, Y, k, p.alpha, p.lambda));
+
     std::vector<std::pair<int, double>> curve;
     for (int it = 1; it <= p.iters; ++it) {
       ad::half_step(data.by_item, X, k, p.alpha, p.lambda, Y);  // items given users
+      if (hook) report(it, 2 * it - 1, false, ad::objective(data, X, Y, k, p.alpha, p.lambda));
       ad::half_step(data.by_user, Y, k, p.alpha, p.lambda, X);  // users given items
       curve.emplace_back(it, ad::objective(data, X, Y, k, p.alpha, p.lambda));
+      report(it, 2 * it, true, curve.back().second);
     }
 
     std::vector<std::uint8_t> has_data(n_items);

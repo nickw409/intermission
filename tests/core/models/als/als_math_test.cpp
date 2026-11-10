@@ -14,6 +14,7 @@
 #include "../../../../core/src/models/als_detail.hpp"
 #include "als_test_util.hpp"
 #include "property.hpp"
+#include "recs/model.hpp"
 #include "recs/synthetic.hpp"
 
 namespace {
@@ -54,14 +55,25 @@ Eigen::VectorXd dense_solve(const std::vector<float>& F, std::size_t n, std::siz
   return A.fullPivLu().solve(b);
 }
 
-void check_close(const std::vector<double>& fast, const Eigen::VectorXd& dense) {
+// Returns true if the same solution merely rounded to float32 would FAIL the tight check: used to
+// show the tight check is sensitive enough to catch a float32 solve.
+bool check_close(const std::vector<double>& fast, const Eigen::VectorXd& dense) {
   REQUIRE(fast.size() == static_cast<std::size_t>(dense.size()));
   const double scale = std::max(1.0, dense.cwiseAbs().maxCoeff());
   double max_err = 0.0;
   for (std::size_t a = 0; a < fast.size(); ++a)
     max_err = std::max(max_err, std::abs(fast[a] - dense(static_cast<Eigen::Index>(a))));
   INFO("max |fast - dense| = " << max_err << ", scale = " << scale);
-  CHECK(max_err <= 1e-6 * scale);
+  CHECK(max_err <= 1e-6 * scale);  // the spec gate
+  // Much tighter than the gate, so a precision regression fails here directly: the double solve
+  // agrees with the dense reference to at most ~3e-15 on these cases, while anything done in
+  // float32 (unit roundoff 6e-8: a float Cholesky, or A/b accumulated in float) is off by
+  // orders of magnitude more than 1e-10.
+  CHECK(max_err <= 1e-10 * scale);
+  double float_err = 0.0;
+  for (std::size_t a = 0; a < fast.size(); ++a)
+    float_err = std::max(float_err, std::abs(static_cast<double>(static_cast<float>(fast[a])) - dense(static_cast<Eigen::Index>(a))));
+  return float_err > 1e-10 * scale;
 }
 
 // Brute-force objective over every (user, item) pair from the raw ratings.
@@ -98,6 +110,10 @@ TEST_CASE("ALS gate: every per-user and per-item solve matches a dense solve to 
     const Dataset ds = tals::random_ratings(n_users, n_items, 0.25, rng);
     const auto data = ad::build_interactions(ds, kThreshold);
     const auto R = dense_ratings(ds);
+    std::size_t float_caught = 0;  // rows whose float32-rounded solution would fail the tight check
+    std::size_t nonzero_rows = 0;  // users and items with at least one interaction
+    for (std::uint32_t u = 0; u < n_users; ++u) nonzero_rows += data.by_user.row_size(u) > 0 ? 1 : 0;
+    for (std::uint32_t i = 0; i < n_items; ++i) nonzero_rows += data.by_item.row_size(i) > 0 ? 1 : 0;
 
     // Item side: X fixed at random values.
     const auto X = tals::random_factors(n_users, k, 0.5, rng);
@@ -105,8 +121,8 @@ TEST_CASE("ALS gate: every per-user and per-item solve matches a dense solve to 
     for (std::uint32_t i = 0; i < n_items; ++i) {
       std::vector<float> col(n_users);
       for (std::uint32_t u = 0; u < n_users; ++u) col[u] = R[static_cast<std::size_t>(u) * n_items + i];
-      check_close(ad::solve_row(GX, X, k, data.by_item.row_indices(i), alpha, lambda),
-                  dense_solve(X, n_users, k, col, alpha, lambda));
+      float_caught += check_close(ad::solve_row(GX, X, k, data.by_item.row_indices(i), alpha, lambda),
+                                  dense_solve(X, n_users, k, col, alpha, lambda));
     }
 
     // User side: Y from a real item half-step, as in training.
@@ -116,9 +132,14 @@ TEST_CASE("ALS gate: every per-user and per-item solve matches a dense solve to 
     for (std::uint32_t u = 0; u < n_users; ++u) {
       const std::vector<float> row(R.begin() + static_cast<std::ptrdiff_t>(u) * n_items,
                                    R.begin() + static_cast<std::ptrdiff_t>(u + 1) * n_items);
-      check_close(ad::solve_row(GY, Y, k, data.by_user.row_indices(u), alpha, lambda),
-                  dense_solve(Y, n_items, k, row, alpha, lambda));
+      float_caught += check_close(ad::solve_row(GY, Y, k, data.by_user.row_indices(u), alpha, lambda),
+                                  dense_solve(Y, n_items, k, row, alpha, lambda));
     }
+
+    // The tight check is sensitive enough: merely rounding the solution to float32 fails it on
+    // (nearly) every row with interactions (rows without interactions solve to exactly 0).
+    INFO("float32 rounding caught on " << float_caught << " of " << nonzero_rows << " non-empty rows");
+    CHECK(float_caught * 10 >= nonzero_rows * 9);
 
     // half_step stores exactly solve_row's result, rounded to float.
     std::vector<float> X2(static_cast<std::size_t>(n_users) * k);
@@ -150,49 +171,102 @@ TEST_CASE("ALS objective (Y^T Y trick) equals the brute-force sum over every pai
 
 namespace {
 
-// Runs `iters` full iterations exactly as fit() does (items, then users) and checks the
-// objective after every half-step against the value before it.
-void check_monotone(const Dataset& ds, std::size_t k, double alpha, double lambda, int iters, Rng& rng) {
-  const auto data = ad::build_interactions(ds, kThreshold);
-  auto X = tals::random_factors(ds.n_users(), k, 0.01, rng);
-  auto Y = tals::random_factors(ds.n_items(), k, 0.01, rng);
-  double prev = ad::objective(data, X, Y, k, alpha, lambda);
-  int half_steps = 0;
-  for (int it = 0; it < iters; ++it) {
-    for (int side = 0; side < 2; ++side) {
-      if (side == 0) ad::half_step(data.by_item, X, k, alpha, lambda, Y);
-      else ad::half_step(data.by_user, Y, k, alpha, lambda, X);
-      const double cur = ad::objective(data, X, Y, k, alpha, lambda);
-      INFO("iteration " << it << (side == 0 ? " items" : " users") << ": " << prev << " -> " << cur
-                        << " (relative change " << (cur - prev) / prev << ")");
-      CHECK(cur <= prev * (1.0 + 1e-9));
-      prev = cur;
-      ++half_steps;
-    }
+// Installs a half-step hook for the lifetime of the guard (and always clears it afterwards).
+class HookGuard {
+ public:
+  explicit HookGuard(ad::HalfStepHook hook) { ad::set_half_step_hook(std::move(hook)); }
+  ~HookGuard() { ad::set_half_step_hook({}); }
+  HookGuard(const HookGuard&) = delete;
+  HookGuard& operator=(const HookGuard&) = delete;
+};
+
+// Runs the real ALS fit() with the half-step hook installed and checks the objective after every
+// half-step against the value before it.
+void check_monotone(const Dataset& ds, const recs::Config& cfg, std::uint64_t seed) {
+  std::vector<ad::HalfStepEvent> events;  // factors are not kept: spans are only valid in the hook
+  HookGuard guard([&](const ad::HalfStepEvent& e) {
+    ad::HalfStepEvent copy = e;
+    copy.X = {};
+    copy.Y = {};
+    events.push_back(copy);
+  });
+  auto m = recs::make_model("als");
+  recs::TrainContext ctx;
+  ctx.seed = seed;
+  m->fit(ds, cfg, ctx);
+
+  const int iters = cfg.at("iters").get<int>();
+  REQUIRE(events.size() == static_cast<std::size_t>(2 * iters + 1));
+  CHECK(events[0].half_step == 0);
+  for (std::size_t s = 1; s < events.size(); ++s) {
+    const auto& prev = events[s - 1];
+    const auto& cur = events[s];
+    CHECK(cur.half_step == static_cast<int>(s));
+    CHECK(cur.iteration == static_cast<int>((s + 1) / 2));
+    CHECK(cur.users == (s % 2 == 0));  // items first, then users
+    INFO("half-step " << s << (cur.users ? " (users)" : " (items)") << ": " << prev.objective << " -> "
+                      << cur.objective << " (relative change " << (cur.objective - prev.objective) / prev.objective << ")");
+    CHECK(cur.objective <= prev.objective * (1.0 + 1e-9));
   }
-  CHECK(half_steps == 2 * iters);
+  // The curve fit() records is the objective after each user half-step.
+  const auto curve = m->training_curve();
+  REQUIRE(curve.size() == static_cast<std::size_t>(iters));
+  for (int it = 0; it < iters; ++it) CHECK(curve[static_cast<std::size_t>(it)].second == events[static_cast<std::size_t>(2 * it + 2)].objective);
 }
 
 }  // namespace
 
-TEST_CASE("ALS gate: objective is non-increasing after every half-step (1e-9 relative)", "[als][gate]") {
+TEST_CASE("ALS gate: objective is non-increasing after every half-step of fit() (1e-9 relative)", "[als][gate]") {
   SECTION("random explicit ratings, varied hyperparameters") {
-    recs::testing::for_seeds(5, 4403, [](Rng& rng, std::uint64_t) {
+    recs::testing::for_seeds(5, 4403, [](Rng& rng, std::uint64_t seed) {
       const Dataset ds = tals::random_ratings(static_cast<std::uint32_t>(60 + rng.uniform(60)),
                                               static_cast<std::uint32_t>(40 + rng.uniform(60)), 0.15, rng);
       const double alphas[] = {0.0, 5.0, 40.0};
       const double lambdas[] = {0.01, 0.05, 1.0};
-      const std::size_t k = 1 + rng.uniform(20);
-      const double alpha = alphas[rng.uniform(3)];
-      const double lambda = lambdas[rng.uniform(3)];
-      INFO("k " << k << " alpha " << alpha << " lambda " << lambda);
-      check_monotone(ds, k, alpha, lambda, 12, rng);
+      const recs::Config cfg = {{"k", 1 + rng.uniform(20)},
+                                {"alpha", alphas[rng.uniform(3)]},
+                                {"lambda", lambdas[rng.uniform(3)]},
+                                {"iters", 12}};
+      INFO("config " << cfg.dump());
+      check_monotone(ds, cfg, seed);
     });
   }
   SECTION("planted implicit data, spec defaults alpha = 40, lambda = 0.05") {
-    recs::testing::for_seeds(2, 4404, [](Rng& rng, std::uint64_t seed) {
+    recs::testing::for_seeds(2, 4404, [](Rng&, std::uint64_t seed) {
       const auto planted = recs::synthetic::planted_implicit(300, 200, 5, 0.05, 0.2, seed);
-      check_monotone(planted.train, 16, 40.0, 0.05, 15, rng);
+      check_monotone(planted.train, {{"k", 16}, {"iters", 15}}, seed);
     });
   }
+  SECTION("more rows than one Gram block (multi-block path)") {
+    const auto planted = recs::synthetic::planted_implicit(2500, 1300, 5, 0.02, 0.2, 4405);
+    check_monotone(planted.train, {{"k", 8}, {"iters", 4}}, 4405);
+  }
+}
+
+TEST_CASE("ALS half-step hook sees the factors fit() ends with", "[als]") {
+  const auto planted = recs::synthetic::planted_implicit(200, 150, 5, 0.05, 0.2, 4406);
+  std::vector<float> X, Y;
+  {
+    HookGuard guard([&](const ad::HalfStepEvent& e) {
+      X.assign(e.X.begin(), e.X.end());
+      Y.assign(e.Y.begin(), e.Y.end());
+    });
+    auto m = recs::make_model("als");
+    m->fit(planted.train, {{"k", 6}, {"iters", 3}}, recs::TrainContext{});
+    REQUIRE(X.size() == 200u * 6u);
+    REQUIRE(Y.size() == 150u * 6u);
+    std::vector<float> s(150);
+    m->score_trained_user(7, s);
+    for (std::uint32_t i = 0; i < 150; ++i) {
+      double d = 0.0;
+      for (std::size_t a = 0; a < 6; ++a) d += static_cast<double>(X[7 * 6 + a]) * Y[i * 6 + a];
+      if (std::isinf(s[i])) CHECK(d == 0.0);  // an item nobody interacted with: y_i = 0, "cannot score"
+      else CHECK(s[i] == static_cast<float>(d));
+    }
+  }
+  // Without the hook, fit() reports nothing (and does not pay for per-half-step objectives).
+  X.clear();
+  auto m = recs::make_model("als");
+  m->fit(planted.train, {{"k", 6}, {"iters", 3}}, recs::TrainContext{});
+  CHECK(X.empty());
 }

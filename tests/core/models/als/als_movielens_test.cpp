@@ -54,7 +54,7 @@ TEST_CASE("ALS on ml-latest-small: fold-in parity Jaccard@10 > 0.95", "[als][ml-
   CHECK(j > 0.95);
 }
 
-TEST_CASE("ALS on ml-32m: k = 64, 15 iterations, fit time and parity", "[.][als][ml32m]") {
+TEST_CASE("ALS on ml-32m: k = 64, 15 iterations, fit time and parity", "[.][ml32m][als-ml32m]") {
   const auto raw = data_root() / "raw" / "ml-32m";
   if (!fs::exists(raw / "ratings.csv")) SKIP("ml-32m not present at " << raw);
   using Clock = std::chrono::steady_clock;

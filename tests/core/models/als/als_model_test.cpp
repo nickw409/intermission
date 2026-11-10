@@ -122,11 +122,12 @@ TEST_CASE("planted_implicit: shapes, disjoint held-out positives, determinism", 
 // Gates
 
 TEST_CASE("ALS gate: planted rank-5 structure is recovered with mean AUC > 0.9", "[als][gate]") {
-  // Fit settings were chosen once on data seed 101 (a small grid over k in {5, 8}, lambda in
-  // {0.1, 1, 10, 50}, alpha in {1, 5, 20, 40}: AUC 0.91-0.95 except lambda = 50, alpha = 1) and
-  // are reused unchanged on the other seeds. The generator's oracle AUC (true affinities) is
-  // about 0.96; see implicit.cpp.
-  const Config cfg = {{"k", 8}, {"lambda", 1.0}, {"alpha", 20.0}, {"iters", 15}};
+  // Fit settings were picked on a separate tuning seed (909), never on the gate seeds below:
+  // grid k in {5, 8}, lambda in {0.1, 1, 10, 50}, alpha in {1, 5, 20, 40}. On seed 909 every
+  // point scored 0.90-0.94 except lambda = 50, alpha = 1 (0.75); the best, k = 8, lambda = 50,
+  // alpha = 40, scored 0.9415. The generator's oracle AUC (ranking by the true affinities) is
+  // about 0.96 on these seeds; see implicit.cpp.
+  const Config cfg = {{"k", 8}, {"lambda", 50.0}, {"alpha", 40.0}, {"iters", 15}};
   for (std::uint64_t seed : {101ull, 202ull, 303ull}) {
     INFO("data seed " << seed);
     const auto planted = recs::synthetic::planted_implicit(1000, 400, 5, 0.05, 0.2, seed);
@@ -186,26 +187,50 @@ TEST_CASE("ALS gate (fast proxy): fold-in parity Jaccard@10 > 0.95 against train
 // ---------------------------------------------------------------------------------------------
 // Determinism and training curve
 
-TEST_CASE("ALS fit is deterministic per seed and independent of the thread count", "[als]") {
-  const auto planted = recs::synthetic::planted_implicit(300, 200, 5, 0.05, 0.2, 5);
-  const Config cfg = {{"k", 10}, {"iters", 5}};
-  const int saved_threads = omp_get_max_threads();
-  omp_set_num_threads(1);
-  const auto one = fit_als(planted.train, cfg, 9);
-  omp_set_num_threads(std::max(2, saved_threads));
-  const auto two = fit_als(planted.train, cfg, 9);
-  const auto other_seed = fit_als(planted.train, cfg, 10);
-  omp_set_num_threads(saved_threads);
+TEST_CASE("ALS fit is deterministic per seed: bitwise factors with 1 vs 4 threads", "[als]") {
+  // More users and items than one Gram block (kBlockRows = 1024 in als.cpp), so the blocked,
+  // multi-block Gram sums run, and more rows than threads x chunk so every thread gets work.
+  const auto planted = recs::synthetic::planted_implicit(2600, 1500, 5, 0.02, 0.2, 5);
+  REQUIRE(planted.train.n_users() > 2 * 1024);
+  REQUIRE(planted.train.n_items() > 1024);
+  const Config cfg = {{"k", 10}, {"iters", 3}};
 
-  CHECK(one->training_curve() == two->training_curve());
-  bool any_diff = false;
-  for (recs::UserIdx u = 0; u < planted.train.n_users(); ++u) {
-    const auto a = trained_scores(*one, u);
-    CHECK(a == trained_scores(*two, u));
-    if (a != trained_scores(*other_seed, u)) any_diff = true;
-  }
-  CHECK(any_diff);
-  CHECK(one->training_curve() != other_seed->training_curve());
+  struct Run {
+    std::unique_ptr<recs::Model> model;
+    std::vector<float> X, Y;  // final factors, captured through the half-step hook
+  };
+  const auto run = [&](int threads, std::uint64_t seed) {
+    Run r;
+    ad::set_half_step_hook([&](const ad::HalfStepEvent& e) {
+      r.X.assign(e.X.begin(), e.X.end());
+      r.Y.assign(e.Y.begin(), e.Y.end());
+    });
+    const int saved = omp_get_max_threads();
+    omp_set_num_threads(threads);
+    try {
+      r.model = fit_als(planted.train, cfg, seed);
+    } catch (...) {
+      omp_set_num_threads(saved);
+      ad::set_half_step_hook({});
+      throw;
+    }
+    omp_set_num_threads(saved);
+    ad::set_half_step_hook({});
+    return r;
+  };
+  const Run one = run(1, 9);
+  const Run four = run(4, 9);
+  const Run other_seed = run(4, 10);
+
+  REQUIRE(one.X.size() == static_cast<std::size_t>(planted.train.n_users()) * 10);
+  REQUIRE(one.Y.size() == static_cast<std::size_t>(planted.train.n_items()) * 10);
+  CHECK(std::memcmp(one.X.data(), four.X.data(), one.X.size() * sizeof(float)) == 0);
+  CHECK(std::memcmp(one.Y.data(), four.Y.data(), one.Y.size() * sizeof(float)) == 0);
+  CHECK(one.model->training_curve() == four.model->training_curve());
+  CHECK(one.X != other_seed.X);
+  CHECK(one.model->training_curve() != other_seed.model->training_curve());
+  for (recs::UserIdx u = 0; u < planted.train.n_users(); u += 97)
+    CHECK(trained_scores(*one.model, u) == trained_scores(*four.model, u));
 }
 
 TEST_CASE("ALS records the objective after every iteration and it does not increase", "[als]") {
