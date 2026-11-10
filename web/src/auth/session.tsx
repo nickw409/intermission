@@ -1,5 +1,6 @@
 // Who is logged in. The shell asks GET /api/me once on load; login and signup pages hand the
-// returned Me straight to `signedIn`, and `logOut` ends the session on the server.
+// returned Me straight to `signedIn`, `logOut` ends the session on the server, and
+// `deleteAccount` deletes the user (DELETE /api/me) and then clears the session the same way.
 //
 // The session cookie is HttpOnly, so the browser code never sees it: /api/me is the only way to
 // know whether a session exists.
@@ -25,6 +26,11 @@ interface SessionContextValue {
   session: Session;
   signedIn: (me: Me) => void;
   logOut: () => Promise<void>;
+  /**
+   * Deletes the account. Resolves 'deleted' (204) or 'signed-out' (401: the session was already
+   * gone); either way the session is cleared. Throws on any other failure and stays signed in.
+   */
+  deleteAccount: () => Promise<'deleted' | 'signed-out'>;
   /** Ask /api/me again (after an 'error'). */
   retry: () => void;
 }
@@ -32,7 +38,7 @@ interface SessionContextValue {
 const SessionContext = createContext<SessionContextValue | null>(null);
 
 // Requests whose 401s are handled where they are made, not by the expiry listener.
-const SELF_HANDLED = new Set(['GET /api/me', 'POST /api/auth/logout']);
+const SELF_HANDLED = new Set(['GET /api/me', 'POST /api/auth/logout', 'DELETE /api/me']);
 
 export function SessionProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session>({ status: 'loading' });
@@ -83,12 +89,27 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setSession({ status: 'anonymous' });
   }, []);
 
+  const deleteAccount = useCallback(async () => {
+    let outcome: 'deleted' | 'signed-out' = 'deleted';
+    try {
+      await api.delete('/api/me');
+    } catch (error) {
+      if (!(error instanceof ApiError && error.status === 401)) throw error;
+      outcome = 'signed-out';
+    }
+    setSession({ status: 'anonymous' });
+    return outcome;
+  }, []);
+
   const retry = useCallback(() => {
     setSession({ status: 'loading' });
     loadMe();
   }, [loadMe]);
 
-  const value = useMemo(() => ({ session, signedIn, logOut, retry }), [session, signedIn, logOut, retry]);
+  const value = useMemo(
+    () => ({ session, signedIn, logOut, deleteAccount, retry }),
+    [session, signedIn, logOut, deleteAccount, retry],
+  );
   return <SessionContext value={value}>{children}</SessionContext>;
 }
 

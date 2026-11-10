@@ -1,5 +1,5 @@
 import { useRef, useState, type FormEvent } from 'react';
-import { Link, Navigate, useNavigate } from 'react-router';
+import { Link, Navigate, useLocation, useNavigate } from 'react-router';
 import { api } from '../../api/client';
 import { homeFor, useSession } from '../../auth/session';
 import { validateLogin, type FieldErrors, type LoginFields } from '../../auth/validation';
@@ -8,6 +8,8 @@ import { friendlyMessage } from '../../lib/errors';
 
 export default function LoginPage() {
   const navigate = useNavigate();
+  // A one-line notice another page sent us here with (e.g. after deleting the account).
+  const notice = noticeFrom(useLocation().state);
   const { session, signedIn } = useSession();
   const [fields, setFields] = useState<LoginFields>({ username: '', password: '' });
   const [errors, setErrors] = useState<FieldErrors<keyof LoginFields>>({});
@@ -43,6 +45,11 @@ export default function LoginPage() {
   return (
     <section className="auth-page">
       <h1>Log in</h1>
+      {notice && (
+        <p role="status" className="notice">
+          {notice}
+        </p>
+      )}
       <form className="card form" noValidate onSubmit={(e) => void onSubmit(e)}>
         {serverError && (
           <p role="alert" className="form-error">
@@ -79,4 +86,11 @@ export default function LoginPage() {
       </p>
     </section>
   );
+}
+
+function noticeFrom(state: unknown): string | null {
+  if (state !== null && typeof state === 'object' && 'notice' in state && typeof state.notice === 'string') {
+    return state.notice;
+  }
+  return null;
 }
