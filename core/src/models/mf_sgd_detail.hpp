@@ -7,6 +7,7 @@
 #include <span>
 #include <vector>
 
+#include "recs/rng.hpp"
 #include "recs/types.hpp"
 
 namespace recs::mf_detail {
@@ -37,5 +38,21 @@ Params gradient(const Params& m, std::span<const Triplet> ratings, double lambda
 /// One SGD step on one rating: theta <- theta - lr * d(per-rating loss)/d(theta), with every
 /// partial derivative taken at the old parameter values (simultaneous update).
 void sgd_step(Params& m, const Triplet& rating, double lr, double lambda);
+
+/// The order in which training visits the ratings, one permutation of [0, n) per epoch.
+/// Stream: a single Rng(mix_seed(seed, 2)) for the whole run; each next() applies one more
+/// Fisher-Yates shuffle to the previous epoch's permutation (starting from 0, 1, ..., n-1), so every
+/// epoch gets a fresh order and the whole sequence is a function of the seed alone. (The brief
+/// suggested a fresh Rng(seed ^ epoch) per epoch; one stream is equivalent in effect and avoids
+/// correlated seeds for small epoch numbers.)
+class EpochShuffler {
+ public:
+  EpochShuffler(std::size_t n, std::uint64_t seed);
+  const std::vector<std::uint32_t>& next();
+
+ private:
+  Rng rng_;
+  std::vector<std::uint32_t> order_;
+};
 
 }  // namespace recs::mf_detail

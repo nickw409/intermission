@@ -24,10 +24,13 @@
 //   - Initialisation: biases 0; factors N(0, init_sd^2), except that users and items with no
 //     training ratings get zero factors (they would otherwise keep pure noise forever).
 //   - Each epoch visits every rating once in an order given by a seeded Fisher-Yates shuffle
-//     (recs::Rng), then multiplies the learning rate by lr_decay.
+//     (mf_detail::EpochShuffler: one recs::Rng(mix_seed(seed, 2)) stream for the run, each epoch
+//     re-shuffling the previous permutation), then multiplies the learning rate by lr_decay.
 //   - Early stopping: with a validation set (ctx.validation), the RMSE on it is measured after each
 //     epoch; training stops after `patience` epochs without improvement and the parameters of the
-//     best epoch are restored. Without one, training runs max_epochs and the curve is train RMSE.
+//     best epoch are restored. Without one, or when none of its ratings is
+//     usable (user or item outside the training index space), training runs max_epochs and the
+//     curve is train RMSE.
 //   - Determinism: the SGD loop is serial. Hogwild-style lock-free parallel SGD would be faster
 //     but is not reproducible, and the spec forbids it in deterministic mode. Training runs in
 //     double precision; the fitted item factors are stored as float32.
@@ -161,6 +164,16 @@ void sgd_step(Params& m, const Triplet& rating, double lr, double lambda) {
   add_rating_gradient(e, m.bu[u], m.bi[i], p, q, m.k, lambda, -lr, m.bu[u], m.bi[i], p, q);
 }
 
+EpochShuffler::EpochShuffler(std::size_t n, std::uint64_t seed)
+    : rng_(mix_seed(seed, 2)), order_(n) {
+  std::iota(order_.begin(), order_.end(), 0u);
+}
+
+const std::vector<std::uint32_t>& EpochShuffler::next() {
+  rng_.shuffle(order_.begin(), order_.end());
+  return order_;
+}
+
 }  // namespace mf_detail
 
 namespace {
@@ -232,6 +245,8 @@ static_assert(std::endian::native == std::endian::little, "artifact I/O assumes 
 
 constexpr char kMagic[8] = {'R', 'E', 'C', 'S', 'M', 'F', '0', '1'};
 constexpr std::uint32_t kFormatVersion = 1;
+// magic, format version, n_items, k
+constexpr std::uint64_t kHeaderBytes = sizeof(kMagic) + 3 * sizeof(std::uint32_t);
 
 template <class T>
 void put(std::string& buf, const T& x) {
@@ -252,6 +267,7 @@ class Reader {
     return x;
   }
   bool at_end() const { return pos_ == data_.size(); }
+  std::uint64_t size() const { return data_.size(); }
 
  private:
   std::string data_;
@@ -317,21 +333,20 @@ class MfSgd final : public Model {
         for (std::uint32_t f = 0; f < k; ++f) m.Q[std::size_t{i} * k + f] = cfg_.init_sd * init_rng.normal();
 
     const auto* validation = ctx.validation;
-    if (validation != nullptr && count_ratings(*validation, nu) == 0) validation = nullptr;
+    // Validation ratings outside the training index space cannot be scored; if none are usable,
+    // train as if there were no validation set (max_epochs, train-RMSE curve) instead of NaN.
+    if (validation != nullptr && count_usable(*validation, nu, ni) == 0) validation = nullptr;
     curve_metric_ = validation != nullptr ? "val_rmse" : "train_rmse";
     curve_.clear();
 
-    std::vector<std::uint32_t> order(ratings.size());
-    std::iota(order.begin(), order.end(), 0u);
-    Rng shuffle_rng(mix_seed(ctx.seed, 2));
+    mf_detail::EpochShuffler shuffler(ratings.size(), ctx.seed);
 
     Params best = m;
     double best_rmse = std::numeric_limits<double>::infinity();
     int since_best = 0;
     double lr = cfg_.lr;
     for (int epoch = 1; epoch <= cfg_.max_epochs; ++epoch) {
-      shuffle_rng.shuffle(order.begin(), order.end());
-      for (const std::uint32_t idx : order) mf_detail::sgd_step(m, ratings[idx], lr, cfg_.lambda);
+      for (const std::uint32_t idx : shuffler.next()) mf_detail::sgd_step(m, ratings[idx], lr, cfg_.lambda);
       lr *= cfg_.lr_decay;
 
       const double rmse = validation != nullptr ? validation_rmse(m, *validation) : train_rmse(m, ratings);
@@ -433,10 +448,20 @@ class MfSgd final : public Model {
     const auto ni = in.get<std::uint32_t>();
     const auto k = in.get<std::uint32_t>();
     if (k != cfg.k) throw std::runtime_error("mf model file: k does not match config.json");
+    // Check the exact length implied by the header before allocating anything from it, so a
+    // corrupt or hostile n_items cannot trigger a huge allocation. No overflow: ni < 2^32 and
+    // k <= 4096 (parse_config), so the products stay far below 2^64.
+    const std::uint64_t expected = kHeaderBytes + sizeof(double) + sizeof(float) * std::uint64_t{ni} +
+                                   sizeof(float) * std::uint64_t{ni} * k;
+    if (in.size() != expected) throw std::runtime_error("mf model file: wrong length for its header");
     const auto mu = in.get<double>();
+    if (!std::isfinite(mu)) throw std::runtime_error("mf model file: non-finite mu");
     std::vector<float> bi(ni), Q(std::size_t{ni} * k);
     for (auto& x : bi) x = in.get<float>();
     for (auto& x : Q) x = in.get<float>();
+    const auto finite = [](float x) { return std::isfinite(x); };
+    if (!std::all_of(bi.begin(), bi.end(), finite) || !std::all_of(Q.begin(), Q.end(), finite))
+      throw std::runtime_error("mf model file: non-finite item parameters");
     if (!in.at_end()) throw std::runtime_error("mf model file: trailing bytes");
 
     cfg_ = cfg;
@@ -453,9 +478,12 @@ class MfSgd final : public Model {
   }
 
  private:
-  static std::size_t count_ratings(const std::vector<std::vector<Rating>>& v, std::uint32_t nu) {
+  // Validation ratings validation_rmse() can score: user < nu and item < ni.
+  static std::size_t count_usable(const std::vector<std::vector<Rating>>& v, std::uint32_t nu,
+                                  std::uint32_t ni) {
     std::size_t n = 0;
-    for (std::size_t u = 0; u < std::min<std::size_t>(v.size(), nu); ++u) n += v[u].size();
+    for (std::size_t u = 0; u < std::min<std::size_t>(v.size(), nu); ++u)
+      for (const auto& r : v[u]) n += r.item < ni ? 1 : 0;
     return n;
   }
 

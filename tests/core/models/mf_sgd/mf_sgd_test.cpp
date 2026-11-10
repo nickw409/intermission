@@ -2,6 +2,9 @@
 // Phase 3 gates). The ml-32m gates (RMSE vs bias baseline, 500-user parity) run after Wave 4.
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <fstream>
+#include <iterator>
 #include <cstdint>
 #include <limits>
 #include <numeric>
@@ -180,6 +183,35 @@ double mean_parity_jaccard(const recs::Model& m, const recs::Dataset& train) {
   return sum / static_cast<double>(n);
 }
 
+// low_rank_explicit has no biases (mu = b_u = b_i = 0), so on its own it cannot catch bias bugs.
+// This adds a known structure on top: r'_ui = 3.5 + b_u + b_i + r_ui with b_u, b_i ~ N(0, 0.5^2)
+// drawn from a seeded stream, applied to training and held-out ratings alike. Optionally rounds
+// to 0.5 stars clamped to [0.5, 5] (adds rounding noise, like real ratings).
+struct Biased {
+  recs::Dataset train;
+  std::vector<std::vector<recs::Rating>> heldout;
+};
+Biased add_biases(const recs::synthetic::ExplicitLowRank& s, std::uint64_t seed, bool stars) {
+  recs::Rng rng(recs::mix_seed(seed, 77));
+  std::vector<double> bu(s.train.n_users()), bi(s.train.n_items());
+  for (auto& b : bu) b = 0.5 * rng.normal();
+  for (auto& b : bi) b = 0.5 * rng.normal();
+  const auto shift = [&](recs::UserIdx u, recs::ItemIdx i, float v) {
+    double x = 3.5 + bu[u] + bi[i] + v;
+    if (stars) x = std::clamp(std::round(x * 2.0) / 2.0, 0.5, 5.0);
+    return static_cast<float>(x);
+  };
+  Biased out;
+  std::vector<recs::Triplet> t;
+  for (recs::UserIdx u = 0; u < s.train.n_users(); ++u)
+    for (const auto& r : user_ratings(s.train, u)) t.push_back({u, r.item, shift(u, r.item, r.value), r.ts});
+  out.train = recs::make_dataset("biased", s.train.n_users(), s.train.n_items(), std::move(t));
+  out.heldout = s.heldout;
+  for (recs::UserIdx u = 0; u < out.heldout.size(); ++u)
+    for (auto& r : out.heldout[u]) r.value = shift(u, r.item, r.value);
+  return out;
+}
+
 // The configuration for the synthetic gates.
 //  - k = 5: the true rank (the gate is about recovering a known structure, not choosing k).
 //  - lambda = 0.005: chosen on an independent draw (same sizes, seed 32, never the gate's seed 31)
@@ -275,41 +307,261 @@ TEST_CASE("MF fold-in parity: Jaccard@10 against trained user vectors > 0.9", "[
   CHECK(j > 0.9);
 }
 
-TEST_CASE("MF fold-in reproduces converged trained user vectors on star ratings", "[mf]") {
+// --- Bias gates: synthetic data with known user and item biases ----------------------------
+
+TEST_CASE("MF recovers biased rank-5 synthetic ratings: RMSE < 0.15 and parity > 0.9",
+          "[mf][gate]") {
+  // Same rank-5 + N(0, 0.1^2) structure as the plain gate, plus mu = 3.5 and b_u, b_i with sd 0.5.
+  // Catches a score() that drops b_i (trained-path RMSE ~0.5) and a fold-in that ignores b_i in
+  // the residuals (fold-in RMSE far above the noise).
+  const auto s = recs::synthetic::low_rank_explicit(600, 400, 5, 0.1, 0.15, 0.2, 31);
+  const auto b = add_biases(s, 31, false);
+  const auto tv = carve_validation(b.train, 0.1, 5);
+  auto model = recs::make_mf_sgd();
+  recs::TrainContext ctx;
+  ctx.validation = &tv.validation;
+  model->fit(tv.train, synthetic_config(), ctx);
+  const double rmse_trained = heldout_rmse(*model, tv.train, b.heldout, true);
+  const double rmse_folded = heldout_rmse(*model, tv.train, b.heldout, false);
+  const double j = mean_parity_jaccard(*model, tv.train);
+  INFO("held-out RMSE trained " << rmse_trained << ", fold-in " << rmse_folded << ", Jaccard@10 "
+                                << j << ", epochs " << model->training_curve().size());
+  CHECK(rmse_trained < 0.15);
+  CHECK(rmse_folded < 0.15);
+  CHECK(j > 0.9);
+}
+
+TEST_CASE("MF fold-in reproduces converged trained user vectors on biased star ratings",
+          "[mf][gate]") {
   // Once SGD has converged, each training user's (b_u, p_u) is the minimiser of their part of the
-  // objective with the item parameters fixed, which is exactly what fold_in() solves. So on star
-  // ratings (0.5 steps, clamped) from a rank-8 structure, trained long enough without early
-  // stopping, the folded vectors must match the trained ones closely and parity must be high.
-  // This checks the fold-in math itself; the early-stopped parity gate is above.
+  // objective with the item parameters fixed, which is exactly what fold_in() solves, including
+  // its ridge lambda * n (n = the user's rating count, because the regulariser is per rating).
+  // So on biased star ratings from a rank-8 structure, trained long enough without early stopping,
+  // folded scores must match trained scores closely. This checks the fold-in math itself: a ridge
+  // of lambda instead of lambda * n, or residuals without b_i, break the match.
   const auto s = recs::synthetic::low_rank_explicit(300, 200, 8, 0.3, 0.25, 0.0, 9);
-  std::vector<recs::Triplet> t;
-  for (recs::UserIdx u = 0; u < s.train.n_users(); ++u)
-    for (const auto& r : user_ratings(s.train, u)) {
-      const double v = std::clamp(std::round((3.5 + r.value) * 2.0) / 2.0, 0.5, 5.0);
-      t.push_back({u, r.item, static_cast<float>(v), r.ts});
-    }
-  const auto ds = recs::make_dataset("stars", s.train.n_users(), s.train.n_items(), std::move(t));
+  const auto ds = add_biases(s, 9, true).train;
   auto model = recs::make_mf_sgd();
   model->fit(ds,
              recs::Config{{"k", 8}, {"lambda", 0.05}, {"lr", 0.02}, {"lr_decay", 0.99},
                           {"max_epochs", 400}, {"init_sd", 0.1}},
              recs::TrainContext{});
-  // Compare the personalised scores b_u + p_u . q_i (trained vs folded) over every item.
+  // Relative difference of the personalised scores: each user's scores centred on their own mean
+  // (removes mu + b_u) for the norm; the difference keeps everything.
   std::vector<float> batch(ds.n_items()), folded(ds.n_items());
   double diff = 0.0, norm = 0.0;
   for (recs::UserIdx u = 0; u < ds.n_users(); ++u) {
     model->score_trained_user(u, batch);
     model->score(model->fold_in(user_ratings(ds, u)), folded);
+    double mean = 0.0;
+    for (const float x : batch) mean += x;
+    mean /= static_cast<double>(batch.size());
     for (recs::ItemIdx i = 0; i < ds.n_items(); ++i) {
       diff += (batch[i] - folded[i]) * (batch[i] - folded[i]);
-      norm += batch[i] * batch[i];
+      norm += (batch[i] - mean) * (batch[i] - mean);
     }
   }
   const double rel = std::sqrt(diff / norm);
   const double j = mean_parity_jaccard(*model, ds);
   INFO("relative score difference " << rel << ", mean Jaccard@10 " << j);
-  CHECK(rel < 1e-3);
+  CHECK(rel < 1e-2);
   CHECK(j > 0.95);
+}
+
+// --- Shuffling -----------------------------------------------------------------------------
+
+TEST_CASE("MF epoch order is a fresh seeded permutation every epoch", "[mf]") {
+  const std::size_t n = 200;
+  recs::mf_detail::EpochShuffler a(n, 1), b(n, 1), c(n, 2);
+  std::vector<std::vector<std::uint32_t>> seen;
+  for (int e = 0; e < 5; ++e) {
+    const auto oa = a.next();
+    const auto ob = b.next();
+    const auto oc = c.next();
+    CHECK(oa == ob);  // same seed, same stream
+    CHECK(oa != oc);  // the seed matters
+    auto sorted = oa;
+    std::sort(sorted.begin(), sorted.end());
+    std::vector<std::uint32_t> iota(n);
+    std::iota(iota.begin(), iota.end(), 0u);
+    CHECK(sorted == iota);  // a permutation
+    CHECK(oa != iota);      // actually shuffled
+    for (const auto& prev : seen) CHECK(oa != prev);  // a new order each epoch
+    seen.push_back(oa);
+  }
+}
+
+TEST_CASE("MF fit visits ratings in the seeded per-epoch shuffled order", "[mf]") {
+  // init_sd = 0 makes the initial parameters independent of the seed (all zero; with zero factors
+  // only the biases move), so any dependence of the result on the seed comes from the update
+  // order. Replaying SGD by hand with the EpochShuffler orders must reproduce fit(); replaying in
+  // CSR order, with one order reused for both epochs, or with another seed's orders must not.
+  const auto s = recs::synthetic::low_rank_explicit(40, 30, 2, 0.1, 0.4, 0.0, 3);
+  const auto ds = add_biases(s, 3, true).train;
+  const double lr = 0.05, decay = 0.9, lambda = 0.02;
+  const std::uint64_t seed = 1234;
+  auto model = recs::make_mf_sgd();
+  recs::TrainContext ctx;
+  ctx.seed = seed;
+  model->fit(ds,
+             recs::Config{{"k", 2}, {"lambda", lambda}, {"lr", lr}, {"lr_decay", decay},
+                          {"max_epochs", 2}, {"init_sd", 0.0}},
+             ctx);
+
+  std::vector<recs::Triplet> ratings;
+  double sum = 0.0;
+  for (recs::UserIdx u = 0; u < ds.n_users(); ++u)
+    for (const auto& r : user_ratings(ds, u)) {
+      ratings.push_back({u, r.item, r.value, 0});
+      sum += r.value;
+    }
+  Params zero;
+  zero.k = 2;
+  zero.mu = sum / static_cast<double>(ratings.size());
+  zero.bu.assign(ds.n_users(), 0.0);
+  zero.bi.assign(ds.n_items(), 0.0);
+  zero.P.assign(std::size_t{ds.n_users()} * 2, 0.0);
+  zero.Q.assign(std::size_t{ds.n_items()} * 2, 0.0);
+
+  const auto replay = [&](const std::vector<std::uint32_t>& e1, const std::vector<std::uint32_t>& e2) {
+    Params m = zero;
+    for (const auto idx : e1) recs::mf_detail::sgd_step(m, ratings[idx], lr, lambda);
+    for (const auto idx : e2) recs::mf_detail::sgd_step(m, ratings[idx], lr * decay, lambda);
+    return m;
+  };
+  // Largest |fit score - replayed prediction| over every (user, item).
+  const auto max_gap = [&](const Params& m) {
+    std::vector<float> sc(ds.n_items());
+    double gap = 0.0;
+    for (recs::UserIdx u = 0; u < ds.n_users(); ++u) {
+      model->score_trained_user(u, sc);
+      for (recs::ItemIdx i = 0; i < ds.n_items(); ++i)
+        gap = std::max(gap, std::abs(sc[i] - recs::mf_detail::predict(m, u, i)));
+    }
+    return gap;
+  };
+
+  recs::mf_detail::EpochShuffler sh(ratings.size(), seed);
+  const auto o1 = sh.next();
+  const auto o2 = sh.next();
+  recs::mf_detail::EpochShuffler other(ratings.size(), seed + 1);
+  const auto x1 = other.next();
+  const auto x2 = other.next();
+  std::vector<std::uint32_t> csr(ratings.size());
+  std::iota(csr.begin(), csr.end(), 0u);
+
+  CHECK(max_gap(replay(o1, o2)) < 1e-5);   // fit() follows the seeded per-epoch orders
+  CHECK(max_gap(replay(csr, csr)) > 1e-3);  // "no shuffle" would be caught
+  CHECK(max_gap(replay(o1, o1)) > 1e-3);    // "shuffle once, reuse" would be caught
+  CHECK(max_gap(replay(x1, x2)) > 1e-3);    // "shuffle ignores ctx.seed" would be caught
+}
+
+// --- Validation edge case ------------------------------------------------------------------
+
+TEST_CASE("MF treats a validation set with no usable ratings as no validation", "[mf]") {
+  // Validation ratings whose user or item lies outside the training index space cannot be scored.
+  // With none left, fit() runs max_epochs and records train RMSE instead of producing NaN.
+  const auto s = recs::synthetic::low_rank_explicit(20, 15, 2, 0.1, 0.5, 0.0, 2);
+  std::vector<std::vector<recs::Rating>> validation(25);
+  validation[3].push_back({15, 4.0f, 0});   // item out of range
+  validation[22].push_back({1, 4.0f, 0});   // user out of range
+  auto model = recs::make_mf_sgd();
+  recs::TrainContext ctx;
+  ctx.validation = &validation;
+  model->fit(s.train, recs::Config{{"k", 2}, {"max_epochs", 4}}, ctx);
+  CHECK(model->training_curve_metric() == "train_rmse");
+  REQUIRE(model->training_curve().size() == 4);
+  for (const auto& [e, v] : model->training_curve()) CHECK(std::isfinite(v));
+}
+
+// --- Hostile model files -------------------------------------------------------------------
+
+namespace {
+
+// item_factors.bin layout: magic[8] | u32 version | u32 n_items | u32 k | f64 mu | f32 b_i[n] |
+// f32 Q[n * k]
+constexpr std::size_t kOffNItems = 12, kOffMu = 20, kOffBi = 28;
+
+std::string slurp(const std::filesystem::path& p) {
+  std::ifstream in(p, std::ios::binary);
+  return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+}
+void spit(const std::filesystem::path& p, const std::string& s) {
+  std::ofstream out(p, std::ios::binary | std::ios::trunc);
+  out.write(s.data(), static_cast<std::streamsize>(s.size()));
+}
+template <class T>
+void poke(std::string& bytes, std::size_t off, T value) {
+  std::memcpy(bytes.data() + off, &value, sizeof(T));
+}
+
+}  // namespace
+
+TEST_CASE("MF load rejects hostile or corrupt model files", "[mf]") {
+  const auto s = recs::synthetic::low_rank_explicit(30, 20, 3, 0.1, 0.4, 0.0, 4);
+  auto model = recs::make_mf_sgd();
+  model->fit(s.train, recs::Config{{"k", 3}, {"max_epochs", 3}}, recs::TrainContext{});
+  recs::testing::TempDir dir("mf-hostile");
+  model->save(dir.path());
+  const auto bin = dir / "item_factors.bin";
+  const auto cfg = dir / "config.json";
+  const std::string good_bin = slurp(bin), good_cfg = slurp(cfg);
+  REQUIRE(good_bin.size() == 28 + 4 * 20 + 4 * 20 * 3);
+
+  const auto rejects = [&](const std::string& b, const std::string& c) {
+    spit(bin, b);
+    spit(cfg, c);
+    auto m = recs::make_mf_sgd();
+    bool threw = false;
+    try {
+      m->load(dir.path());
+    } catch (const std::exception&) {
+      threw = true;
+    }
+    return threw;
+  };
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  const float inf = std::numeric_limits<float>::infinity();
+
+  CHECK_FALSE(rejects(good_bin, good_cfg));  // the unmodified files load
+
+  SECTION("bad magic") {
+    auto b = good_bin;
+    b[0] = 'X';
+    CHECK(rejects(b, good_cfg));
+  }
+  SECTION("huge n_items is rejected by the size check before any allocation") {
+    auto b = good_bin;
+    poke<std::uint32_t>(b, kOffNItems, 0xFFFFFFFFu);
+    CHECK(rejects(b, good_cfg));
+  }
+  SECTION("non-finite mu") {
+    auto b = good_bin;
+    poke<double>(b, kOffMu, std::numeric_limits<double>::quiet_NaN());
+    CHECK(rejects(b, good_cfg));
+  }
+  SECTION("non-finite b_i") {
+    auto b = good_bin;
+    poke<float>(b, kOffBi + 4 * 5, nan);
+    CHECK(rejects(b, good_cfg));
+  }
+  SECTION("non-finite Q") {
+    auto b = good_bin;
+    poke<float>(b, b.size() - 4, inf);
+    CHECK(rejects(b, good_cfg));
+  }
+  SECTION("trailing bytes") {
+    CHECK(rejects(good_bin + '\0', good_cfg));
+  }
+  SECTION("truncated") {
+    CHECK(rejects(good_bin.substr(0, good_bin.size() - 1), good_cfg));
+    CHECK(rejects(good_bin.substr(0, 10), good_cfg));
+  }
+  SECTION("k in the file does not match config.json") {
+    auto c = recs::Config::parse(good_cfg);
+    c["k"] = 4;
+    CHECK(rejects(good_bin, c.dump()));
+  }
 }
 
 // --- Contract tests -----------------------------------------------------------------------
