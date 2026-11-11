@@ -11,6 +11,7 @@
 //	recs-api migrate
 //	recs-api export-ratings [flags]
 //	recs-api admin invite create --uses N --expires 14d --note "name"
+//	recs-api admin sessions revoke-all
 //
 // Configuration comes from the environment; see internal/app/config.go.
 package main
@@ -63,6 +64,7 @@ commands:
   export-ratings [flags]                write website ratings to RECS_EXPORTS_DIR
   admin invite create --uses N --expires 14d --note "name"
                                         mint an invite code (printed once)
+  admin sessions revoke-all             delete every session (everyone logs in again)
 `
 
 func main() {
