@@ -40,7 +40,11 @@
 //     because no two threads ever touch the same row, the result depends only on the seed, b and
 //     the precision, not on the thread count (no Hogwild-style races). The cost is a less random order than a
 //     global shuffle: consecutive updates within a cell share user and item groups. With b = 1
-//     there is one cell, and the algorithm is exactly the serial one above.
+//     there is one cell, and the algorithm is exactly the serial one above. On ml-32m (k 64,
+//     lambda 0.05) 8 blocks reach the serial RMSE (0.8166 vs 0.8167) at about 0.8 s per epoch
+//     instead of 6.5 s, but early stopping lands before the user vectors settle and fold-in
+//     parity drops from 0.920 to 0.893; lambda 0.06 restores it (0.939, RMSE 0.8175). See
+//     configs/README.md, "mf".
 //   - Speed: the loop is bound by memory latency, not arithmetic (each update reads one random
 //     user row and one random item row; on ml-32m P and Q are far larger than the caches).
 //     Shuffling 12-byte records in place lets each epoch read the ratings sequentially instead of
