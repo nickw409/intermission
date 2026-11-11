@@ -595,7 +595,7 @@ export interface components {
     parameters: {
         MovieId: number;
         K: number;
-        /** @description Comma-separated MovieLens genre names (case-sensitive, no spaces, no duplicates, at most 19). Only movies with at least one of them are returned; fewer than k items may come back. Cold-start popularity results are filtered too. An unknown or repeated name is 400 bad_request. */
+        /** @description Comma-separated MovieLens genre names (case-sensitive, no spaces, no duplicates, at most 19). Only movies with at least one of them are returned; fewer than k items may come back. Cold-start popularity results are filtered too. An empty value means no filter. An unknown or repeated name is 400 bad_request. */
         Genres: string;
         XRequestedWith: "recs";
     };
@@ -928,7 +928,7 @@ export interface operations {
             query?: {
                 model?: components["schemas"]["ModelName"];
                 k?: components["parameters"]["K"];
-                /** @description Comma-separated MovieLens genre names (case-sensitive, no spaces, no duplicates, at most 19). Only movies with at least one of them are returned; fewer than k items may come back. Cold-start popularity results are filtered too. An unknown or repeated name is 400 bad_request. */
+                /** @description Comma-separated MovieLens genre names (case-sensitive, no spaces, no duplicates, at most 19). Only movies with at least one of them are returned; fewer than k items may come back. Cold-start popularity results are filtered too. An empty value means no filter. An unknown or repeated name is 400 bad_request. */
                 genres?: components["parameters"]["Genres"];
             };
             header?: never;
@@ -959,7 +959,7 @@ export interface operations {
                 /** @description Comma-separated, 1–5 distinct model names. */
                 models: string;
                 k?: components["parameters"]["K"];
-                /** @description Comma-separated MovieLens genre names (case-sensitive, no spaces, no duplicates, at most 19). Only movies with at least one of them are returned; fewer than k items may come back. Cold-start popularity results are filtered too. An unknown or repeated name is 400 bad_request. */
+                /** @description Comma-separated MovieLens genre names (case-sensitive, no spaces, no duplicates, at most 19). Only movies with at least one of them are returned; fewer than k items may come back. Cold-start popularity results are filtered too. An empty value means no filter. An unknown or repeated name is 400 bad_request. */
                 genres?: components["parameters"]["Genres"];
             };
             header?: never;

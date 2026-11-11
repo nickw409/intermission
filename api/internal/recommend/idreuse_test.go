@@ -165,4 +165,3 @@ func TestAccountDeletionPurgesRecommendCache(t *testing.T) {
 		t.Fatalf("reborn ID: %d %s, want 429", rec.Code, rec.Body.String())
 	}
 }
-
