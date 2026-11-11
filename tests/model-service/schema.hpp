@@ -1,12 +1,14 @@
-// A small JSON-Schema subset validator plus the response schemas of contracts/model.yaml.
+// A small JSON-Schema subset validator plus the response schemas (and the recommend/compare
+// request schemas) of contracts/model.yaml.
 //
 // The repo has no YAML parser on the C++ side, so the component schemas are transcribed below as
-// JSON. contract_fixtures_test.cpp guards against drift: every `required` list transcribed here
-// must appear verbatim in model.yaml, and every fixture response must validate.
+// JSON. contract_fixtures_test.cpp guards against drift: every `required` list and `enum` list
+// transcribed here must appear verbatim in model.yaml, the request properties must match, and
+// every fixture response must validate.
 //
 // Supported keywords: $ref (to "#/components/schemas/<Name>"), type (string or array of strings),
 // enum, required, properties, additionalProperties (false only), items, minItems, maxItems,
-// minimum, maximum.
+// uniqueItems, minimum, maximum, multipleOf.
 #pragma once
 
 #include <algorithm>
@@ -25,6 +27,23 @@ inline const nlohmann::json& model_components() {
         "properties": {"code": {"type": "string", "enum": ["bad_request", "invalid_json", "body_too_large", "not_found", "unknown_model", "model_unavailable", "internal"]},
                        "message": {"type": "string"}}}}},
     "ModelName": {"type": "string", "enum": ["pop", "pop_count", "knn", "content", "mf", "als", "hybrid", "mmr"]},
+    "RatingIn": {"type": "object", "additionalProperties": false, "required": ["movie_id", "rating"],
+      "properties": {"movie_id": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+                     "rating": {"type": "number", "minimum": 0.5, "maximum": 5.0, "multipleOf": 0.5}}},
+    "Ratings": {"type": "array", "maxItems": 5000, "items": {"$ref": "#/components/schemas/RatingIn"}},
+    "Exclude": {"type": "array", "maxItems": 10000, "items": {"type": "integer", "minimum": 1, "maximum": 2147483647}},
+    "Genre": {"type": "string", "enum": ["Action", "Adventure", "Animation", "Children", "Comedy", "Crime", "Documentary", "Drama",
+      "Fantasy", "Film-Noir", "Horror", "IMAX", "Musical", "Mystery", "Romance", "Sci-Fi", "Thriller", "War", "Western"]},
+    "Genres": {"type": "array", "maxItems": 19, "uniqueItems": true, "items": {"$ref": "#/components/schemas/Genre"}},
+    "RecommendRequest": {"type": "object", "additionalProperties": false, "required": ["model", "ratings", "k"],
+      "properties": {"model": {"$ref": "#/components/schemas/ModelName"}, "ratings": {"$ref": "#/components/schemas/Ratings"},
+                     "k": {"type": "integer", "minimum": 1, "maximum": 100}, "exclude": {"$ref": "#/components/schemas/Exclude"},
+                     "genres": {"$ref": "#/components/schemas/Genres"}}},
+    "CompareRequest": {"type": "object", "additionalProperties": false, "required": ["models", "ratings", "k"],
+      "properties": {"models": {"type": "array", "minItems": 1, "maxItems": 5, "uniqueItems": true, "items": {"$ref": "#/components/schemas/ModelName"}},
+                     "ratings": {"$ref": "#/components/schemas/Ratings"},
+                     "k": {"type": "integer", "minimum": 1, "maximum": 100}, "exclude": {"$ref": "#/components/schemas/Exclude"},
+                     "genres": {"$ref": "#/components/schemas/Genres"}}},
     "Because": {"type": "object", "additionalProperties": false, "required": ["movie_id", "weight"],
       "properties": {"movie_id": {"type": "integer"}, "weight": {"type": "number"}}},
     "Item": {"type": "object", "additionalProperties": false, "required": ["movie_id", "score", "because"],
@@ -107,6 +126,10 @@ inline void validate(const nlohmann::json& v, const nlohmann::json& schema, cons
   if (v.is_number()) {
     if (schema.contains("minimum") && v.get<double>() < schema["minimum"].get<double>()) errors.push_back(at + ": below minimum");
     if (schema.contains("maximum") && v.get<double>() > schema["maximum"].get<double>()) errors.push_back(at + ": above maximum");
+    if (schema.contains("multipleOf")) {
+      const double q = v.get<double>() / schema["multipleOf"].get<double>();
+      if (std::floor(q) != q) errors.push_back(at + ": not a multiple of " + schema["multipleOf"].dump());
+    }
   }
   if (v.is_object()) {
     if (schema.contains("required")) {
@@ -126,6 +149,13 @@ inline void validate(const nlohmann::json& v, const nlohmann::json& schema, cons
   if (v.is_array()) {
     if (schema.contains("minItems") && v.size() < schema["minItems"].get<std::size_t>()) errors.push_back(at + ": too few items");
     if (schema.contains("maxItems") && v.size() > schema["maxItems"].get<std::size_t>()) errors.push_back(at + ": too many items");
+    if (schema.value("uniqueItems", false)) {
+      for (std::size_t i = 0; i < v.size(); ++i) {
+        for (std::size_t j = i + 1; j < v.size(); ++j) {
+          if (v[i] == v[j]) errors.push_back(at + ": duplicate items");
+        }
+      }
+    }
     if (schema.contains("items")) {
       for (std::size_t i = 0; i < v.size(); ++i) validate(v[i], schema["items"], at + "[" + std::to_string(i) + "]", errors);
     }
