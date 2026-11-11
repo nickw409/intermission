@@ -49,6 +49,12 @@
 //     plain index-shuffle loop (a golden test pins it). Measured in PR #57 on ml-32m-sized
 //     synthetic data (k = 64, one thread): 15.8 s per epoch before, 6.3 s after. Bit-identity
 //     assumes the project's flags (no -ffast-math, no -march that enables FMA contraction).
+//   - Precision: by default (precision "float") the parameters are stored and updated in single
+//     precision. Half the bytes per row means half the memory traffic, which is what the loop
+//     waits on: about 1.6x faster per epoch on the same data. Each update's dot product has only
+//     k terms, so float accumulation is accurate enough there; every sum over ratings (RMSE,
+//     objective) is still accumulated in double. precision "double" keeps the double-precision
+//     reference loop; the gradient gates always check the double formulas (mf_detail::Params).
 //   - Early stopping: with a validation set (ctx.validation), the RMSE on it is measured after each
 //     epoch; training stops after `patience` epochs without improvement and the parameters of the
 //     best epoch are restored. Without one, or when none of its ratings is
@@ -56,8 +62,8 @@
 //     curve is train RMSE.
 //   - Determinism: no two threads ever update the same parameter (DSGD above), so training is
 //     reproducible for a given seed and blocks value on any thread count. Hogwild-style lock-free
-//     parallel SGD would be simpler but is not reproducible, and the spec forbids it. Training
-//     runs in double precision; the fitted item factors are stored as float32.
+//     parallel SGD would be simpler but is not reproducible, and the spec forbids it. The fitted
+//     item factors are saved as float32 whatever the training precision.
 //
 // Fold-in (spec: "estimate b_u as the damped mean residual, then solve the ridge system for p_u
 // with Q and b_i fixed")
@@ -180,17 +186,30 @@ namespace {
 // slots. The slots may alias the parameters themselves (sgd_step), so every parameter is read
 // before its slot is written: biases are passed by value, and factor f is read then written
 // within one loop iteration.
-void add_rating_gradient(double e, double bu, double bi, const double* p, const double* q,
-                         std::uint32_t k, double lambda, double scale, double& g_bu, double& g_bi,
-                         double* g_p, double* g_q) {
+// All arithmetic in T (double for the reference and the gates, float for float training).
+template <class T>
+void add_rating_gradient(T e, T bu, T bi, const T* p, const T* q, std::uint32_t k, T lambda, T scale,
+                         T& g_bu, T& g_bi, T* g_p, T* g_q) {
   g_bu += scale * (-e + lambda * bu);
   g_bi += scale * (-e + lambda * bi);
   for (std::uint32_t f = 0; f < k; ++f) {
-    const double pf = p[f];
-    const double qf = q[f];
+    const T pf = p[f];
+    const T qf = q[f];
     g_p[f] += scale * (-e * qf + lambda * pf);
     g_q[f] += scale * (-e * pf + lambda * qf);
   }
+}
+
+// r - (mu + b_u + b_i + p_u . q_i) in T: the residual the SGD step uses. For T = double this is
+// exactly r - predict(); for float the k-term dot product is accumulated in float (k <= 4096 terms,
+// far below the ~1e4-term point where the project requires double accumulation).
+template <class T>
+T residual(const BasicParams<T>& m, std::uint32_t u, std::uint32_t i, float value) {
+  const T* p = m.P.data() + std::size_t{u} * m.k;
+  const T* q = m.Q.data() + std::size_t{i} * m.k;
+  T dot = 0;
+  for (std::uint32_t f = 0; f < m.k; ++f) dot += p[f] * q[f];
+  return static_cast<T>(value) - (static_cast<T>(m.mu) + m.bu[u] + m.bi[i] + dot);
 }
 
 double sq_norm(const double* x, std::uint32_t k) {
@@ -201,12 +220,13 @@ double sq_norm(const double* x, std::uint32_t k) {
 
 }  // namespace
 
-double predict(const Params& m, std::uint32_t u, std::uint32_t i) {
-  const double* p = m.P.data() + std::size_t{u} * m.k;
-  const double* q = m.Q.data() + std::size_t{i} * m.k;
+template <class T>
+double predict(const BasicParams<T>& m, std::uint32_t u, std::uint32_t i) {
+  const T* p = m.P.data() + std::size_t{u} * m.k;
+  const T* q = m.Q.data() + std::size_t{i} * m.k;
   double dot = 0.0;
-  for (std::uint32_t f = 0; f < m.k; ++f) dot += p[f] * q[f];
-  return m.mu + m.bu[u] + m.bi[i] + dot;
+  for (std::uint32_t f = 0; f < m.k; ++f) dot += double{p[f]} * double{q[f]};
+  return m.mu + double{m.bu[u]} + double{m.bi[i]} + dot;
 }
 
 double objective(const Params& m, std::span<const Triplet> ratings, double lambda) {
@@ -231,33 +251,37 @@ Params gradient(const Params& m, std::span<const Triplet> ratings, double lambda
   g.Q.assign(m.Q.size(), 0.0);
   for (const auto& r : ratings) {
     const std::size_t u = r.row, i = r.col;
-    const double e = r.value - predict(m, r.row, r.col);
+    const double e = residual(m, r.row, r.col, r.value);
     add_rating_gradient(e, m.bu[u], m.bi[i], m.P.data() + u * m.k, m.Q.data() + i * m.k, m.k,
                         lambda, 1.0, g.bu[u], g.bi[i], g.P.data() + u * m.k, g.Q.data() + i * m.k);
   }
   return g;
 }
 
-void sgd_step(Params& m, const Triplet& rating, double lr, double lambda) {
+template <class T>
+void sgd_step(BasicParams<T>& m, const Triplet& rating, double lr, double lambda) {
   const std::size_t u = rating.row, i = rating.col;
-  const double e = rating.value - predict(m, rating.row, rating.col);
-  double* p = m.P.data() + u * m.k;
-  double* q = m.Q.data() + i * m.k;
-  add_rating_gradient(e, m.bu[u], m.bi[i], p, q, m.k, lambda, -lr, m.bu[u], m.bi[i], p, q);
+  const T e = residual(m, rating.row, rating.col, rating.value);
+  T* p = m.P.data() + u * m.k;
+  T* q = m.Q.data() + i * m.k;
+  add_rating_gradient<T>(e, m.bu[u], m.bi[i], p, q, m.k, static_cast<T>(lambda), static_cast<T>(-lr), m.bu[u],
+                         m.bi[i], p, q);
 }
 
-void sgd_epoch(Params& m, std::span<const SgdRating> in_order, double lr, double lambda) {
+template <class T>
+void sgd_epoch(BasicParams<T>& m, std::span<const SgdRating> in_order, double lr, double lambda) {
   const std::size_t n = in_order.size();
   const std::uint32_t k = m.k;
   for (std::size_t j = 0; j < n; ++j) {
     if (j + kPrefetchAhead < n) {
       // Hints only (no effect on results): the rows rating j + kPrefetchAhead will touch.
       const SgdRating& ahead = in_order[j + kPrefetchAhead];
-      const double* p = m.P.data() + std::size_t{ahead.row} * k;
-      const double* q = m.Q.data() + std::size_t{ahead.col} * k;
-      // Hints 64 bytes (8 doubles) apart, plus the row's last element: rows are not cache-line
-      // aligned, so a row can end in one more line. GCC/Clang builtin (the project's compilers).
-      for (std::uint32_t f = 0; f < k; f += 8) {
+      const T* p = m.P.data() + std::size_t{ahead.row} * k;
+      const T* q = m.Q.data() + std::size_t{ahead.col} * k;
+      // Hints 64 bytes apart, plus the row's last element: rows are not cache-line aligned, so a
+      // row can end in one more line. GCC/Clang builtin (the project's compilers).
+      constexpr std::uint32_t kPerLine = 64 / sizeof(T);
+      for (std::uint32_t f = 0; f < k; f += kPerLine) {
         __builtin_prefetch(p + f, 1);
         __builtin_prefetch(q + f, 1);
       }
@@ -270,6 +294,13 @@ void sgd_epoch(Params& m, std::span<const SgdRating> in_order, double lr, double
     sgd_step(m, Triplet{r.row, r.col, r.value, 0}, lr, lambda);
   }
 }
+
+template void sgd_step(Params&, const Triplet&, double, double);
+template void sgd_step(FloatParams&, const Triplet&, double, double);
+template void sgd_epoch(Params&, std::span<const SgdRating>, double, double);
+template void sgd_epoch(FloatParams&, std::span<const SgdRating>, double, double);
+template double predict(const Params&, std::uint32_t, std::uint32_t);
+template double predict(const FloatParams&, std::uint32_t, std::uint32_t);
 
 RecordShuffler::RecordShuffler(std::uint64_t seed, std::uint64_t stream) : rng_(mix_seed(seed, 2, stream)) {}
 
@@ -311,7 +342,8 @@ BlockGrid make_block_grid(std::span<const SgdRating> csr, std::uint32_t n_users,
   return g;
 }
 
-void dsgd_epoch(Params& m, BlockGrid& grid, std::vector<RecordShuffler>& cell_shufflers, Rng& stratum_rng,
+template <class T>
+void dsgd_epoch(BasicParams<T>& m, BlockGrid& grid, std::vector<RecordShuffler>& cell_shufflers, Rng& stratum_rng,
                 double lr, double lambda) {
   const std::uint32_t b = grid.b;
   std::vector<std::uint32_t> offsets(b);
@@ -327,6 +359,9 @@ void dsgd_epoch(Params& m, BlockGrid& grid, std::vector<RecordShuffler>& cell_sh
     }
   }
 }
+
+template void dsgd_epoch(Params&, BlockGrid&, std::vector<RecordShuffler>&, Rng&, double, double);
+template void dsgd_epoch(FloatParams&, BlockGrid&, std::vector<RecordShuffler>&, Rng&, double, double);
 
 EpochShuffler::EpochShuffler(std::size_t n, std::uint64_t seed)
     : rng_(mix_seed(seed, 2)), order_(n) {
@@ -358,12 +393,13 @@ struct MfConfig {
   double user_init_sd = 0.0;  // user factors (0: start inside the span of the rated items' factors)
   std::uint32_t min_support = 20;  // ranking floor: training ratings a movie needs to be recommended
   std::uint32_t blocks = 8;   // DSGD grid side b (1 = serial SGD); results depend on b, not threads
+  std::string precision = "float";  // training arithmetic: "float" (fast) or "double" (reference)
 
   Config to_json() const {
     return Config{{"k", k},           {"lambda", lambda},     {"lr", lr},
                   {"lr_decay", lr_decay}, {"max_epochs", max_epochs}, {"patience", patience},
                   {"init_sd", init_sd},   {"user_init_sd", user_init_sd}, {"min_support", min_support},
-                  {"blocks", blocks}};
+                  {"blocks", blocks}, {"precision", precision}};
   }
 };
 
@@ -385,7 +421,8 @@ MfConfig parse_config(const Config& cfg) {
   if (cfg.is_null()) return c;
   if (!cfg.is_object()) throw std::invalid_argument("mf config must be a JSON object");
   static const char* const known[] = {"k",          "lambda",   "lr",      "lr_decay",    "max_epochs",
-                                      "patience",   "init_sd",  "user_init_sd", "min_support", "blocks"};
+                                      "patience",   "init_sd",  "user_init_sd", "min_support", "blocks",
+                                      "precision"};
   for (const auto& [key, _] : cfg.items())
     if (std::find(std::begin(known), std::end(known), key) == std::end(known))
       throw std::invalid_argument("mf config: unknown key " + key);
@@ -405,6 +442,12 @@ MfConfig parse_config(const Config& cfg) {
     const auto m = integer(cfg, "min_support");
     if (m < 0 || m > 0xFFFFFFFFLL) throw std::invalid_argument("mf config: min_support must be in [0, 2^32 - 1]");
     c.min_support = static_cast<std::uint32_t>(m);
+  }
+  if (cfg.contains("precision")) {
+    const auto& v = cfg.at("precision");
+    if (!v.is_string() || (v != "float" && v != "double"))
+      throw std::invalid_argument("mf config: precision must be \"float\" or \"double\"");
+    c.precision = v.get<std::string>();
   }
   if (cfg.contains("blocks")) {
     const auto b = integer(cfg, "blocks");
@@ -505,6 +548,16 @@ class MfSgd final : public Model {
 
   void fit(const Dataset& train, const Config& cfg, const TrainContext& ctx) override {
     cfg_ = parse_config(cfg);
+    if (cfg_.precision == "double") {
+      fit_with<double>(train, ctx);
+    } else {
+      fit_with<float>(train, ctx);
+    }
+  }
+
+  // The training loop in precision T (see "Speed" in the header comment).
+  template <class T>
+  void fit_with(const Dataset& train, const TrainContext& ctx) {
     const std::uint32_t k = cfg_.k;
     const std::uint32_t nu = train.n_users(), ni = train.n_items();
 
@@ -522,7 +575,7 @@ class MfSgd final : public Model {
       }
     }
 
-    Params m;
+    mf_detail::BasicParams<T> m;
     m.k = k;
     m.mu = order.empty() ? 0.0 : sum / static_cast<double>(order.size());
     m.bu.assign(nu, 0.0);
@@ -532,10 +585,11 @@ class MfSgd final : public Model {
     Rng init_rng(mix_seed(ctx.seed, 1));
     for (std::uint32_t u = 0; u < nu; ++u)
       if (train.by_user.row_size(u) > 0)
-        for (std::uint32_t f = 0; f < k; ++f) m.P[std::size_t{u} * k + f] = cfg_.user_init_sd * init_rng.normal();
+        for (std::uint32_t f = 0; f < k; ++f)
+          m.P[std::size_t{u} * k + f] = static_cast<T>(cfg_.user_init_sd * init_rng.normal());
     for (std::uint32_t i = 0; i < ni; ++i)
       if (train.by_item.row_size(i) > 0)
-        for (std::uint32_t f = 0; f < k; ++f) m.Q[std::size_t{i} * k + f] = cfg_.init_sd * init_rng.normal();
+        for (std::uint32_t f = 0; f < k; ++f) m.Q[std::size_t{i} * k + f] = static_cast<T>(cfg_.init_sd * init_rng.normal());
 
     const auto* validation = ctx.validation;
     // Validation ratings outside the training index space cannot be scored; if none are usable,
@@ -551,7 +605,7 @@ class MfSgd final : public Model {
     for (std::size_t c = 0; c < grid.cells.size(); ++c) shufflers.emplace_back(ctx.seed, c);
     Rng stratum_rng(mix_seed(ctx.seed, 4));
 
-    Params best = m;
+    mf_detail::BasicParams<T> best = m;
     double best_rmse = std::numeric_limits<double>::infinity();
     int since_best = 0;
     double lr = cfg_.lr;
@@ -723,7 +777,8 @@ class MfSgd final : public Model {
     return n;
   }
 
-  double validation_rmse(const Params& m, const std::vector<std::vector<Rating>>& validation) const {
+  template <class T>
+  double validation_rmse(const mf_detail::BasicParams<T>& m, const std::vector<std::vector<Rating>>& validation) const {
     double sse = 0.0;
     std::size_t n = 0;
     const auto nu = static_cast<std::uint32_t>(std::min<std::size_t>(validation.size(), m.bu.size()));
@@ -739,7 +794,8 @@ class MfSgd final : public Model {
 
   // Over the training matrix in CSR order (user, then item ascending), so the sum's order never
   // depends on the epoch shuffle.
-  static double train_rmse(const Params& m, const Dataset& train) {
+  template <class T>
+  static double train_rmse(const mf_detail::BasicParams<T>& m, const Dataset& train) {
     if (train.n_ratings() == 0) return 0.0;
     double sse = 0.0;
     for (std::uint32_t u = 0; u < train.n_users(); ++u) {

@@ -449,7 +449,7 @@ TEST_CASE("MF fit reproduces the pre-optimisation training loop bit for bit", "[
   // nonzero init (so the factors train, not only the biases) and no validation set (so the
   // curve is train RMSE, whose summation order must not follow the shuffle). Any change to the
   // visiting order, the arithmetic or train_rmse changes these bits. (user_init_sd = init_sd and
-// blocks = 1 reproduce that loop's initialisation and serial order.) They assume the project's
+// blocks = 1 and precision "double" reproduce that loop's initialisation, order and arithmetic.) They assume the project's
   // compiler flags (no -ffast-math or FMA contraction); a deliberate change to the numbers must
   // re-record them and say so.
   const auto s = recs::synthetic::low_rank_explicit(60, 50, 3, 0.1, 0.3, 0.0, 5);
@@ -459,7 +459,7 @@ TEST_CASE("MF fit reproduces the pre-optimisation training loop bit for bit", "[
   model->fit(s.train,
              recs::Config{{"k", 8}, {"lambda", 0.05}, {"lr", 0.02}, {"lr_decay", 0.97},
                           {"max_epochs", 6}, {"patience", 3}, {"init_sd", 0.1},
-                          {"user_init_sd", 0.1}, {"blocks", 1}},
+                          {"user_init_sd", 0.1}, {"blocks", 1}, {"precision", "double"}},
              ctx);
   const std::vector<std::pair<int, double>> golden_curve{
       {1, 0x1.dce04310b6cc3p-1}, {2, 0x1.d4e5a05a80625p-1}, {3, 0x1.d04fdfbe2545fp-1},
@@ -496,7 +496,7 @@ TEST_CASE("MF fit visits ratings in the seeded per-epoch shuffled order", "[mf]"
   ctx.seed = seed;
   model->fit(ds,
              recs::Config{{"k", 2}, {"lambda", lambda}, {"lr", lr}, {"lr_decay", decay},
-                          {"max_epochs", 2}, {"init_sd", 0.0}, {"blocks", 1}},
+                          {"max_epochs", 2}, {"init_sd", 0.0}, {"blocks", 1}, {"precision", "double"}},
              ctx);
 
   std::vector<recs::Triplet> ratings;
@@ -678,6 +678,7 @@ TEST_CASE("MF fills config defaults from configs/mf.json values", "[mf]") {
   CHECK(cfg.at("init_sd") == 0.05);
   CHECK(cfg.at("user_init_sd") == 0.0);
   CHECK(cfg.at("blocks") == 8);
+  CHECK(cfg.at("precision") == "float");
   CHECK(model->n_items() == 20);
   CHECK(model->training_curve().size() == 2);
   CHECK(model->training_curve_metric() == "train_rmse");
@@ -690,7 +691,8 @@ TEST_CASE("MF rejects invalid configs", "[mf]") {
                           recs::Config{{"max_epochs", 0}}, recs::Config{{"user_init_sd", -0.1}},
                           recs::Config{{"min_support", -1}}, recs::Config{{"min_support", 2.5}},
                           recs::Config{{"min_support", 5000000000LL}}, recs::Config{{"blocks", 0}},
-                          recs::Config{{"blocks", 257}},
+                          recs::Config{{"blocks", 257}}, recs::Config{{"precision", "half"}},
+                          recs::Config{{"precision", 32}},
                           recs::Config{{"bogus", 1}}}) {
     INFO(bad.dump());
     auto model = recs::make_mf_sgd();
@@ -1054,4 +1056,42 @@ TEST_CASE("MF with blocks = 1 trains exactly like the serial loop", "[mf][dsgd]"
   CHECK(a.Q == r.Q);
   CHECK(a.bu == r.bu);
   CHECK(a.bi == r.bi);
+}
+
+TEST_CASE("MF float SGD step matches the double-precision step to float rounding", "[mf]") {
+  // The float path runs the same formula; after one step every parameter must agree with the
+  // double reference to a few float ulps of its magnitude.
+  recs::Rng rng(21);
+  const Params d0 = random_params(rng, 20, 15, 12);
+  const auto ratings = random_ratings(rng, 20, 15, 0.5);
+  recs::mf_detail::FloatParams f;
+  f.k = d0.k;
+  f.mu = d0.mu;
+  // Start the double copy from the float-rounded values, so only the step's rounding differs.
+  const auto to_f = [](const std::vector<double>& v) { return std::vector<float>(v.begin(), v.end()); };
+  f.bu = to_f(d0.bu);
+  f.bi = to_f(d0.bi);
+  f.P = to_f(d0.P);
+  f.Q = to_f(d0.Q);
+  Params d = d0;
+  d.bu.assign(f.bu.begin(), f.bu.end());
+  d.bi.assign(f.bi.begin(), f.bi.end());
+  d.P.assign(f.P.begin(), f.P.end());
+  d.Q.assign(f.Q.begin(), f.Q.end());
+  for (const auto& r : ratings) {
+    recs::mf_detail::sgd_step(d, r, 0.01, 0.05);
+    recs::mf_detail::sgd_step(f, r, 0.01, 0.05);
+  }
+  double worst = 0.0;
+  const auto cmp = [&](const std::vector<double>& a, const std::vector<float>& b) {
+    for (std::size_t j = 0; j < a.size(); ++j)
+      worst = std::max(worst, std::abs(a[j] - double{b[j]}) / std::max(1.0, std::abs(a[j])));
+  };
+  cmp(d.bu, f.bu);
+  cmp(d.bi, f.bi);
+  cmp(d.P, f.P);
+  cmp(d.Q, f.Q);
+  INFO("worst relative difference " << worst);
+  CHECK(worst < 1e-5);  // float epsilon is 1.2e-7; a wrong formula differs by far more
+  CHECK(worst > 0.0);   // and the float path really is float
 }
