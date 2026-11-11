@@ -133,6 +133,16 @@ components:
         rating: { type: number, minimum: 0.5, maximum: 5.0, multipleOf: 0.5 }
     Ratings: { type: array, maxItems: 5000, items: { $ref: '#/components/schemas/RatingIn' } }
     Exclude: { type: array, maxItems: 10000, items: { type: integer, minimum: 1, maximum: 2147483647 } }
+    Genre:
+      type: string
+      description: A MovieLens genre name.
+      enum: [Action, Adventure, Animation, Children, Comedy, Crime, Documentary, Drama, Fantasy, Film-Noir, Horror, IMAX, Musical, Mystery, Romance, Sci-Fi, Thriller, War, Western]
+    Genres:
+      type: array
+      maxItems: 19
+      uniqueItems: true
+      description: Restrict results to movies with at least one of these genres (union). Absent or empty means no restriction. Fewer than k items may be returned when few movies match.
+      items: { $ref: '#/components/schemas/Genre' }
     RecommendRequest:
       type: object
       additionalProperties: false
@@ -142,6 +152,7 @@ components:
         ratings: { $ref: '#/components/schemas/Ratings' }
         k: { type: integer, minimum: 1, maximum: 100 }
         exclude: { $ref: '#/components/schemas/Exclude' }
+        genres: { $ref: '#/components/schemas/Genres' }
     CompareRequest:
       type: object
       additionalProperties: false
@@ -151,6 +162,7 @@ components:
         ratings: { $ref: '#/components/schemas/Ratings' }
         k: { type: integer, minimum: 1, maximum: 100 }
         exclude: { $ref: '#/components/schemas/Exclude' }
+        genres: { $ref: '#/components/schemas/Genres' }
     Because:
       type: object
       additionalProperties: false

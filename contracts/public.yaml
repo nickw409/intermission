@@ -214,6 +214,7 @@ paths:
       parameters:
         - { name: model, in: query, schema: { $ref: '#/components/schemas/ModelName' } }
         - { $ref: '#/components/parameters/K' }
+        - { $ref: '#/components/parameters/Genres' }
       responses:
         '200': { description: Recommendations., headers: { X-Model-Version: { $ref: '#/components/headers/ModelVersion' } }, content: { application/json: { schema: { $ref: '#/components/schemas/RecommendResponse' } } } }
         '400': { $ref: '#/components/responses/BadRequest' }
@@ -233,6 +234,7 @@ paths:
           description: Comma-separated, 1–5 distinct model names.
           schema: { type: string, maxLength: 64, pattern: '^[a-z_]+(,[a-z_]+){0,4}$', examples: ['pop,knn,als'] }
         - { $ref: '#/components/parameters/K' }
+        - { $ref: '#/components/parameters/Genres' }
       responses:
         '200': { description: Lists., headers: { X-Model-Version: { $ref: '#/components/headers/ModelVersion' } }, content: { application/json: { schema: { $ref: '#/components/schemas/CompareResponse' } } } }
         '400': { $ref: '#/components/responses/BadRequest' }
@@ -322,6 +324,11 @@ components:
   parameters:
     MovieId: { name: movieId, in: path, required: true, schema: { type: integer, minimum: 1, maximum: 2147483647 } }
     K: { name: k, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+    Genres:
+      name: genres
+      in: query
+      description: Comma-separated MovieLens genre names (case-sensitive, no spaces, no duplicates, at most 19). Only movies with at least one of them are returned; fewer than k items may come back. Cold-start popularity results are filtered too. An empty value means no filter. An unknown or repeated name is 400 bad_request.
+      schema: { type: string, maxLength: 200, pattern: '^([A-Za-z-]+(,[A-Za-z-]+){0,18})?$', examples: ['Horror,Thriller'] }
     XRequestedWith: { name: X-Requested-With, in: header, required: true, schema: { type: string, const: recs } }
   headers:
     SetSession: { description: 'session=<token>; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000', schema: { type: string } }
@@ -353,6 +360,10 @@ components:
       enum: [bad_request, invalid_json, body_too_large, unauthorized, invalid_credentials, csrf_rejected,
              invalid_invite, username_taken, too_many_ratings, not_found, unknown_model,
              rate_limited, model_unavailable, internal]
+    Genre:
+      type: string
+      description: A MovieLens genre name, as accepted by the genres query parameter.
+      enum: [Action, Adventure, Animation, Children, Comedy, Crime, Documentary, Drama, Fantasy, Film-Noir, Horror, IMAX, Musical, Mystery, Romance, Sci-Fi, Thriller, War, Western]
     ModelName:
       type: string
       description: hybrid and mmr are reserved for phase 6 and are not loaded before then (unknown_model).

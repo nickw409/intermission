@@ -11,7 +11,7 @@
 //     so recs-api's recommendation cache misses);
 //  2. waits at a barrier until every client has done its PUT;
 //  3. is released together with all the others and times GET /api/recommend?model=<model>&k=<k>
-//     until the whole body is read.
+//     (plus &genres=<genres> when -genres is set) until the whole body is read.
 //
 // So -clients cache-missing GETs are genuinely in flight at once. The generator counts GETs in
 // flight and reports the peak and the time-weighted average (sum of GET latencies / time the
@@ -42,6 +42,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -51,6 +52,7 @@ import (
 
 type config struct {
 	base, origin, invite, model, label, out string
+	genres                                  string // comma list sent as &genres=; "" = no filter
 	users, clients, ratings, k, warmup      int
 	perUser                                 int
 	seed                                    uint64
@@ -69,12 +71,17 @@ func main() {
 	flag.IntVar(&c.clients, "clients", 20, "concurrent clients")
 	flag.IntVar(&c.ratings, "ratings", 20, "ratings per account")
 	flag.IntVar(&c.k, "k", 20, "k for /api/recommend")
+	flag.StringVar(&c.genres, "genres", "", "comma-separated genre filter added to every recommend request as &genres= (default: none)")
 	flag.IntVar(&c.warmup, "warmup", 100, "timed requests to discard first")
 	flag.IntVar(&c.perUser, "per-user", 30, "recommendation calls per user (recs-api's per-user burst)")
 	flag.Uint64Var(&c.seed, "seed", 42, "seed for ratings and movie choice")
 	flag.Float64Var(&c.thresholdMS, "p99-ms", 75, "fail if p99 is at or above this many milliseconds")
 	flag.StringVar(&c.beforeMeasure, "before-measure", "", "shell command run (and waited for) between setup and measurement, e.g. waiting for a quiet host")
 	flag.Parse()
+	if err := checkGenres(c.genres); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
 	c.invite = os.Getenv("LOAD_INVITE")
 	if c.invite == "" {
 		fmt.Fprintln(os.Stderr, "LOAD_INVITE (an invite code with at least -users uses) is required")
@@ -339,7 +346,7 @@ func run(c config) error {
 	}
 	avgInflight := sumLat / math.Max(1e-9, float64(getPhases.Microseconds())/1000)
 	summary := map[string]any{
-		"label": c.label, "model": c.model, "k": c.k, "clients": c.clients, "users": len(users),
+		"label": c.label, "model": c.model, "k": c.k, "genres": c.genres, "clients": c.clients, "users": len(users),
 		"ratings_per_user": c.ratings, "rounds": rounds, "requests_total": len(samples),
 		"warmup_discarded": warmupRounds * c.clients, "timed_requests": len(timed), "errors": len(errs),
 		"wall_seconds": wall.Seconds(), "get_phase_seconds": getPhases.Seconds(),
@@ -384,7 +391,7 @@ func bump(s *site, u *user, rng *rand.Rand) error {
 // recommend times one GET /api/recommend and checks the answer.
 func recommend(s *site, c config, u *user) sample {
 	t0 := time.Now()
-	resp, data, err := s.do("GET", fmt.Sprintf("/api/recommend?model=%s&k=%d", c.model, c.k), u.session, nil)
+	resp, data, err := s.do("GET", recommendPath(c), u.session, nil)
 	elapsed := time.Since(t0)
 	if err != nil {
 		return sample{err: err}
@@ -404,6 +411,25 @@ func recommend(s *site, c config, u *user) sample {
 		return sample{err: fmt.Errorf("unexpected answer: model %s cold_start %v items %d version %q", r.Model, r.ColdStart, len(r.Items), resp.Header.Get("X-Model-Version"))}
 	}
 	return sample{elapsed: elapsed}
+}
+
+// recommendPath is the timed request's path and query.
+func recommendPath(c config) string {
+	p := fmt.Sprintf("/api/recommend?model=%s&k=%d", c.model, c.k)
+	if c.genres != "" {
+		p += "&genres=" + url.QueryEscape(c.genres)
+	}
+	return p
+}
+
+// genresRe is the shape of public.yaml's genres parameter (names are checked by recs-api).
+var genresRe = regexp.MustCompile(`^([A-Za-z-]+(,[A-Za-z-]+){0,18})?$`)
+
+func checkGenres(g string) error {
+	if !genresRe.MatchString(g) {
+		return fmt.Errorf("-genres %q: want up to 19 comma-separated genre names, no spaces", g)
+	}
+	return nil
 }
 
 func truncate(b []byte) string {

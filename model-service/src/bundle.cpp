@@ -40,6 +40,14 @@ std::shared_ptr<const Bundle> make_bundle(LoadedArtifact&& artifact) {
     seen[r - 1] = true;
     b->by_popularity[r - 1] = static_cast<ItemIdx>(i);
   }
+  // Genre bits per item. A catalog genre outside the contract enum (none in MovieLens today) has
+  // no bit, so no request can select it.
+  b->genre_mask.assign(n, 0);
+  for (std::size_t i = 0; i < n; ++i) {
+    for (const std::string& g : c.movies[i].genres) {
+      if (const auto bit = genre_bit(g)) b->genre_mask[i] |= *bit;
+    }
+  }
   b->search = SearchIndex(c);
   return b;
 }

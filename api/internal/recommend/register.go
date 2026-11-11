@@ -30,8 +30,10 @@ const (
 	defaultK       = 20
 	maxK           = modelclient.MaxK
 	maxCompare     = modelclient.MaxCompare
-	maxModelsParam = 64 // characters, compare's models parameter
-	maxBecause     = 3  // RecItem.because maxItems
+	maxModelsParam = 64  // characters, compare's models parameter
+	maxGenresParam = 200 // characters, the genres parameter
+	maxGenres      = modelclient.MaxGenres
+	maxBecause     = 3 // RecItem.because maxItems
 	// Recommendation cache bounds: entries, approximate bytes, and entries
 	// per user.
 	DefaultCacheEntries = 16384
@@ -49,6 +51,7 @@ const (
 var (
 	errBadK      = apperr.New(http.StatusBadRequest, apperr.CodeBadRequest, "k must be between 1 and 100")
 	errBadModels = apperr.New(http.StatusBadRequest, apperr.CodeBadRequest, "models must list 1-5 distinct model names")
+	errBadGenres = apperr.New(http.StatusBadRequest, apperr.CodeBadRequest, "genres must list up to 19 distinct genre names")
 	errNoUser    = apperr.New(http.StatusUnauthorized, apperr.CodeUnauthorized, "not logged in")
 )
 
@@ -96,8 +99,8 @@ type CompareResponse struct {
 
 // Register adds this package's routes to mux. Called once from main.go.
 //
-//	GET /api/recommend?model=&k=                 (session, 30/min per session and per user)
-//	GET /api/recommend/compare?models=a,b,c&k=   (session, same buckets)
+//	GET /api/recommend?model=&k=&genres=                 (session, 30/min per session and per user)
+//	GET /api/recommend/compare?models=a,b,c&k=&genres=   (session, same buckets)
 //
 // The per-user bucket has the same shape as the per-session one, so logging
 // in again for a fresh session doesn't reset the budget.
@@ -202,7 +205,12 @@ func (h *handler) recommend(w http.ResponseWriter, r *http.Request) {
 		apperr.Write(w, errBadK)
 		return
 	}
-	h.serve(w, r, "recommend", []modelclient.ModelName{model}, k, func(e *entry) any {
+	genres, err := parseGenres(q)
+	if err != nil {
+		apperr.Write(w, err)
+		return
+	}
+	h.serve(w, r, "recommend", []modelclient.ModelName{model}, k, genres, func(e *entry) any {
 		res := e.results[0]
 		return RecommendResponse{Model: res.Model, ModelVersion: e.modelVersion, Items: res.Items, ColdStart: e.coldStart}
 	})
@@ -221,7 +229,12 @@ func (h *handler) compare(w http.ResponseWriter, r *http.Request) {
 		apperr.Write(w, errBadK)
 		return
 	}
-	h.serve(w, r, "compare", models, k, func(e *entry) any {
+	genres, err := parseGenres(q)
+	if err != nil {
+		apperr.Write(w, err)
+		return
+	}
+	h.serve(w, r, "compare", models, k, genres, func(e *entry) any {
 		// The cache key ignores model order; list results in this request's
 		// order. (A cold start answer is a single pop list.)
 		results := e.results
@@ -271,6 +284,51 @@ func parseModels(vals []string) ([]modelclient.ModelName, error) {
 	return out, nil
 }
 
+// parseGenres validates the optional genres parameter (public.yaml
+// parameters.Genres): absent or empty means no filter (nil); otherwise one
+// value of at most 200 characters, 1-19 comma-separated names, each a known
+// Genre (case-sensitive) and none repeated. Anything else is bad_request.
+// The names keep the caller's order. The message never echoes the input.
+func parseGenres(q map[string][]string) ([]modelclient.Genre, error) {
+	vals, present := q["genres"]
+	if !present {
+		return nil, nil
+	}
+	if len(vals) != 1 || len(vals[0]) > maxGenresParam {
+		return nil, errBadGenres
+	}
+	if vals[0] == "" {
+		return nil, nil
+	}
+	names := strings.Split(vals[0], ",")
+	if len(names) > maxGenres {
+		return nil, errBadGenres
+	}
+	out := make([]modelclient.Genre, len(names))
+	for i, n := range names {
+		g := modelclient.Genre(n)
+		// The enum check also rules out empty names and any character
+		// outside [A-Za-z-].
+		if !slices.Contains(modelclient.AllGenres, g) || slices.Contains(out[:i], g) {
+			return nil, errBadGenres
+		}
+		out[i] = g
+	}
+	return out, nil
+}
+
+// genresKey is the cache key's genre component: the set, sorted, so the same
+// set in any order shares an entry. "" means no filter, which no non-empty
+// set can produce.
+func genresKey(genres []modelclient.Genre) string {
+	s := make([]string, len(genres))
+	for i, g := range genres {
+		s[i] = string(g)
+	}
+	slices.Sort(s)
+	return strings.Join(s, ",")
+}
+
 func knownModel(s string) bool {
 	return slices.Contains(modelclient.AllModels, modelclient.ModelName(s))
 }
@@ -278,8 +336,9 @@ func knownModel(s string) bool {
 // serve is the shared path of both routes: read the caller's ratings, ask
 // recs-model for its current version, answer from the cache or compute,
 // enrich and cache. models holds one entry for op "recommend" ("" means the
-// default model).
-func (h *handler) serve(w http.ResponseWriter, r *http.Request, op string, models []modelclient.ModelName, k int, render func(*entry) any) {
+// default model). genres (nil = no filter) goes to recs-model on every path,
+// cold start included.
+func (h *handler) serve(w http.ResponseWriter, r *http.Request, op string, models []modelclient.ModelName, k int, genres []modelclient.Genre, render func(*entry) any) {
 	uid, ok := auth.UserID(r.Context())
 	if !ok {
 		apperr.Write(w, errNoUser)
@@ -319,10 +378,10 @@ func (h *handler) serve(w http.ResponseWriter, r *http.Request, op string, model
 	if op == "compare" {
 		keyModels = slices.Sorted(slices.Values(models))
 	}
-	key := cacheKey{userID: uid, userCreated: user.created, ratingsVersion: user.version, modelVersion: version, op: op, models: joinModels(keyModels), k: k}
+	key := cacheKey{userID: uid, userCreated: user.created, ratingsVersion: user.version, modelVersion: version, op: op, models: joinModels(keyModels), k: k, genres: genresKey(genres)}
 	e, hit := h.cache.get(key)
 	if !hit {
-		e, err = h.compute(ctx, version, op, models, k, user)
+		e, err = h.compute(ctx, version, op, models, k, genres, user)
 		if err != nil {
 			h.modelError(w, r, op, err)
 			return
@@ -340,20 +399,20 @@ func (h *handler) serve(w http.ResponseWriter, r *http.Request, op string, model
 // compute asks recs-model for the lists and enriches them with titles.
 // checked is the version /v1/version reported, used only if the response
 // carries no X-Model-Version.
-func (h *handler) compute(ctx context.Context, checked, op string, models []modelclient.ModelName, k int, user userRatings) (*entry, error) {
+func (h *handler) compute(ctx context.Context, checked, op string, models []modelclient.ModelName, k int, genres []modelclient.Genre, user userRatings) (*entry, error) {
 	var (
 		raw  []rawResult
 		meta modelclient.Meta
 	)
 	if op == "recommend" {
-		resp, m, err := h.model.Recommend(ctx, modelclient.RecommendRequest{Model: models[0], Ratings: user.ratings, K: k, Exclude: user.ids})
+		resp, m, err := h.model.Recommend(ctx, modelclient.RecommendRequest{Model: models[0], Ratings: user.ratings, K: k, Exclude: user.ids, Genres: genres})
 		if err != nil {
 			return nil, err
 		}
 		meta = m
 		raw = []rawResult{{model: models[0], items: resp.Items}}
 	} else {
-		resp, m, err := h.model.Compare(ctx, modelclient.CompareRequest{Models: models, Ratings: user.ratings, K: k, Exclude: user.ids})
+		resp, m, err := h.model.Compare(ctx, modelclient.CompareRequest{Models: models, Ratings: user.ratings, K: k, Exclude: user.ids, Genres: genres})
 		if err != nil {
 			return nil, err
 		}

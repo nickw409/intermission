@@ -359,6 +359,11 @@ export interface components {
         /** @enum {string} */
         ErrorCode: "bad_request" | "invalid_json" | "body_too_large" | "unauthorized" | "invalid_credentials" | "csrf_rejected" | "invalid_invite" | "username_taken" | "too_many_ratings" | "not_found" | "unknown_model" | "rate_limited" | "model_unavailable" | "internal";
         /**
+         * @description A MovieLens genre name, as accepted by the genres query parameter.
+         * @enum {string}
+         */
+        Genre: "Action" | "Adventure" | "Animation" | "Children" | "Comedy" | "Crime" | "Documentary" | "Drama" | "Fantasy" | "Film-Noir" | "Horror" | "IMAX" | "Musical" | "Mystery" | "Romance" | "Sci-Fi" | "Thriller" | "War" | "Western";
+        /**
          * @description hybrid and mmr are reserved for phase 6 and are not loaded before then (unknown_model).
          * @enum {string}
          */
@@ -590,6 +595,8 @@ export interface components {
     parameters: {
         MovieId: number;
         K: number;
+        /** @description Comma-separated MovieLens genre names (case-sensitive, no spaces, no duplicates, at most 19). Only movies with at least one of them are returned; fewer than k items may come back. Cold-start popularity results are filtered too. An empty value means no filter. An unknown or repeated name is 400 bad_request. */
+        Genres: string;
         XRequestedWith: "recs";
     };
     requestBodies: never;
@@ -921,6 +928,8 @@ export interface operations {
             query?: {
                 model?: components["schemas"]["ModelName"];
                 k?: components["parameters"]["K"];
+                /** @description Comma-separated MovieLens genre names (case-sensitive, no spaces, no duplicates, at most 19). Only movies with at least one of them are returned; fewer than k items may come back. Cold-start popularity results are filtered too. An empty value means no filter. An unknown or repeated name is 400 bad_request. */
+                genres?: components["parameters"]["Genres"];
             };
             header?: never;
             path?: never;
@@ -950,6 +959,8 @@ export interface operations {
                 /** @description Comma-separated, 1–5 distinct model names. */
                 models: string;
                 k?: components["parameters"]["K"];
+                /** @description Comma-separated MovieLens genre names (case-sensitive, no spaces, no duplicates, at most 19). Only movies with at least one of them are returned; fewer than k items may come back. Cold-start popularity results are filtered too. An empty value means no filter. An unknown or repeated name is 400 bad_request. */
+                genres?: components["parameters"]["Genres"];
             };
             header?: never;
             path?: never;

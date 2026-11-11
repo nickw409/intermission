@@ -7,12 +7,16 @@
 #   KNN_CONFIG=path   KNN config for the artifact (default: configs/knn.<dataset>.tuned.json if
 #                     it exists, else configs/knn.json)
 #   LOAD_USERS=70 LOAD_CLIENTS=20 LOAD_ARGS="..."   passed to the load generator
+#   LOAD_GENRES=list  genre filter (e.g. Film-Noir or Horror,Thriller) added to every recommend
+#                     request as &genres= (-genres); default none. Named in the label and the
+#                     summary file name.
 #   LOAD_OUT=path     JSON summary (default data/load-results/<UTC time>-<dataset>.json; data/ is
 #                     gitignored)
 #   KEEP_STACK=1      leave the stack running (prints the teardown command)
 #
 # The sign-off measurement is ml-32m with the tuned KNN config (configs/knn.ml-32m.tuned.json);
-# ml-latest-small is a quick check.
+# ml-latest-small is a quick check. The Phase 2 ml-32m run must also include filtered passes
+# (LOAD_GENRES=Film-Noir, narrow, and all 19 genres) next to the unfiltered one.
 #
 # Trains pop + knn (default knn) on the dataset with the train image into a scratch data dir,
 # starts a scratch compose project (intermission-load, 127.0.0.1:${STACK_PORT:-18091}), runs
@@ -27,6 +31,8 @@ source "$here/../integration/stack-lib.sh"
 
 STACK_TAG="${1:?usage: run-load.sh <tag> [dataset]}"
 dataset="${2:-ml-latest-small}"
+genres="${LOAD_GENRES:-}"
+[[ "$genres" =~ ^([A-Za-z-]+(,[A-Za-z-]+){0,18})?$ ]] || { echo "LOAD_GENRES: comma-separated genre names, no spaces" >&2; exit 2; }
 STACK_PROJECT=intermission-load # fixed: never inherited (stack_check_project refuses real stacks)
 stack_check_project
 STACK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/intermission-load.XXXXXX")"
@@ -35,7 +41,12 @@ if [[ -z "${KEEP_STACK:-}" ]]; then
 else
   trap 'slog "kept; tear down with: STACK_PROJECT=$STACK_PROJECT STACK_DIR=$STACK_DIR bash -c \"source $here/../integration/stack-lib.sh; stack_down\""' EXIT
 fi
-out="${LOAD_OUT:-$STACK_REPO/data/load-results/$(date -u +%Y%m%dT%H%M%SZ)-$dataset.json}"
+suffix=""
+if [[ -n "$genres" ]]; then
+  n_genres="$(tr ',' '\n' <<<"$genres" | wc -l)"
+  if (( n_genres == 1 )); then suffix="-$genres"; else suffix="-${n_genres}genres"; fi
+fi
+out="${LOAD_OUT:-$STACK_REPO/data/load-results/$(date -u +%Y%m%dT%H%M%SZ)-$dataset$suffix.json}"
 mkdir -p "$(dirname "$out")"
 
 knn_config="${KNN_CONFIG:-}"
@@ -70,5 +81,6 @@ EOF
 )"
 # shellcheck disable=SC2086
 LOAD_INVITE="$code" "$STACK_DIR/recs-load" -before-measure "$quiet" -base "http://127.0.0.1:$STACK_PORT" -origin "$STACK_ORIGIN" \
-  -out "$out" -users "${LOAD_USERS:-70}" -clients "${LOAD_CLIENTS:-20}" -label "$dataset, knn $(tr -d '\n ' < "$knn_config")" \
+  -out "$out" -users "${LOAD_USERS:-70}" -clients "${LOAD_CLIENTS:-20}" -genres "$genres" \
+  -label "$dataset, knn $(tr -d '\n ' < "$knn_config")${genres:+, genres $genres}" \
   ${LOAD_ARGS:-}

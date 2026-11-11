@@ -10,7 +10,12 @@ picked automatically for ml-32m). ml-latest-small is a quick check.
 deploy/build.sh <sha>                                   # images, once
 WAIT_QUIET=1 tests/load/run-load.sh <sha> ml-32m        # sign-off
 tests/load/run-load.sh <sha>                            # quick check: ml-latest-small
+LOAD_GENRES=Film-Noir tests/load/run-load.sh <sha>      # filtered pass (narrow genre)
 ```
+
+`LOAD_GENRES` (the generator's `-genres`) adds `&genres=<list>` to every timed request. The
+Phase 2 ml-32m sign-off includes filtered passes (`Film-Noir`, and all 19 genres) next to the
+unfiltered one.
 
 `run-load.sh` starts a scratch compose project (`intermission-load`, `127.0.0.1:18091`, its own
 data directory and a scrubbed environment; see `tests/integration/stack-lib.sh`), trains `pop`

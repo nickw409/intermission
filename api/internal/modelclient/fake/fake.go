@@ -174,6 +174,12 @@ func (f *Fake) resolve(ctx context.Context, opID, method, path string, query url
 			return &fx.Cases[i], nil
 		}
 	}
+	if opID == OpMoviesBatch {
+		if c, ok := batchFromCatalog(fx, body); ok {
+			call.Case = c.Name
+			return c, nil
+		}
+	}
 	for i := range fx.Cases {
 		if fx.Cases[i].Response.Success() {
 			call.Case = fx.Cases[i].Name
@@ -275,4 +281,49 @@ func (f *Fake) Models(ctx context.Context) (modelclient.ModelsResponse, modelcli
 func (f *Fake) Healthz(ctx context.Context) error {
 	_, _, err := do[modelclient.Health](f, ctx, OpHealthz, "/healthz", nil, nil)
 	return err
+}
+
+// CatalogCase names the synthesized movies/batch answer (see batchFromCatalog).
+const CatalogCase = "catalog"
+
+// batchFromCatalog answers a movies/batch request that no case matches from
+// the catalog the fixtures describe: every movie in any 2xx moviesBatch case.
+// Known IDs come back in request order, the rest in missing, as recs-model
+// answers. It reports false for a body that isn't a valid BatchRequest.
+func batchFromCatalog(fx *Fixture, body []byte) (*Case, bool) {
+	var req modelclient.BatchRequest
+	if err := decodeStrict(body, &req); err != nil || len(req.IDs) == 0 || len(req.IDs) > modelclient.MaxBatchIDs {
+		return nil, false
+	}
+	catalog := map[int64]modelclient.MovieMeta{}
+	version := ""
+	for _, c := range fx.Cases {
+		if !c.Response.Success() {
+			continue
+		}
+		var resp modelclient.BatchResponse
+		if json.Unmarshal(c.Response.Body, &resp) != nil {
+			continue
+		}
+		for _, m := range resp.Movies {
+			catalog[m.MovieID] = m
+		}
+		if version == "" {
+			version = c.Response.Header("X-Model-Version")
+		}
+	}
+	out := modelclient.BatchResponse{Movies: []modelclient.MovieMeta{}, Missing: []int64{}}
+	for _, id := range req.IDs {
+		if m, ok := catalog[id]; ok {
+			out.Movies = append(out.Movies, m)
+		} else {
+			out.Missing = append(out.Missing, id)
+		}
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return nil, false
+	}
+	return &Case{Name: CatalogCase, Request: Request{Method: "POST", Path: "/v1/movies/batch", Body: body},
+		Response: Response{Status: 200, Headers: map[string]string{"X-Model-Version": version}, Body: b}}, true
 }
