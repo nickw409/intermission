@@ -21,8 +21,10 @@
 //   differences of mf_detail::objective() (Phase 3 gate) and check sgd_step() against it.
 //
 // Training
-//   - Initialisation: biases 0; factors N(0, init_sd^2), except that users and items with no
-//     training ratings get zero factors (they would otherwise keep pure noise forever).
+//   - Initialisation: biases 0; item factors N(0, init_sd^2) and user factors N(0, user_init_sd^2)
+//     (default user_init_sd = 0, see "Convergence and fold-in parity" below). Users and items with
+//     no training ratings get zero factors (they would otherwise keep pure noise forever). The
+//     random stream is the same whatever user_init_sd is, so the item factors start identically.
 //   - Each epoch visits every rating once in an order given by a seeded Fisher-Yates shuffle
 //     (mf_detail::EpochShuffler: one recs::Rng(mix_seed(seed, 2)) stream for the run, each epoch
 //     re-shuffling the previous permutation), then multiplies the learning rate by lr_decay.
@@ -55,6 +57,41 @@
 //   Fold-in is pure: it reads only item-side parameters. Training users can also be scored from
 //   their trained p_u, b_u (score_trained_user), which the fold-in parity gate compares against.
 //
+// Convergence and fold-in parity (Phase 3 gate: Jaccard@10 > 0.9, fold-in vs trained vectors)
+//   Parity measures how far SGD got on each user's subproblem. Hold the item side fixed: the user
+//   part of J is the quadratic above, with Hessian H_u = sum_j z_j z_j^T + lambda n I. An epoch
+//   of SGD visits each of the user's n ratings once, so to first order it is one gradient step
+//   x <- x - lr H_u (x - x*), and the error along an eigenvector of H_u with eigenvalue h shrinks
+//   by (1 - lr h) per epoch. Every eigenvalue is at least lambda n, and the smallest ones belong to
+//   directions the user's rated items barely span, so after T epochs the error that is left is
+//   about exp(-lambda n sum_t lr_t). That error is exactly what fold-in (the exact x*) does not
+//   have, and the unrated items' q_i do project onto those directions, so the top-10 lists differ.
+//   Two sources of error, two fixes:
+//     - Initial noise. With p_u ~ N(0, init_sd^2), the noise outside the span of the user's item
+//       factors decays only at that slowest rate. Starting user factors at zero
+//       (user_init_sd = 0) removes it: an SGD step is p_u <- (1 - lr lambda) p_u + lr e q_j, so p_u
+//       is always a combination of the rated items' factors (as they were when visited), which
+//       is where the ridge solution lives too. The item factors stay random, which is enough to
+//       break the symmetry (the first p_u step is lr e q_j != 0). This is the one-sided start of
+//       alternating least squares (Zhou et al. 2008 initialise only the item matrix). On
+//       ml-latest-small it lowered validation RMSE by 0.0005-0.001 at equal settings; its effect
+//       on parity alone was within run-to-run noise, so the lag below is the larger term.
+//     - Lag. Early stopping halts at the validation-RMSE minimum. With a small lambda that
+//       minimum comes early, while the slow directions are still far from x*: early stopping is
+//       itself doing the regularising (Yao, Rosasco & Caponnetto 2007 show early-stopped
+//       gradient descent acts like a ridge penalty). Raising lambda moves the regularisation
+//       into the objective: lambda n sum_t lr_t grows, the users converge sooner, and the
+//       validation minimum moves to where SGD has (nearly) converged. lambda is still chosen
+//       on validation RMSE, subject to parity > 0.9; the search tables are in the commit that
+//       set configs/mf.json.
+//   On ml-latest-small (users have tens of ratings, so lambda n is small) this costs about
+//   0.0015 validation RMSE (0.8946 best overall vs 0.8961 best with parity > 0.9; the bootstrap
+//   CI half-width is about 0.02). On ml-32m the trade-off is not cheap (validation, k = 64,
+//   user_init_sd 0): lambda 0.05 reaches RMSE 0.8175 with parity 0.74-0.77 after 80-150 epochs,
+//   still improving; lambda 0.1 reaches parity 0.902 but RMSE 0.8455 (bootstrap CI half-width
+//   about 0.002; the user+item bias baseline is 0.894). The many users with few ratings (small
+//   lambda n) are the slow ones. No ml-32m config is chosen yet (pending an owner decision).
+//
 // Explanations
 //   x is linear in the residuals, x = W^{-1} sum_j z_j s_j with W = sum_j z_j z_j^T + lambda n I.
 //   So the personalised part of the score splits exactly into one term per rated item:
@@ -71,6 +108,10 @@
 //     IEEE Computer 42(8), 2009.
 //   S. Funk, "Netflix Update: Try This at Home", 2006 (the SGD recipe).
 //   Y. Koren, R. Bell, "Advances in Collaborative Filtering", Recommender Systems Handbook, 2011.
+//   Y. Yao, L. Rosasco, A. Caponnetto, "On Early Stopping in Gradient Descent Learning",
+//     Constructive Approximation 26(2), 2007.
+//   Y. Zhou, D. Wilkinson, R. Schreiber, R. Pan, "Large-Scale Parallel Collaborative Filtering for
+//     the Netflix Prize", AAIM 2008 (ALS-WR).
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -183,18 +224,20 @@ using mf_detail::Params;
 // --- configuration ---------------------------------------------------------------------------
 
 struct MfConfig {
-  std::uint32_t k = 64;
-  double lambda = 0.05;
-  double lr = 0.007;
-  double lr_decay = 0.95;
-  int max_epochs = 40;
-  int patience = 3;
-  double init_sd = 0.1;
+  // Defaults are configs/mf.json (chosen on ml-latest-small validation; see the header comment).
+  std::uint32_t k = 128;
+  double lambda = 0.12;
+  double lr = 0.02;
+  double lr_decay = 0.995;
+  int max_epochs = 58;
+  int patience = 50;
+  double init_sd = 0.05;      // item factors
+  double user_init_sd = 0.0;  // user factors (0: start inside the span of the rated items' factors)
 
   Config to_json() const {
     return Config{{"k", k},           {"lambda", lambda},     {"lr", lr},
                   {"lr_decay", lr_decay}, {"max_epochs", max_epochs}, {"patience", patience},
-                  {"init_sd", init_sd}};
+                  {"init_sd", init_sd},   {"user_init_sd", user_init_sd}};
   }
 };
 
@@ -215,7 +258,8 @@ MfConfig parse_config(const Config& cfg) {
   MfConfig c;
   if (cfg.is_null()) return c;
   if (!cfg.is_object()) throw std::invalid_argument("mf config must be a JSON object");
-  static const char* const known[] = {"k", "lambda", "lr", "lr_decay", "max_epochs", "patience", "init_sd"};
+  static const char* const known[] = {"k",          "lambda",   "lr",      "lr_decay",
+                                      "max_epochs", "patience", "init_sd", "user_init_sd"};
   for (const auto& [key, _] : cfg.items())
     if (std::find(std::begin(known), std::end(known), key) == std::end(known))
       throw std::invalid_argument("mf config: unknown key " + key);
@@ -228,12 +272,15 @@ MfConfig parse_config(const Config& cfg) {
   if (cfg.contains("lr")) c.lr = number(cfg, "lr");
   if (cfg.contains("lr_decay")) c.lr_decay = number(cfg, "lr_decay");
   if (cfg.contains("init_sd")) c.init_sd = number(cfg, "init_sd");
+  if (cfg.contains("user_init_sd")) c.user_init_sd = number(cfg, "user_init_sd");
   if (cfg.contains("max_epochs")) c.max_epochs = static_cast<int>(integer(cfg, "max_epochs"));
   if (cfg.contains("patience")) c.patience = static_cast<int>(integer(cfg, "patience"));
   if (!(c.lambda >= 0.0 && std::isfinite(c.lambda))) throw std::invalid_argument("mf config: lambda must be >= 0");
   if (!(c.lr > 0.0 && std::isfinite(c.lr))) throw std::invalid_argument("mf config: lr must be > 0");
   if (!(c.lr_decay > 0.0 && c.lr_decay <= 1.0)) throw std::invalid_argument("mf config: lr_decay must be in (0, 1]");
   if (!(c.init_sd >= 0.0 && std::isfinite(c.init_sd))) throw std::invalid_argument("mf config: init_sd must be >= 0");
+  if (!(c.user_init_sd >= 0.0 && std::isfinite(c.user_init_sd)))
+    throw std::invalid_argument("mf config: user_init_sd must be >= 0");
   if (c.max_epochs < 1) throw std::invalid_argument("mf config: max_epochs must be >= 1");
   if (c.patience < 1) throw std::invalid_argument("mf config: patience must be >= 1");
   return c;
@@ -253,7 +300,7 @@ constexpr std::uint64_t kHeaderBytes = sizeof(kMagic) + 3 * sizeof(std::uint32_t
 // With those, k <= 4096 and ratings in [0.5, 5], the fold-in solve and every score stay far inside
 // float range. Finite alone is not enough: fuzz_model_load_mf found mu = -1.1e297, and lambda = 0
 // leaves only the 1e-9 ridge floor, either of which overflows fold-in into NaN scores. Trained
-// models are many orders of magnitude inside these bounds (configs/mf.json: lambda 0.05).
+// models are many orders of magnitude inside these bounds (configs/mf.json: lambda 0.12).
 constexpr double kMaxAbsParam = 1e6;
 constexpr double kMinServeLambda = 1e-6;
 constexpr double kMaxServeLambda = 1e6;
@@ -344,7 +391,7 @@ class MfSgd final : public Model {
     Rng init_rng(mix_seed(ctx.seed, 1));
     for (std::uint32_t u = 0; u < nu; ++u)
       if (train.by_user.row_size(u) > 0)
-        for (std::uint32_t f = 0; f < k; ++f) m.P[std::size_t{u} * k + f] = cfg_.init_sd * init_rng.normal();
+        for (std::uint32_t f = 0; f < k; ++f) m.P[std::size_t{u} * k + f] = cfg_.user_init_sd * init_rng.normal();
     for (std::uint32_t i = 0; i < ni; ++i)
       if (train.by_item.row_size(i) > 0)
         for (std::uint32_t f = 0; f < k; ++f) m.Q[std::size_t{i} * k + f] = cfg_.init_sd * init_rng.normal();
