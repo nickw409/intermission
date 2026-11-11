@@ -34,6 +34,10 @@ class FixedScores final : public recs::Model {
   void load(const recs::fs::path&) override {}
   std::uint32_t n_items() const override { return static_cast<std::uint32_t>(s_.size()); }
   recs::Config config() const override { return recs::Config::object(); }
+  void mask_unrankable(std::span<float> scores) const override {
+    for (const recs::ItemIdx i : unrankable_) scores[i] = kNegInf;
+  }
+  std::vector<recs::ItemIdx> unrankable_;
 
  private:
   std::vector<float> s_;
@@ -116,4 +120,20 @@ TEST_CASE("recommend matches a brute-force full sort (property)", "[c1][recommen
     const FixedScores m(s);
     CHECK(recs::recommend(m, u, k, ex) == expect);
   });
+}
+
+TEST_CASE("recommend: items the model masks as unrankable are never returned", "[c1][recommend]") {
+  FixedScores m({5.f, 9.f, 4.f, 8.f, 3.f, 7.f});
+  CHECK(items_of(recs::recommend(m, {}, 6)) == std::vector<recs::ItemIdx>{1, 3, 5, 0, 2, 4});
+  m.unrankable_ = {1, 5};
+  // Masked before the top-k cut: k = 2 still returns two items, the best rankable ones.
+  CHECK(items_of(recs::recommend(m, {}, 2)) == std::vector<recs::ItemIdx>{3, 0});
+  CHECK(items_of(recs::recommend(m, {}, 6)) == std::vector<recs::ItemIdx>{3, 0, 2, 4});
+  // Combined with the user's ratings and an explicit exclude list.
+  const std::vector<recs::ItemIdx> exclude{2};
+  CHECK(items_of(recs::recommend(m, rated({0}), 6, exclude)) == std::vector<recs::ItemIdx>{3, 4});
+  // score() itself is untouched by the mask.
+  std::vector<float> out(6);
+  m.score({}, out);
+  CHECK(out == std::vector<float>{5.f, 9.f, 4.f, 8.f, 3.f, 7.f});
 }

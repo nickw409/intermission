@@ -361,3 +361,33 @@ TEST_CASE("evaluate is identical with 1 and 4 threads: parity and rating paths",
   CHECK_FALSE(j["rating_baselines"].is_null());
   CHECK_FALSE(j["foldin_jaccard@10"].is_null());
 }
+
+// A ranking floor (Model::mask_unrankable, e.g. MF's min_support) changes which items are ranked
+// and nothing else: the rating task still reads score(), and the parity check masks both paths.
+TEST_CASE("evaluate: mask_unrankable shapes the ranking only", "[c1][eval][rating][parity]") {
+  Fixture f;
+  recs::EvalOptions opt;
+  const std::vector<float> s = {6.f, 5.f, 4.f, 3.f, 2.f, 1.f};
+  FixedScoreModel plain(s, true, true);
+  FixedScoreModel floored(s, true, true);
+  floored.set_unrankable({2, 3});
+  const auto a = recs::evaluate(plain, f.train, f.heldout, f.users, opt);
+  const auto b = recs::evaluate(floored, f.train, f.heldout, f.users, opt);
+
+  // Rating task: identical errors, from the unmasked scores (no global-mean fallbacks).
+  for (std::size_t j = 0; j < f.users.size(); ++j) {
+    CHECK(b.per_user[j].sq_err == a.per_user[j].sq_err);
+    CHECK(b.per_user[j].abs_err == a.per_user[j].abs_err);
+    CHECK(b.per_user[j].n_rated == a.per_user[j].n_rated);
+  }
+  // Ranking: u0's relevant item 3 is floored, so it can no longer be hit; u2's item 2 likewise.
+  CHECK(a.per_user[0].ndcg_at[2] > 0.0);
+  CHECK(b.per_user[0].ndcg_at[2] == 0.0);
+  CHECK(b.per_user[2].ndcg_at[2] == 0.0);
+  // u0's list is [1 4 5] and u2's [4 5]; the mean popularity rank of the top-10 follows.
+  CHECK(b.per_user[0].mean_pop_rank10 == Approx((2.0 + 5.0 + 6.0) / 3.0));
+  CHECK(b.per_user[2].mean_pop_rank10 == Approx((5.0 + 6.0) / 2.0));
+  // Both parity paths are masked the same way, so parity stays exact.
+  REQUIRE(b.foldin_jaccard10.has_value());
+  CHECK(*b.foldin_jaccard10 == Approx(1.0));
+}

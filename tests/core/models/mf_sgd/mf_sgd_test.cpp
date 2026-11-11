@@ -11,6 +11,8 @@
 #include <set>
 #include <vector>
 
+#include <omp.h>
+
 #include <catch2/catch_test_macros.hpp>
 
 #include "../../data/temp_dir.hpp"
@@ -446,7 +448,8 @@ TEST_CASE("MF fit reproduces the pre-optimisation training loop bit for bit", "[
   // Golden values recorded from the index-shuffle loop (main at 475d121) with this exact setup:
   // nonzero init (so the factors train, not only the biases) and no validation set (so the
   // curve is train RMSE, whose summation order must not follow the shuffle). Any change to the
-  // visiting order, the arithmetic or train_rmse changes these bits. They assume the project's
+  // visiting order, the arithmetic or train_rmse changes these bits. (user_init_sd = init_sd and
+// blocks = 1 reproduce that loop's initialisation and serial order.) They assume the project's
   // compiler flags (no -ffast-math or FMA contraction); a deliberate change to the numbers must
   // re-record them and say so.
   const auto s = recs::synthetic::low_rank_explicit(60, 50, 3, 0.1, 0.3, 0.0, 5);
@@ -455,7 +458,8 @@ TEST_CASE("MF fit reproduces the pre-optimisation training loop bit for bit", "[
   ctx.seed = 7;
   model->fit(s.train,
              recs::Config{{"k", 8}, {"lambda", 0.05}, {"lr", 0.02}, {"lr_decay", 0.97},
-                          {"max_epochs", 6}, {"patience", 3}, {"init_sd", 0.1}},
+                          {"max_epochs", 6}, {"patience", 3}, {"init_sd", 0.1},
+                          {"user_init_sd", 0.1}, {"blocks", 1}},
              ctx);
   const std::vector<std::pair<int, double>> golden_curve{
       {1, 0x1.dce04310b6cc3p-1}, {2, 0x1.d4e5a05a80625p-1}, {3, 0x1.d04fdfbe2545fp-1},
@@ -492,7 +496,7 @@ TEST_CASE("MF fit visits ratings in the seeded per-epoch shuffled order", "[mf]"
   ctx.seed = seed;
   model->fit(ds,
              recs::Config{{"k", 2}, {"lambda", lambda}, {"lr", lr}, {"lr_decay", decay},
-                          {"max_epochs", 2}, {"init_sd", 0.0}},
+                          {"max_epochs", 2}, {"init_sd", 0.0}, {"blocks", 1}},
              ctx);
 
   std::vector<recs::Triplet> ratings;
@@ -565,9 +569,9 @@ TEST_CASE("MF treats a validation set with no usable ratings as no validation", 
 
 namespace {
 
-// item_factors.bin layout: magic[8] | u32 version | u32 n_items | u32 k | f64 mu | f32 b_i[n] |
-// f32 Q[n * k]
-constexpr std::size_t kOffNItems = 12, kOffMu = 20, kOffBi = 28;
+// item_factors.bin layout (format 2): magic[8] | u32 version | u32 n_items | u32 k | f64 mu |
+// f32 b_i[n] | u32 n_ratings[n] | f32 Q[n * k]
+constexpr std::size_t kOffVersion = 8, kOffNItems = 12, kOffMu = 20, kOffBi = 28;
 
 std::string slurp(const std::filesystem::path& p) {
   std::ifstream in(p, std::ios::binary);
@@ -593,7 +597,7 @@ TEST_CASE("MF load rejects hostile or corrupt model files", "[mf]") {
   const auto bin = dir / "item_factors.bin";
   const auto cfg = dir / "config.json";
   const std::string good_bin = slurp(bin), good_cfg = slurp(cfg);
-  REQUIRE(good_bin.size() == 28 + 4 * 20 + 4 * 20 * 3);
+  REQUIRE(good_bin.size() == 28 + 4 * 20 + 4 * 20 + 4 * 20 * 3);
 
   const auto rejects = [&](const std::string& b, const std::string& c) {
     spit(bin, b);
@@ -637,6 +641,11 @@ TEST_CASE("MF load rejects hostile or corrupt model files", "[mf]") {
     poke<float>(b, b.size() - 4, inf);
     CHECK(rejects(b, good_cfg));
   }
+  SECTION("format 1 (no per-item rating counts) is rejected") {
+    auto b = good_bin;
+    poke<std::uint32_t>(b, kOffVersion, 1u);
+    CHECK(rejects(b, good_cfg));
+  }
   SECTION("trailing bytes") {
     CHECK(rejects(good_bin + '\0', good_cfg));
   }
@@ -660,13 +669,15 @@ TEST_CASE("MF fills config defaults from configs/mf.json values", "[mf]") {
   CHECK(model->predicts_ratings());
   model->fit(s.train, recs::Config{{"max_epochs", 2}}, recs::TrainContext{});
   const auto cfg = model->config();
-  CHECK(cfg.at("k") == 64);
-  CHECK(cfg.at("lambda") == 0.05);
-  CHECK(cfg.at("lr") == 0.007);
-  CHECK(cfg.at("lr_decay") == 0.95);
+  CHECK(cfg.at("k") == 128);
+  CHECK(cfg.at("lambda") == 0.12);
+  CHECK(cfg.at("lr") == 0.02);
+  CHECK(cfg.at("lr_decay") == 0.995);
   CHECK(cfg.at("max_epochs") == 2);
-  CHECK(cfg.at("patience") == 3);
-  CHECK(cfg.at("init_sd") == 0.1);
+  CHECK(cfg.at("patience") == 50);
+  CHECK(cfg.at("init_sd") == 0.05);
+  CHECK(cfg.at("user_init_sd") == 0.0);
+  CHECK(cfg.at("blocks") == 8);
   CHECK(model->n_items() == 20);
   CHECK(model->training_curve().size() == 2);
   CHECK(model->training_curve_metric() == "train_rmse");
@@ -676,7 +687,11 @@ TEST_CASE("MF rejects invalid configs", "[mf]") {
   const auto s = recs::synthetic::low_rank_explicit(10, 10, 2, 0.1, 0.5, 0.0, 1);
   for (const auto& bad : {recs::Config{{"k", 0}}, recs::Config{{"lr", -1.0}},
                           recs::Config{{"lambda", -0.1}}, recs::Config{{"lr_decay", 0.0}},
-                          recs::Config{{"max_epochs", 0}}, recs::Config{{"bogus", 1}}}) {
+                          recs::Config{{"max_epochs", 0}}, recs::Config{{"user_init_sd", -0.1}},
+                          recs::Config{{"min_support", -1}}, recs::Config{{"min_support", 2.5}},
+                          recs::Config{{"min_support", 5000000000LL}}, recs::Config{{"blocks", 0}},
+                          recs::Config{{"blocks", 257}},
+                          recs::Config{{"bogus", 1}}}) {
     INFO(bad.dump());
     auto model = recs::make_mf_sgd();
     CHECK_THROWS_AS(model->fit(s.train, bad, recs::TrainContext{}), std::invalid_argument);
@@ -801,4 +816,242 @@ TEST_CASE("MF save/load round-trips fold-in scores exactly", "[mf]") {
     if (e.path().extension() == ".bin") std::filesystem::resize_file(e.path(), 20);
   auto broken = recs::make_mf_sgd();
   CHECK_THROWS(broken->load(dir.path()));
+}
+
+// --- Ranking floor (min_support) ----------------------------------------------------------
+
+namespace {
+
+// Synthetic ratings thinned so that item i keeps at most i % 12 of its ratings (in user order):
+// training counts then run from 0 to 11, so a floor of 6 removes about half of the catalog and
+// some movies have no training ratings at all.
+recs::Dataset uneven_items() {
+  const auto s = recs::synthetic::low_rank_explicit(80, 60, 3, 0.1, 0.3, 0.0, 31);
+  std::vector<recs::Triplet> kept;
+  std::vector<std::uint32_t> taken(60, 0);
+  for (recs::UserIdx u = 0; u < 80; ++u)
+    for (const auto& r : user_ratings(s.train, u))
+      if (taken[r.item] < r.item % 12) {
+        ++taken[r.item];
+        kept.push_back({u, r.item, r.value, r.ts});
+      }
+  return recs::make_dataset("mf-uneven", 80, 60, std::move(kept));
+}
+
+std::vector<std::uint32_t> item_counts(const recs::Dataset& ds) {
+  std::vector<std::uint32_t> c(ds.n_items());
+  for (recs::ItemIdx i = 0; i < ds.n_items(); ++i) c[i] = static_cast<std::uint32_t>(ds.by_item.row_size(i));
+  return c;
+}
+
+}  // namespace
+
+// The floor is a ranking rule: recommend() never returns a movie with fewer than min_support
+// training ratings, while fit(), fold-in and score() (the predicted ratings behind RMSE) are
+// exactly what they are without it.
+TEST_CASE("MF min_support: recommend() skips movies below the floor; predictions are unchanged",
+          "[mf][gate]") {
+  const auto train = uneven_items();
+  const auto counts = item_counts(train);
+  const std::uint32_t floor = 6;
+  const auto below = std::count_if(counts.begin(), counts.end(), [&](std::uint32_t c) { return c < floor; });
+  REQUIRE(below >= 5);                                     // the floor bites
+  REQUIRE(below <= static_cast<std::ptrdiff_t>(counts.size()) - 20);  // and leaves plenty to rank
+  REQUIRE(std::count(counts.begin(), counts.end(), 0u) >= 1);  // and an unrated item exists
+
+  const recs::Config base{{"k", 4}, {"max_epochs", 20}};
+  recs::Config with_floor = base;
+  with_floor["min_support"] = floor;
+  recs::Config no_floor = base;
+  no_floor["min_support"] = 0;
+  auto plain = recs::make_mf_sgd();
+  auto floored = recs::make_mf_sgd();
+  plain->fit(train, no_floor, recs::TrainContext{});
+  floored->fit(train, with_floor, recs::TrainContext{});
+  CHECK(floored->config().at("min_support") == floor);
+  CHECK(plain->config().at("min_support") == 0);
+
+  std::vector<float> a(60), b(60), ta(60), tb(60);
+  for (recs::UserIdx u = 0; u < 80; ++u) {
+    INFO("user " << u);
+    const auto rs = user_ratings(train, u);
+    const auto sa = plain->fold_in(rs);
+    const auto sb = floored->fold_in(rs);
+    plain->score(sa, a);
+    floored->score(sb, b);
+    CHECK(a == b);  // identical training and predictions
+    plain->score_trained_user(u, ta);
+    floored->score_trained_user(u, tb);
+    CHECK(ta == tb);
+
+    // The floored list is the unfloored list with the below-floor movies removed, in order.
+    std::vector<recs::ItemIdx> expect;
+    for (const auto& x : recs::recommend(*plain, sa, 60))
+      if (counts[x.item] >= floor) expect.push_back(x.item);
+    std::vector<recs::ItemIdx> got;
+    for (const auto& x : recs::recommend(*floored, sb, 60)) {
+      CHECK(counts[x.item] >= floor);
+      got.push_back(x.item);
+    }
+    CHECK(got == expect);
+  }
+}
+
+TEST_CASE("MF min_support 0 ranks every movie, including ones never rated in training", "[mf]") {
+  const auto train = uneven_items();
+  const auto counts = item_counts(train);
+  auto model = recs::make_mf_sgd();
+  model->fit(train, recs::Config{{"k", 4}, {"max_epochs", 5}, {"min_support", 0}}, recs::TrainContext{});
+  const auto list = recs::recommend(*model, model->fold_in({}), 60);
+  CHECK(list.size() == 60);
+  bool has_unrated = false;
+  for (const auto& x : list) has_unrated = has_unrated || counts[x.item] == 0;
+  CHECK(has_unrated);
+}
+
+TEST_CASE("MF save/load keeps the min_support floor", "[mf]") {
+  const auto train = uneven_items();
+  const auto counts = item_counts(train);
+  auto model = recs::make_mf_sgd();
+  model->fit(train, recs::Config{{"k", 4}, {"max_epochs", 10}, {"min_support", 6}}, recs::TrainContext{});
+  recs::testing::TempDir dir("mf-floor");
+  model->save(dir.path());
+  auto loaded = recs::make_mf_sgd();
+  loaded->load(dir.path());
+  CHECK(loaded->config() == model->config());
+  for (recs::UserIdx u = 0; u < 80; ++u) {
+    const auto rs = user_ratings(train, u);
+    const auto want = recs::recommend(*model, model->fold_in(rs), 60);
+    const auto got = recs::recommend(*loaded, loaded->fold_in(rs), 60);
+    CHECK(got == want);
+    for (const auto& x : got) CHECK(counts[x.item] >= 6);
+  }
+}
+
+// --- Parallel SGD (DSGD block grid) -------------------------------------------------------
+
+TEST_CASE("MF block grid puts every rating in the cell of its user and item groups", "[mf][dsgd]") {
+  const auto s = recs::synthetic::low_rank_explicit(90, 70, 3, 0.1, 0.3, 0.0, 41);
+  std::vector<recs::mf_detail::SgdRating> csr;
+  for (recs::UserIdx u = 0; u < 90; ++u)
+    for (const auto& r : user_ratings(s.train, u)) csr.push_back({u, r.item, r.value});
+  for (const std::uint32_t b : {1u, 3u, 8u}) {
+    INFO("b = " << b);
+    const auto g = recs::mf_detail::make_block_grid(csr, 90, 70, b, 5);
+    REQUIRE(g.cells.size() == std::size_t{b} * b);
+    std::size_t total = 0;
+    std::vector<std::uint64_t> user_weight(b, 0), item_weight(b, 0);
+    for (std::size_t c = 0; c < g.cells.size(); ++c) {
+      total += g.cells[c].size();
+      for (const auto& r : g.cells[c]) {
+        CHECK(std::size_t{g.user_group[r.row]} * b + g.item_group[r.col] == c);
+        ++user_weight[g.user_group[r.row]];
+        ++item_weight[g.item_group[r.col]];
+      }
+      // Within a cell the ratings keep CSR order.
+      CHECK(std::is_sorted(g.cells[c].begin(), g.cells[c].end(), [](const auto& x, const auto& y) {
+        return x.row != y.row ? x.row < y.row : x.col < y.col;
+      }));
+    }
+    CHECK(total == csr.size());
+    // Balanced: every group within one user's (item's) worth of ratings of total / b.
+    const auto max_user = *std::max_element(user_weight.begin(), user_weight.end());
+    const auto min_user = *std::min_element(user_weight.begin(), user_weight.end());
+    CHECK(max_user - min_user <= 2 * 70);  // a user has at most 70 ratings
+    const auto max_item = *std::max_element(item_weight.begin(), item_weight.end());
+    const auto min_item = *std::min_element(item_weight.begin(), item_weight.end());
+    CHECK(max_item - min_item <= 2 * 90);  // an item has at most 90 ratings
+  }
+}
+
+TEST_CASE("MF dsgd_epoch equals running its strata one cell at a time", "[mf][dsgd]") {
+  // Cells in a stratum share no rows, so the parallel loop must equal a serial replay of the
+  // documented schedule: offsets from the stratum stream, cell (g, (g + o) mod b) shuffled by its
+  // own stream, then sgd_epoch. This pins coverage (every cell once per epoch) and the order.
+  const auto s = recs::synthetic::low_rank_explicit(90, 70, 3, 0.1, 0.3, 0.0, 41);
+  std::vector<recs::mf_detail::SgdRating> csr;
+  for (recs::UserIdx u = 0; u < 90; ++u)
+    for (const auto& r : user_ratings(s.train, u)) csr.push_back({u, r.item, r.value});
+  recs::Rng prng(3);
+  const Params start = random_params(prng, 90, 70, 6);
+  const std::uint32_t b = 4;
+  const std::uint64_t seed = 11;
+
+  auto grid = recs::mf_detail::make_block_grid(csr, 90, 70, b, seed);
+  auto grid2 = grid;
+  std::vector<recs::mf_detail::RecordShuffler> sh, sh2;
+  for (std::size_t c = 0; c < grid.cells.size(); ++c) {
+    sh.emplace_back(seed, c);
+    sh2.emplace_back(seed, c);
+  }
+  recs::Rng strata(recs::mix_seed(seed, 4)), strata2(recs::mix_seed(seed, 4));
+  Params a = start, r = start;
+  for (int e = 0; e < 3; ++e) {
+    recs::mf_detail::dsgd_epoch(a, grid, sh, strata, 0.02, 0.05);
+    std::vector<std::uint32_t> offsets(b);
+    std::iota(offsets.begin(), offsets.end(), 0u);
+    strata2.shuffle(offsets.begin(), offsets.end());
+    std::vector<int> visits(grid2.cells.size(), 0);
+    for (const auto o : offsets)
+      for (std::uint32_t g = b; g-- > 0;) {  // reverse order: the order within a stratum is free
+        const std::size_t c = std::size_t{g} * b + (g + o) % b;
+        ++visits[c];
+        sh2[c].next(grid2.cells[c]);
+        recs::mf_detail::sgd_epoch(r, grid2.cells[c], 0.02, 0.05);
+      }
+    CHECK(std::all_of(visits.begin(), visits.end(), [](int v) { return v == 1; }));
+  }
+  CHECK(a.bu == r.bu);
+  CHECK(a.bi == r.bi);
+  CHECK(a.P == r.P);
+  CHECK(a.Q == r.Q);
+}
+
+TEST_CASE("MF parallel training is identical on 1 and 4 threads", "[mf][dsgd]") {
+  const auto s = recs::synthetic::low_rank_explicit(120, 80, 3, 0.1, 0.3, 0.2, 9);
+  const recs::Config cfg{{"k", 6}, {"max_epochs", 8}, {"blocks", 4}};
+  recs::TrainContext ctx;
+  ctx.validation = &s.heldout;
+  ctx.seed = 5;
+  const int saved = omp_get_max_threads();
+  omp_set_num_threads(1);
+  auto one = recs::make_mf_sgd();
+  one->fit(s.train, cfg, ctx);
+  omp_set_num_threads(4);
+  auto four = recs::make_mf_sgd();
+  four->fit(s.train, cfg, ctx);
+  omp_set_num_threads(saved);
+  CHECK(one->training_curve() == four->training_curve());
+  std::vector<float> x(80), y(80);
+  for (recs::UserIdx u = 0; u < 120; ++u) {
+    one->score_trained_user(u, x);
+    four->score_trained_user(u, y);
+    CHECK(x == y);
+  }
+}
+
+TEST_CASE("MF with blocks = 1 trains exactly like the serial loop", "[mf][dsgd]") {
+  // One cell holding every rating in CSR order, shuffled by stream 0: the serial algorithm.
+  const auto s = recs::synthetic::low_rank_explicit(60, 50, 3, 0.1, 0.3, 0.0, 5);
+  std::vector<recs::mf_detail::SgdRating> csr;
+  for (recs::UserIdx u = 0; u < 60; ++u)
+    for (const auto& r : user_ratings(s.train, u)) csr.push_back({u, r.item, r.value});
+  recs::Rng prng(8);
+  const Params start = random_params(prng, 60, 50, 4);
+  auto grid = recs::mf_detail::make_block_grid(csr, 60, 50, 1, 13);
+  std::vector<recs::mf_detail::RecordShuffler> sh;
+  sh.emplace_back(13, 0);
+  recs::Rng strata(recs::mix_seed(13, 4));
+  recs::mf_detail::RecordShuffler serial(13);
+  auto records = csr;
+  Params a = start, r = start;
+  for (int e = 0; e < 3; ++e) {
+    recs::mf_detail::dsgd_epoch(a, grid, sh, strata, 0.02, 0.05);
+    serial.next(records);
+    recs::mf_detail::sgd_epoch(r, records, 0.02, 0.05);
+  }
+  CHECK(a.P == r.P);
+  CHECK(a.Q == r.Q);
+  CHECK(a.bu == r.bu);
+  CHECK(a.bi == r.bi);
 }

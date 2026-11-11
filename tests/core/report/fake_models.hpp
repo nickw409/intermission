@@ -34,6 +34,11 @@ class FixedScoreModel final : public Model {
   Config config() const override { return Config{{"fixed", true}}; }
   bool predicts_ratings() const override { return predicts_; }
   bool supports_trained_scoring() const override { return trained_; }
+  /// Items this model will not rank (mask_unrankable sets them to -infinity).
+  void set_unrankable(std::vector<ItemIdx> items) { unrankable_ = std::move(items); }
+  void mask_unrankable(std::span<float> scores) const override {
+    for (const ItemIdx i : unrankable_) scores[i] = -std::numeric_limits<float>::infinity();
+  }
   void score_trained_user(UserIdx u, std::span<float> out) const override {
     if (std::find(broken_.begin(), broken_.end(), u) != broken_.end()) {
       std::fill(out.begin(), out.end(), -std::numeric_limits<float>::infinity());
@@ -47,6 +52,7 @@ class FixedScoreModel final : public Model {
   bool predicts_;
   bool trained_;
   std::vector<UserIdx> broken_;
+  std::vector<ItemIdx> unrankable_;
 };
 
 /// A rating model with fractional, user-independent scores (score_i = 1 + (0.37 * i mod 4)) and a

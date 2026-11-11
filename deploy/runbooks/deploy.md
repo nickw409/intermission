@@ -46,6 +46,14 @@ artifact loads as one unit, the whole artifact would be rejected. Before deployi
 any later SHA), run `recs-train retrain` with the new image so `CURRENT` points at an artifact
 that has the file. Production has no such artifact yet, but check `data/artifacts/CURRENT` first.
 
+The MF model file went to format 2 with the min_support ranking floor (it now stores each
+movie's training rating count). recs-model refuses a format 1 `mf/item_factors.bin` ("format 1
+has no per-item rating counts (min_support); retrain"), which again rejects the whole artifact.
+Order for that release: `deploy/build.sh <sha>`, then a retrain with the new image,
+`TAG=<sha> docker compose -f deploy/compose.yaml run --rm train retrain` (the running recs-model
+rejects the new artifact and keeps serving the old one), then `deploy/release.sh <sha>`, which
+starts the new recs-model on the new artifact.
+
 Development uses a separate compose project (`intermission-dev`), port 127.0.0.1:8088 and data
 directory `data/dev/` (see `deploy/compose.dev.yaml`), so it never touches production.
 
