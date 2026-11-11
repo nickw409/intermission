@@ -169,6 +169,21 @@ func (s *sessions) delete(ctx context.Context, tokenHash []byte) error {
 	return err
 }
 
+// RevokeAllSessions deletes every session, logging every user out, and
+// returns how many were deleted (`recs-api admin sessions revoke-all`, for a
+// suspected token leak). Accounts, ratings and invites are untouched.
+//
+// Sessions are not cached anywhere: require looks each one up in the
+// database on every request, so a running server rejects revoked cookies
+// from its next request on, with no restart or signal.
+func RevokeAllSessions(ctx context.Context, d *db.DB) (int64, error) {
+	res, err := d.Writer.ExecContext(ctx, "DELETE FROM sessions")
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // require is the session middleware: 401 unauthorized without a live
 // session; otherwise the Session is put in the request context and the user
 // ID recorded for the access log.

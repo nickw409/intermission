@@ -4,7 +4,7 @@ Fastest and complete: stop Funnel. The machine stops accepting public traffic at
 the containers keep running for debugging over the tailnet or locally.
 
 ```bash
-sudo tailscale funnel --bg off      # owner only
+sudo tailscale funnel reset         # owner only
 tailscale funnel status             # must show no Funnel entries
 ```
 
