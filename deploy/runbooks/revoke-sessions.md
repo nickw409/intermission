@@ -1,6 +1,10 @@
 # Revoke all sessions
 
 Use after a suspected session-token leak, or when every user must log in again.
+Revoking sessions does not lock anyone out: anyone with a password can log straight back in.
+If credentials may have leaked too, take the site offline first (`take-offline.md`). If `app.db`
+itself leaked, sessions are stored only as hashes, but password hashes and invites need their own
+response (offline, then decide on forced password resets).
 Sessions are rows in recs-api's `sessions` table; deleting them logs everyone out. Accounts,
 ratings and invites are untouched.
 
