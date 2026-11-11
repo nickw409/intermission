@@ -368,7 +368,77 @@ describe('For you: model selector and categories', () => {
     expect(chips[0]).toHaveAccessibleName('Action');
     expect(chips.at(-1)).toHaveAccessibleName('IMAX');
     for (const c of chips) expect(c).toHaveAttribute('aria-pressed', 'false');
-    expect(within(group).getByRole('button', { name: 'Clear' })).toBeInTheDocument();
+    expect(within(group).getByRole('button', { name: 'Clear categories' })).toBeDisabled();
+    expect(group.tagName).toBe('FIELDSET');
+  });
+
+  it('debounces rapid chip toggles into one request, while the buttons and URL update at once', async () => {
+    const user = userEvent.setup();
+    server.use(recommendWith(20));
+    const { router } = renderApp('/');
+    await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
+    const recommend = recordRequests('/api/recommend');
+    await user.click(chip('Horror'));
+    await user.click(chip('Action'));
+    await user.click(chip('Comedy'));
+    await user.click(chip('Action'));
+    expect(chip('Horror')).toHaveAttribute('aria-pressed', 'true');
+    expect(chip('Action')).toHaveAttribute('aria-pressed', 'false');
+    expect(new URLSearchParams(router.state.location.search).get('genres')).toBe('Comedy,Horror');
+    expect(recommend).toHaveLength(0);
+    await waitFor(() => expect(recommend).toHaveLength(1));
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 700));
+    });
+    expect(recommend.map(queryOf)).toEqual([{ model: 'als', k: '20', genres: 'Comedy,Horror' }]);
+  });
+
+  it('remembers genres but not a model the user never picked', async () => {
+    const user = userEvent.setup();
+    await openPage();
+    await user.click(chip('Horror'));
+    expect(stored()).toEqual({ genres: ['Horror'] });
+  });
+
+  it('forgets the remembered model when the user picks the server default', async () => {
+    const user = userEvent.setup();
+    await openPage();
+    await user.selectOptions(modelSelect(), 'knn');
+    expect(stored()).toEqual({ model: 'knn', genres: [] });
+    await user.selectOptions(modelSelect(), 'als');
+    expect(stored()).toEqual({ genres: [] });
+  });
+
+  it('never remembers or links the guessed model when the model list is down and the page fell back to pop', async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get('/api/models', () => errorBody('internal', 500)),
+      http.get('/api/recommend', ({ request }) =>
+        new URL(request.url).searchParams.get('model') === 'pop'
+          ? HttpResponse.json(handlerBody('recommend', 'ok'))
+          : errorBody('unknown_model', 400),
+      ),
+    );
+    const { router } = renderApp('/');
+    await screen.findByRole('heading', { level: 2, name: LOTR });
+    expect(router.state.location.search).toBe('');
+    await user.click(chip('Fantasy'));
+    const params = new URLSearchParams(router.state.location.search);
+    expect(params.has('model')).toBe(false);
+    expect(params.get('genres')).toBe('Fantasy');
+    expect(stored()).toEqual({ genres: ['Fantasy'] });
+  });
+
+  it('announces the result count politely after a change', async () => {
+    const user = userEvent.setup();
+    server.use(recommendWith(20));
+    renderApp('/');
+    await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
+    await user.click(chip('Horror'));
+    const message = await screen.findByText('20 horror picks from Implicit ALS');
+    expect(message.closest('[aria-live="polite"]')).not.toBeNull();
+    await user.selectOptions(modelSelect(), 'knn');
+    expect(await screen.findByText('20 horror picks from Item-KNN')).toBe(message);
   });
 
   it('sends the chosen genres comma-joined in enum order, and Clear removes them', async () => {
@@ -386,10 +456,10 @@ describe('For you: model selector and categories', () => {
     expect(queryOf(recommend[0]!)).toEqual({ model: 'als', k: '20', genres: 'Horror' });
     expect(queryOf(recommend[1]!)).toEqual({ model: 'als', k: '20', genres: 'Action,Horror' });
     expect(new URLSearchParams(router.state.location.search).get('genres')).toBe('Action,Horror');
-    expect(stored()).toEqual({ model: 'als', genres: ['Action', 'Horror'] });
+    expect(stored()).toEqual({ genres: ['Action', 'Horror'] });
     await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
 
-    await user.click(chip('Clear'));
+    await user.click(chip('Clear categories'));
     await waitFor(() => expect(recommend).toHaveLength(3));
     expect(queryOf(recommend[2]!)).toEqual({ model: 'als', k: '20' });
     expect(chip('Horror')).toHaveAttribute('aria-pressed', 'false');
@@ -440,18 +510,22 @@ describe('For you: model selector and categories', () => {
     await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
     expect(recommend.map(queryOf)).toEqual([{ model: 'content', k: '20', genres: 'Animation,Comedy' }]);
     expect(modelSelect().value).toBe('content');
-    // The URL shows the remembered view, so it can be shared as is.
-    const params = new URLSearchParams(router.state.location.search);
-    expect(params.get('model')).toBe('content');
-    expect(params.get('genres')).toBe('Animation,Comedy');
+    // Remembered values are never written into the address on their own.
+    expect(router.state.location.search).toBe('');
   });
 
-  it('the URL wins over the remembered choice', async () => {
+  it.each([
+    ['model and genres', '/?model=mf&genres=War', { model: 'mf', k: '20', genres: 'War' }],
+    ['only a model', '/?model=mf', { model: 'mf', k: '20' }],
+    ['only genres', '/?genres=War', { model: 'als', k: '20', genres: 'War' }],
+    ['an empty genres key', '/?genres=', { model: 'als', k: '20' }],
+  ])('a URL with %s is the whole view, ignoring the remembered choice', async (_, path, expected) => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ model: 'content', genres: ['Comedy'] }));
     const recommend = recordRequests('/api/recommend');
-    renderApp('/?model=mf&genres=War');
+    const { router } = renderApp(path);
     await screen.findByRole('heading', { level: 2, name: LOTR });
-    expect(recommend.map(queryOf)).toEqual([{ model: 'mf', k: '20', genres: 'War' }]);
+    expect(recommend.map(queryOf)).toEqual([expected]);
+    expect(router.state.location.search).toBe(path.slice(1));
   });
 
   it.each([
@@ -490,6 +564,17 @@ describe('For you: model selector and categories', () => {
     );
   });
 
+  it('counts only the cards still shown in the short-list message and uses the same words in the summary', async () => {
+    const user = userEvent.setup();
+    server.use(recommendWith(3));
+    renderApp('/?genres=Horror,Action');
+    await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
+    const main = screen.getByRole('main');
+    expect(main).toHaveTextContent('Picks from Implicit ALS · action or horror');
+    await user.click(within(card('Movie 1')).getByRole('button', { name: 'Not interested in Movie 1' }));
+    expect(main).toHaveTextContent('Only 2 action or horror picks right now');
+  });
+
   it('names several categories in the short-list message', async () => {
     server.use(recommendWith(1));
     renderApp('/?genres=Horror,Sci-Fi,Action');
@@ -516,11 +601,11 @@ describe('For you: model selector and categories', () => {
     server.use(recommendWith(0));
     renderApp('/?genres=Western');
     const main = screen.getByRole('main');
-    await within(main).findByText('No western picks right now.');
+    const empty = (await within(main).findByText('No western picks right now.')).parentElement!;
     expect(await axeViolations()).toEqual([]);
     const recommend = recordRequests('/api/recommend');
     server.use(recommendWith(20));
-    await user.click(within(main).getByRole('button', { name: 'Clear categories' }));
+    await user.click(within(empty).getByRole('button', { name: 'Clear categories' }));
     await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
     expect(recommend.map(queryOf)).toEqual([{ model: 'als', k: '20' }]);
     expect(chip('Western')).toHaveAttribute('aria-pressed', 'false');
