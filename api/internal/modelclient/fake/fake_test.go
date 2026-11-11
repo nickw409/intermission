@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -499,5 +500,38 @@ func TestRealFixturesEveryCase(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
+	}
+}
+
+// A movies/batch request no case matches is answered from the fixtures'
+// catalog: known IDs in request order, the rest missing.
+func TestMoviesBatchCatalogFallback(t *testing.T) {
+	f, err := NewFromDir(realFixtureDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, meta, err := f.MoviesBatch(context.Background(), []int64{593, 999999998, 480, 2959})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []int64
+	for _, m := range resp.Movies {
+		got = append(got, m.MovieID)
+	}
+	if !slices.Equal(got, []int64{593, 480, 2959}) || !slices.Equal(resp.Missing, []int64{999999998}) {
+		t.Fatalf("movies %v missing %v", got, resp.Missing)
+	}
+	if resp.Movies[0].Title != "Silence of the Lambs, The" || meta.ModelVersion == "" {
+		t.Fatalf("%+v %+v", resp.Movies[0], meta)
+	}
+	if calls := f.Calls(); calls[len(calls)-1].Case != CatalogCase {
+		t.Fatalf("answered by %q", calls[len(calls)-1].Case)
+	}
+	// An exact case still wins.
+	if _, _, err := f.MoviesBatch(context.Background(), []int64{2571}); err != nil {
+		t.Fatal(err)
+	}
+	if calls := f.Calls(); calls[len(calls)-1].Case != "movie_2571" {
+		t.Fatalf("answered by %q", calls[len(calls)-1].Case)
 	}
 }
