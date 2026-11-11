@@ -99,7 +99,9 @@ seed 42), k 64, lr 0.03, lr_decay 0.995, patience 30.
 | 0.08 | 8 | 800 | 0.8278 | 0.962 | 0.957 / 0.0249 / 0.034 |
 | 0.12 | 8 | 773 | 0.8528 | 0.978 | 0.978 / 0.0134 / 0.010 |
 
-  Serial SGD epochs appended after the DSGD phase (tried: 40 epochs) moved parity by less than
+  The 0.06 and 0.08 runs reached the 800-epoch cap with validation RMSE still (slowly)
+  improving, so their rows depend on `max_epochs`; 0.06 is pinned at 800, which keeps a
+  production retrain to about 40 minutes. Serial SGD epochs appended after the DSGD phase (tried: 40 epochs) moved parity by less than
   0.01 and were not adopted. Training takes about 12 minutes (8 blocks, float); serial epochs of the same
   code took 6.5 s each in that run, so serial training would take about an hour.
 - `min_support` 300: a movie needs 300 training ratings to be recommended (7,524 of 87,585 are

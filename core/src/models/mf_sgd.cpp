@@ -57,7 +57,9 @@
 //     single precision (biases stay double). Half the bytes per row means half the memory
 //     traffic, which is what the loop waits on. Measured on the same ml-32m-sized synthetic data
 //     (k = 64, 8 threads, one run): serial double 7.9 s per epoch, 8 blocks double 3.9 s, 8 blocks
-//     float 2.2 s. Each update's dot product has only k terms, so float accumulation is accurate
+//     float 2.2 s. (On real ml-32m 8 blocks float take about 0.8 s per epoch: its ratings
+//     concentrate on popular movies, so each cell's item rows stay in cache, which the
+//     uniformly random synthetic data does not allow.) Each update's dot product has only k terms, so float accumulation is accurate
 //     enough there (see residual()); every sum over ratings (RMSE, objective) stays in double.
 //     precision "double" keeps the double-precision reference loop; the gradient gates always
 //     check the double formulas (mf_detail::Params). On ml-latest-small validation (configs/mf.json)
@@ -122,11 +124,11 @@
 //       set configs/mf.json.
 //   On ml-latest-small (users have tens of ratings, so lambda n is small) this costs about
 //   0.0015 validation RMSE (0.8946 best overall vs 0.8961 best with parity > 0.9; the bootstrap
-//   CI half-width is about 0.02). On ml-32m the trade-off is not cheap (validation, k = 64,
-//   user_init_sd 0): lambda 0.05 reaches RMSE 0.8175 with parity 0.74-0.77 after 80-150 epochs,
-//   still improving; lambda 0.1 reaches parity 0.902 but RMSE 0.8455 (bootstrap CI half-width
-//   about 0.002; the user+item bias baseline is 0.894). The many users with few ratings (small
-//   lambda n) are the slow ones. No ml-32m config is chosen yet (pending an owner decision).
+//   CI half-width is about 0.02). On ml-32m the many users with few ratings (small lambda n) are
+//   the slow ones, and training length matters as much as lambda: an earlier search with
+//   shorter training (80-150 epochs) needed lambda 0.1 and RMSE 0.8455 to reach parity 0.9.
+//   With lr 0.03, lr_decay 0.995 and up to 800 epochs, lambda 0.06 gives validation RMSE 0.8175
+//   and parity 0.939 with 8 blocks (configs/mf.ml-32m.tuned.json; tables in configs/README.md).
 //
 // Ranking floor (min_support)
 //   MF is fit to predict star ratings, and the squared loss says nothing about which movies to put
