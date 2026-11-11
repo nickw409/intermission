@@ -78,14 +78,47 @@ class EpochShuffler {
 };
 
 /// The epoch order applied to the records in place (see EpochShuffler): same seed derivation,
-/// same Fisher-Yates swaps, one stream for the run.
+/// same Fisher-Yates swaps, one stream for the run. `stream` selects an independent stream per
+/// DSGD cell, Rng(mix_seed(seed, 2, stream)); stream 0 is exactly EpochShuffler's.
 class RecordShuffler {
  public:
-  explicit RecordShuffler(std::uint64_t seed);
+  explicit RecordShuffler(std::uint64_t seed, std::uint64_t stream = 0);
   void next(std::span<SgdRating> records);
 
  private:
   Rng rng_;
 };
+
+// --- Parallel SGD over a block grid (DSGD, Gemulla et al. 2011; see mf_sgd.cpp) -------------
+
+/// Splits items 0..n-1 into `b` groups with about equal total weight (weight = rating count):
+/// visit them in a seeded random order and cut the running total into b equal parts. Returns
+/// the group of each item. Deterministic in `rng`'s state.
+std::vector<std::uint32_t> balanced_groups(std::span<const std::uint64_t> weight, std::uint32_t b, Rng& rng);
+
+/// The ratings cut into b x b cells: cell (ub, ib) holds the ratings of users in user group ub on
+/// items in item group ib, at index ub * b + ib, each initially in CSR order. Two cells that
+/// differ in both coordinates share no user and no item, so SGD on them can run in parallel
+/// without touching the same parameters.
+struct BlockGrid {
+  std::uint32_t b = 1;
+  std::vector<std::uint32_t> user_group;        // n_users
+  std::vector<std::uint32_t> item_group;        // n_items
+  std::vector<std::vector<SgdRating>> cells;    // b * b
+};
+
+/// Groups from balanced_groups() with Rng(mix_seed(seed, 3, 0)) for users and
+/// Rng(mix_seed(seed, 3, 1)) for items; `csr` must be in CSR order (user, then item ascending).
+BlockGrid make_block_grid(std::span<const SgdRating> csr, std::uint32_t n_users, std::uint32_t n_items,
+                          std::uint32_t b, std::uint64_t seed);
+
+/// One DSGD epoch: b sub-epochs. The order of the b "strata" is a fresh seeded permutation
+/// `offsets` each epoch (drawn from `stratum_rng`); in the sub-epoch with offset o, cell
+/// (g, (g + o) mod b) for every g = 0..b-1 is shuffled with its own RecordShuffler (stream =
+/// cell index) and then run through sgd_epoch, the b cells in parallel (static OpenMP schedule).
+/// Each cell's work depends only on the parameters its own rows hold, so the result is the same
+/// for any thread count. With b = 1 this is exactly one serial epoch (RecordShuffler stream 0).
+void dsgd_epoch(Params& m, BlockGrid& grid, std::vector<RecordShuffler>& cell_shufflers, Rng& stratum_rng,
+                double lr, double lambda);
 
 }  // namespace recs::mf_detail

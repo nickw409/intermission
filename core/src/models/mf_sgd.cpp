@@ -199,9 +199,62 @@ void sgd_epoch(Params& m, std::span<const SgdRating> in_order, double lr, double
   }
 }
 
-RecordShuffler::RecordShuffler(std::uint64_t seed) : rng_(mix_seed(seed, 2)) {}
+RecordShuffler::RecordShuffler(std::uint64_t seed, std::uint64_t stream) : rng_(mix_seed(seed, 2, stream)) {}
 
 void RecordShuffler::next(std::span<SgdRating> records) { rng_.shuffle(records.begin(), records.end()); }
+
+std::vector<std::uint32_t> balanced_groups(std::span<const std::uint64_t> weight, std::uint32_t b, Rng& rng) {
+  const std::size_t n = weight.size();
+  std::vector<std::uint32_t> visit(n);
+  std::iota(visit.begin(), visit.end(), 0u);
+  rng.shuffle(visit.begin(), visit.end());
+  std::uint64_t total = 0;
+  for (const auto w : weight) total += w;
+  std::vector<std::uint32_t> group(n, 0);
+  std::uint64_t before = 0;  // weight of the items visited so far
+  for (const std::uint32_t i : visit) {
+    // Group = which b-th of the total weight this item starts in (integer arithmetic, exact).
+    // No overflow: total < 2^40 ratings, b <= 256.
+    const std::uint64_t g = total == 0 ? 0 : before * b / total;
+    group[i] = static_cast<std::uint32_t>(std::min<std::uint64_t>(g, b - 1));
+    before += weight[i];
+  }
+  return group;
+}
+
+BlockGrid make_block_grid(std::span<const SgdRating> csr, std::uint32_t n_users, std::uint32_t n_items,
+                          std::uint32_t b, std::uint64_t seed) {
+  std::vector<std::uint64_t> per_user(n_users, 0), per_item(n_items, 0);
+  for (const auto& r : csr) {
+    ++per_user[r.row];
+    ++per_item[r.col];
+  }
+  BlockGrid g;
+  g.b = b;
+  Rng user_rng(mix_seed(seed, 3, 0)), item_rng(mix_seed(seed, 3, 1));
+  g.user_group = balanced_groups(per_user, b, user_rng);
+  g.item_group = balanced_groups(per_item, b, item_rng);
+  g.cells.assign(std::size_t{b} * b, {});
+  for (const auto& r : csr) g.cells[std::size_t{g.user_group[r.row]} * b + g.item_group[r.col]].push_back(r);
+  return g;
+}
+
+void dsgd_epoch(Params& m, BlockGrid& grid, std::vector<RecordShuffler>& cell_shufflers, Rng& stratum_rng,
+                double lr, double lambda) {
+  const std::uint32_t b = grid.b;
+  std::vector<std::uint32_t> offsets(b);
+  std::iota(offsets.begin(), offsets.end(), 0u);
+  stratum_rng.shuffle(offsets.begin(), offsets.end());
+  for (const std::uint32_t o : offsets) {
+    // The b cells of this stratum touch disjoint user rows and disjoint item rows.
+#pragma omp parallel for schedule(static)
+    for (std::uint32_t g = 0; g < b; ++g) {
+      const std::size_t c = std::size_t{g} * b + (g + o) % b;
+      cell_shufflers[c].next(grid.cells[c]);
+      sgd_epoch(m, grid.cells[c], lr, lambda);
+    }
+  }
+}
 
 EpochShuffler::EpochShuffler(std::size_t n, std::uint64_t seed)
     : rng_(mix_seed(seed, 2)), order_(n) {
@@ -229,6 +282,7 @@ struct MfConfig {
   int max_epochs = 40;
   int patience = 3;
   double init_sd = 0.1;
+  std::uint32_t blocks = 8;  // DSGD grid side b (1 = serial SGD); results depend on b, not threads
 
   Config to_json() const {
     return Config{{"k", k},           {"lambda", lambda},     {"lr", lr},
@@ -360,8 +414,8 @@ class MfSgd final : public Model {
     const std::uint32_t k = cfg_.k;
     const std::uint32_t nu = train.n_users(), ni = train.n_items();
 
-    // Every training rating as a compact record, starting in CSR order; the epochs shuffle this
-    // vector in place (RecordShuffler).
+    // Every training rating as a compact record, in CSR order; make_block_grid moves them into
+    // the DSGD cells, which the epochs shuffle in place.
     std::vector<mf_detail::SgdRating> order;
     order.reserve(train.n_ratings());
     double sum = 0.0;
@@ -396,15 +450,19 @@ class MfSgd final : public Model {
     curve_metric_ = validation != nullptr ? "val_rmse" : "train_rmse";
     curve_.clear();
 
-    mf_detail::RecordShuffler shuffler(ctx.seed);
+    mf_detail::BlockGrid grid = mf_detail::make_block_grid(order, nu, ni, cfg_.blocks, ctx.seed);
+    std::vector<mf_detail::SgdRating>().swap(order);  // the cells hold the ratings now
+    std::vector<mf_detail::RecordShuffler> shufflers;
+    shufflers.reserve(grid.cells.size());
+    for (std::size_t c = 0; c < grid.cells.size(); ++c) shufflers.emplace_back(ctx.seed, c);
+    Rng stratum_rng(mix_seed(ctx.seed, 4));
 
     Params best = m;
     double best_rmse = std::numeric_limits<double>::infinity();
     int since_best = 0;
     double lr = cfg_.lr;
     for (int epoch = 1; epoch <= cfg_.max_epochs; ++epoch) {
-      shuffler.next(order);
-      mf_detail::sgd_epoch(m, order, lr, cfg_.lambda);
+      mf_detail::dsgd_epoch(m, grid, shufflers, stratum_rng, lr, cfg_.lambda);
       lr *= cfg_.lr_decay;
 
       const double rmse = validation != nullptr ? validation_rmse(m, *validation) : train_rmse(m, train);
