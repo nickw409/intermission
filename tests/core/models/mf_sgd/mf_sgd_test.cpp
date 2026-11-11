@@ -449,7 +449,8 @@ TEST_CASE("MF fit reproduces the pre-optimisation training loop bit for bit", "[
   // nonzero init (so the factors train, not only the biases) and no validation set (so the
   // curve is train RMSE, whose summation order must not follow the shuffle). Any change to the
   // visiting order, the arithmetic or train_rmse changes these bits. (user_init_sd = init_sd and
-// blocks = 1 and precision "double" reproduce that loop's initialisation, order and arithmetic.) They assume the project's
+  // blocks = 1 and precision "double" reproduce that loop's initialisation, order and
+  // arithmetic.) They assume the project's
   // compiler flags (no -ffast-math or FMA contraction); a deliberate change to the numbers must
   // re-record them and say so.
   const auto s = recs::synthetic::low_rank_explicit(60, 50, 3, 0.1, 0.3, 0.0, 5);
@@ -1009,27 +1010,174 @@ TEST_CASE("MF dsgd_epoch equals running its strata one cell at a time", "[mf][ds
   CHECK(a.Q == r.Q);
 }
 
-TEST_CASE("MF parallel training is identical on 1 and 4 threads", "[mf][dsgd]") {
+namespace {
+
+// Sets the OpenMP thread count for a scope and restores it even if the scope throws.
+struct ThreadCount {
+  explicit ThreadCount(int n) : saved(omp_get_max_threads()) { omp_set_num_threads(n); }
+  ~ThreadCount() { omp_set_num_threads(saved); }
+  ThreadCount(const ThreadCount&) = delete;
+  ThreadCount& operator=(const ThreadCount&) = delete;
+  int saved;
+};
+
+}  // namespace
+
+TEST_CASE("MF parallel training does not depend on the thread count", "[mf][dsgd]") {
+  // Even and uneven splits of cells over threads (b = 4 on 1 and 4 threads; b = 5 on 1 and 3).
   const auto s = recs::synthetic::low_rank_explicit(120, 80, 3, 0.1, 0.3, 0.2, 9);
-  const recs::Config cfg{{"k", 6}, {"max_epochs", 8}, {"blocks", 4}};
   recs::TrainContext ctx;
   ctx.validation = &s.heldout;
   ctx.seed = 5;
-  const int saved = omp_get_max_threads();
-  omp_set_num_threads(1);
-  auto one = recs::make_mf_sgd();
-  one->fit(s.train, cfg, ctx);
-  omp_set_num_threads(4);
-  auto four = recs::make_mf_sgd();
-  four->fit(s.train, cfg, ctx);
-  omp_set_num_threads(saved);
-  CHECK(one->training_curve() == four->training_curve());
-  std::vector<float> x(80), y(80);
-  for (recs::UserIdx u = 0; u < 120; ++u) {
-    one->score_trained_user(u, x);
-    four->score_trained_user(u, y);
-    CHECK(x == y);
+  for (const auto& [blocks, threads] : {std::pair{4, 4}, std::pair{5, 3}}) {
+    INFO("blocks " << blocks << ", threads " << threads);
+    const recs::Config cfg{{"k", 6}, {"max_epochs", 8}, {"blocks", blocks}};
+    auto one = recs::make_mf_sgd();
+    auto many = recs::make_mf_sgd();
+    {
+      ThreadCount t(1);
+      one->fit(s.train, cfg, ctx);
+    }
+    {
+      ThreadCount t(threads);
+      many->fit(s.train, cfg, ctx);
+    }
+    CHECK(one->training_curve() == many->training_curve());
+    std::vector<float> x(80), y(80);
+    bool same = true;
+    for (recs::UserIdx u = 0; u < 120; ++u) {
+      one->score_trained_user(u, x);
+      many->score_trained_user(u, y);
+      same = same && x == y;
+    }
+    CHECK(same);
   }
+}
+
+TEST_CASE("MF fit with blocks > 1 follows the documented DSGD schedule", "[mf][dsgd]") {
+  // Like the serial replay test: init_sd = user_init_sd = 0 keeps the factors at zero, so only the
+  // biases move and the result depends on the update order alone. Replaying fit() by hand with the
+  // documented streams (grid from mix_seed(seed, 3, *), cell c shuffled by RecordShuffler(seed, c),
+  // strata from mix_seed(seed, 4)) must reproduce it; one stream shared by every cell must not.
+  const auto s = recs::synthetic::low_rank_explicit(60, 40, 2, 0.1, 0.4, 0.0, 17);
+  const auto ds = add_biases(s, 3, true).train;
+  const double lr = 0.05, decay = 0.9, lambda = 0.02;
+  const std::uint64_t seed = 99;
+  const std::uint32_t b = 4;
+  auto model = recs::make_mf_sgd();
+  recs::TrainContext ctx;
+  ctx.seed = seed;
+  model->fit(ds,
+             recs::Config{{"k", 2}, {"lambda", lambda}, {"lr", lr}, {"lr_decay", decay}, {"max_epochs", 3},
+                          {"init_sd", 0.0}, {"user_init_sd", 0.0}, {"blocks", b}, {"precision", "double"}},
+             ctx);
+
+  std::vector<recs::mf_detail::SgdRating> csr;
+  double sum = 0.0;
+  for (recs::UserIdx u = 0; u < ds.n_users(); ++u)
+    for (const auto& r : user_ratings(ds, u)) {
+      csr.push_back({u, r.item, r.value});
+      sum += r.value;
+    }
+  Params zero;
+  zero.k = 2;
+  zero.mu = sum / static_cast<double>(csr.size());
+  zero.bu.assign(ds.n_users(), 0.0);
+  zero.bi.assign(ds.n_items(), 0.0);
+  zero.P.assign(std::size_t{ds.n_users()} * 2, 0.0);
+  zero.Q.assign(std::size_t{ds.n_items()} * 2, 0.0);
+
+  const auto replay = [&](bool shared_stream) {
+    auto grid = recs::mf_detail::make_block_grid(csr, ds.n_users(), ds.n_items(), b, seed);
+    std::vector<recs::mf_detail::RecordShuffler> sh;
+    for (std::size_t c = 0; c < grid.cells.size(); ++c) sh.emplace_back(seed, shared_stream ? 0 : c);
+    recs::Rng strata(recs::mix_seed(seed, 4));
+    Params m = zero;
+    double step = lr;
+    for (int e = 0; e < 3; ++e) {
+      recs::mf_detail::dsgd_epoch(m, grid, sh, strata, step, lambda);
+      step *= decay;
+    }
+    return m;
+  };
+  const auto max_gap = [&](const Params& m) {
+    std::vector<float> sc(ds.n_items());
+    double gap = 0.0;
+    for (recs::UserIdx u = 0; u < ds.n_users(); ++u) {
+      model->score_trained_user(u, sc);
+      for (recs::ItemIdx i = 0; i < ds.n_items(); ++i)
+        gap = std::max(gap, std::abs(sc[i] - recs::mf_detail::predict(m, u, i)));
+    }
+    return gap;
+  };
+  CHECK(max_gap(replay(false)) < 1e-5);  // fit() wires the per-cell streams as documented
+  CHECK(max_gap(replay(true)) > 1e-3);   // a shared stream would be caught
+}
+
+TEST_CASE("MF precision float trains in float and stays close to double", "[mf][dsgd]") {
+  const auto s = recs::synthetic::low_rank_explicit(100, 70, 3, 0.1, 0.3, 0.2, 23);
+  recs::TrainContext ctx;
+  ctx.validation = &s.heldout;
+  ctx.seed = 3;
+  const recs::Config base{{"k", 8}, {"max_epochs", 12}, {"patience", 50}, {"blocks", 4}};
+  recs::Config as_float = base, as_double = base;
+  as_float["precision"] = "float";
+  as_double["precision"] = "double";
+  auto f = recs::make_mf_sgd();
+  auto d = recs::make_mf_sgd();
+  f->fit(s.train, as_float, ctx);
+  d->fit(s.train, as_double, ctx);
+  const auto cf = f->training_curve(), cd = d->training_curve();
+  REQUIRE(cf.size() == cd.size());
+  bool any_bit_difference = false;
+  double worst = 0.0;
+  for (std::size_t e = 0; e < cf.size(); ++e) {
+    any_bit_difference = any_bit_difference || cf[e].second != cd[e].second;
+    worst = std::max(worst, std::abs(cf[e].second - cd[e].second) / cd[e].second);
+  }
+  INFO("worst relative curve difference " << worst);
+  CHECK(any_bit_difference);  // the float path really runs in float
+  CHECK(worst < 1e-4);        // and tracks the double reference closely
+}
+
+TEST_CASE("MF balanced_groups keeps every group within one item's weight of total / b", "[mf][dsgd]") {
+  // Heavily skewed weights (power law), where balancing by count instead of weight fails badly.
+  std::vector<std::uint64_t> w(400);
+  for (std::size_t i = 0; i < w.size(); ++i) w[i] = 1 + 5000 / ((i % 97) + 1);
+  std::uint64_t total = 0, wmax = 0;
+  for (const auto x : w) {
+    total += x;
+    wmax = std::max(wmax, x);
+  }
+  for (const std::uint32_t b : {1u, 2u, 5u, 8u, 16u}) {
+    INFO("b = " << b);
+    recs::Rng rng(4);
+    const auto g = recs::mf_detail::balanced_groups(w, b, rng);
+    std::vector<std::uint64_t> gw(b, 0);
+    for (std::size_t i = 0; i < w.size(); ++i) {
+      REQUIRE(g[i] < b);
+      gw[g[i]] += w[i];
+    }
+    const double target = static_cast<double>(total) / b;
+    for (std::uint32_t j = 0; j < b; ++j) {
+      INFO("group " << j << " weight " << gw[j] << ", target " << target);
+      CHECK(std::abs(static_cast<double>(gw[j]) - target) <= static_cast<double>(wmax));
+    }
+  }
+  recs::Rng rng(4);
+  CHECK_THROWS_AS(recs::mf_detail::balanced_groups(w, 0, rng), std::invalid_argument);
+}
+
+TEST_CASE("MF trains with more blocks than users or items", "[mf][dsgd]") {
+  // Empty groups and empty cells are fine: those cells are simply skipped.
+  const auto s = recs::synthetic::low_rank_explicit(6, 5, 2, 0.1, 0.8, 0.0, 2);
+  auto model = recs::make_mf_sgd();
+  model->fit(s.train, recs::Config{{"k", 2}, {"max_epochs", 4}, {"blocks", 16}}, recs::TrainContext{});
+  REQUIRE(model->training_curve().size() == 4);
+  CHECK(model->training_curve().back().second < model->training_curve().front().second);
+  std::vector<float> sc(5);
+  model->score(model->fold_in(user_ratings(s.train, 0)), sc);
+  for (const float x : sc) CHECK(std::isfinite(x));
 }
 
 TEST_CASE("MF with blocks = 1 trains exactly like the serial loop", "[mf][dsgd]") {
@@ -1069,13 +1217,11 @@ TEST_CASE("MF float SGD step matches the double-precision step to float rounding
   f.mu = d0.mu;
   // Start the double copy from the float-rounded values, so only the step's rounding differs.
   const auto to_f = [](const std::vector<double>& v) { return std::vector<float>(v.begin(), v.end()); };
-  f.bu = to_f(d0.bu);
-  f.bi = to_f(d0.bi);
+  f.bu = d0.bu;  // biases are double in both
+  f.bi = d0.bi;
   f.P = to_f(d0.P);
   f.Q = to_f(d0.Q);
   Params d = d0;
-  d.bu.assign(f.bu.begin(), f.bu.end());
-  d.bi.assign(f.bi.begin(), f.bi.end());
   d.P.assign(f.P.begin(), f.P.end());
   d.Q.assign(f.Q.begin(), f.Q.end());
   for (const auto& r : ratings) {
@@ -1087,8 +1233,10 @@ TEST_CASE("MF float SGD step matches the double-precision step to float rounding
     for (std::size_t j = 0; j < a.size(); ++j)
       worst = std::max(worst, std::abs(a[j] - double{b[j]}) / std::max(1.0, std::abs(a[j])));
   };
-  cmp(d.bu, f.bu);
-  cmp(d.bi, f.bi);
+  for (std::size_t j = 0; j < d.bu.size(); ++j)
+    worst = std::max(worst, std::abs(d.bu[j] - f.bu[j]) / std::max(1.0, std::abs(d.bu[j])));
+  for (std::size_t j = 0; j < d.bi.size(); ++j)
+    worst = std::max(worst, std::abs(d.bi[j] - f.bi[j]) / std::max(1.0, std::abs(d.bi[j])));
   cmp(d.P, f.P);
   cmp(d.Q, f.Q);
   INFO("worst relative difference " << worst);

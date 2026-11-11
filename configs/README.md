@@ -46,3 +46,39 @@ The four scoring forms on the same validation split, M = 100, λ = 100:
 | unnormalized, positive only (top-N) | 0.0608 | 0.066 |
 | baseline pop_count | 0.0589 | 0.012 |
 | baseline pop (m = 10) | 0.0355 | 0.007 |
+
+## mf
+
+`mf.json` is the ml-latest-small config and pins every key (the code defaults match it).
+
+- `k`, `lambda`, `lr`, `lr_decay`, `max_epochs`, `patience`, `init_sd`, `user_init_sd` were chosen
+  on the validation split for the best RMSE subject to the fold-in parity gate (> 0.9); see the
+  "Convergence and fold-in parity" comment in `core/src/models/mf_sgd.cpp`.
+- `blocks` (DSGD grid side) and `precision` only change speed and, slightly, the update order and
+  rounding. On ml-latest-small validation (split seed 42, seed 42), with the other keys as in
+  `mf.json` and no floor:
+
+| blocks | precision | RMSE | fold-in parity |
+|---|---|---|---|
+| 1 | double | 0.8961 | 0.928 |
+| 8 | double | 0.8955 | 0.916 |
+| 1 | float | 0.8961 | 0.928 |
+| 8 | float | 0.8955 | 0.916 |
+
+- `min_support` (ranking floor) is 0 on ml-latest-small. MF ranks poorly on this dataset:
+  validation NDCG@10 rises with the floor only because the list turns into a popularity list,
+  and with the floor the parity gate (measured on the floored lists) fails for mid-range values.
+  Serial double, same split:
+
+| min_support | NDCG@10 | mean popularity rank @10 | coverage@10 | parity |
+|---|---|---|---|---|
+| 0 | 0.0012 | 5387 | 0.022 | 0.928 |
+| 5 | 0.0040 | 2648 | 0.028 | 0.916 |
+| 10 | 0.0105 | 1224 | 0.034 | 0.897 |
+| 20 | 0.0202 | 479 | 0.033 | 0.885 |
+| 50 | 0.0375 | 138 | 0.022 | 0.888 |
+| 100 | 0.0472 | 44 | 0.010 | 0.925 |
+| 150 | 0.0514 | 17 | 0.004 | 0.949 |
+
+  For comparison, `pop_count` scores 0.0589. The ml-32m floor is chosen from the ml-32m
+  validation sweep (pending).

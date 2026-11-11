@@ -13,16 +13,17 @@
 
 namespace recs::mf_detail {
 
-/// Every trainable parameter of biased MF, stored as T. Row-major factor matrices: P is
-/// n_users x k, Q is n_items x k. mu is fixed (not trained) and always double.
+/// Every trainable parameter of biased MF. The factor matrices are stored as T (row-major: P is
+/// n_users x k, Q is n_items x k); the biases are always double: a popular movie's b_i takes
+/// ~1e5 updates per epoch on ml-32m, and they cost only 8 bytes per update. mu is fixed.
 template <class T>
 struct BasicParams {
   std::uint32_t k = 0;
   double mu = 0.0;
-  std::vector<T> bu;  // n_users
-  std::vector<T> bi;  // n_items
-  std::vector<T> P;   // n_users * k
-  std::vector<T> Q;   // n_items * k
+  std::vector<double> bu;  // n_users
+  std::vector<double> bi;  // n_items
+  std::vector<T> P;        // n_users * k
+  std::vector<T> Q;        // n_items * k
 };
 /// Double precision: the reference the gradient gates check, and training with precision
 /// "double".
@@ -46,8 +47,9 @@ Params gradient(const Params& m, std::span<const Triplet> ratings, double lambda
 
 /// One SGD step on one rating: theta <- theta - lr * d(per-rating loss)/d(theta), with every
 /// partial derivative taken at the old parameter values (simultaneous update).
-/// The arithmetic is done in T (lr and lambda rounded to T): for Params this is the double-precision
-/// reference step; for FloatParams the same formula in float.
+/// The factor arithmetic is done in T (lr and lambda rounded to T), the bias updates in double: for
+/// Params this is the double-precision reference step; for FloatParams the factor part runs in
+/// float.
 template <class T>
 void sgd_step(BasicParams<T>& m, const Triplet& rating, double lr, double lambda);
 
@@ -105,7 +107,9 @@ class RecordShuffler {
 
 /// Splits items 0..n-1 into `b` groups with about equal total weight (weight = rating count):
 /// visit them in a seeded random order and cut the running total into b equal parts. Returns
-/// the group of each item. Deterministic in `rng`'s state.
+/// the group of each item. Deterministic in `rng`'s state. Requires b >= 1. Each group's weight is
+/// within one item's weight of total / b (it holds the items whose running total starts inside
+/// its b-th of the range).
 std::vector<std::uint32_t> balanced_groups(std::span<const std::uint64_t> weight, std::uint32_t b, Rng& rng);
 
 /// The ratings cut into b x b cells: cell (ub, ib) holds the ratings of users in user group ub on
@@ -124,7 +128,9 @@ struct BlockGrid {
 BlockGrid make_block_grid(std::span<const SgdRating> csr, std::uint32_t n_users, std::uint32_t n_items,
                           std::uint32_t b, std::uint64_t seed);
 
-/// One DSGD epoch: b sub-epochs. The order of the b "strata" is a fresh seeded permutation
+/// One DSGD epoch: b sub-epochs. Requires cell_shufflers.size() == grid.cells.size() (checked).
+/// The parallel body must not throw (an exception escaping an OpenMP region terminates the
+/// program); nothing in it allocates or throws today. The order of the b "strata" is a fresh seeded permutation
 /// `offsets` each epoch (drawn from `stratum_rng`); in the sub-epoch with offset o, cell
 /// (g, (g + o) mod b) for every g = 0..b-1 is shuffled with its own RecordShuffler (stream =
 /// cell index) and then run through sgd_epoch, the b cells in parallel (static OpenMP schedule).
