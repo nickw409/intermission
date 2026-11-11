@@ -92,6 +92,21 @@
 //   about 0.002; the user+item bias baseline is 0.894). The many users with few ratings (small
 //   lambda n) are the slow ones. No ml-32m config is chosen yet (pending an owner decision).
 //
+// Ranking floor (min_support)
+//   MF is fit to predict star ratings, and the squared loss says nothing about which movies to put
+//   in a top-10. A movie with a handful of ratings has a b_i and q_i fit to that handful: shrunk
+//   towards 0 by lambda, but still noisy, and a few enthusiastic ratings make it look like a 4.5
+//   for everybody. Ranking the whole catalog by predicted rating therefore fills top-10 lists with
+//   obscure movies, which is why MF's NDCG@10 is near zero while its RMSE is good (Koren 2008 and
+//   Cremonesi, Koren & Turrin 2010 show the same gap between rating accuracy and top-N accuracy).
+//   So MF only recommends movies with at least `min_support` training ratings, the same rule
+//   item-KNN uses for its neighbour lists. It is applied in mask_unrankable(), after score():
+//   training, fold-in and the predicted ratings (RMSE/MAE, explanations) are unchanged, and only
+//   the ranking skips the rarely rated movies. min_support = 0 ranks every movie, including ones
+//   with no training ratings (those score the user's baseline mu + b_u). The per-item training
+//   counts are saved with the model. min_support is chosen on validation NDCG@10 per dataset
+//   (configs/README.md).
+//
 // Explanations
 //   x is linear in the residuals, x = W^{-1} sum_j z_j s_j with W = sum_j z_j z_j^T + lambda n I.
 //   So the personalised part of the score splits exactly into one term per rated item:
@@ -107,6 +122,8 @@
 //   Y. Koren, R. Bell, C. Volinsky, "Matrix Factorization Techniques for Recommender Systems",
 //     IEEE Computer 42(8), 2009.
 //   S. Funk, "Netflix Update: Try This at Home", 2006 (the SGD recipe).
+//   P. Cremonesi, Y. Koren, R. Turrin, "Performance of Recommender Algorithms on Top-N
+//     Recommendation Tasks", RecSys 2010 (rating accuracy vs top-N accuracy).
 //   Y. Koren, R. Bell, "Advances in Collaborative Filtering", Recommender Systems Handbook, 2011.
 //   Y. Yao, L. Rosasco, A. Caponnetto, "On Early Stopping in Gradient Descent Learning",
 //     Constructive Approximation 26(2), 2007.
@@ -233,11 +250,12 @@ struct MfConfig {
   int patience = 50;
   double init_sd = 0.05;      // item factors
   double user_init_sd = 0.0;  // user factors (0: start inside the span of the rated items' factors)
+  std::uint32_t min_support = 20;  // ranking floor: training ratings a movie needs to be recommended
 
   Config to_json() const {
     return Config{{"k", k},           {"lambda", lambda},     {"lr", lr},
                   {"lr_decay", lr_decay}, {"max_epochs", max_epochs}, {"patience", patience},
-                  {"init_sd", init_sd},   {"user_init_sd", user_init_sd}};
+                  {"init_sd", init_sd},   {"user_init_sd", user_init_sd}, {"min_support", min_support}};
   }
 };
 
@@ -258,8 +276,8 @@ MfConfig parse_config(const Config& cfg) {
   MfConfig c;
   if (cfg.is_null()) return c;
   if (!cfg.is_object()) throw std::invalid_argument("mf config must be a JSON object");
-  static const char* const known[] = {"k",          "lambda",   "lr",      "lr_decay",
-                                      "max_epochs", "patience", "init_sd", "user_init_sd"};
+  static const char* const known[] = {"k",          "lambda",   "lr",      "lr_decay",    "max_epochs",
+                                      "patience",   "init_sd",  "user_init_sd", "min_support"};
   for (const auto& [key, _] : cfg.items())
     if (std::find(std::begin(known), std::end(known), key) == std::end(known))
       throw std::invalid_argument("mf config: unknown key " + key);
@@ -275,6 +293,11 @@ MfConfig parse_config(const Config& cfg) {
   if (cfg.contains("user_init_sd")) c.user_init_sd = number(cfg, "user_init_sd");
   if (cfg.contains("max_epochs")) c.max_epochs = static_cast<int>(integer(cfg, "max_epochs"));
   if (cfg.contains("patience")) c.patience = static_cast<int>(integer(cfg, "patience"));
+  if (cfg.contains("min_support")) {
+    const auto m = integer(cfg, "min_support");
+    if (m < 0 || m > 0xFFFFFFFFLL) throw std::invalid_argument("mf config: min_support must be in [0, 2^32 - 1]");
+    c.min_support = static_cast<std::uint32_t>(m);
+  }
   if (!(c.lambda >= 0.0 && std::isfinite(c.lambda))) throw std::invalid_argument("mf config: lambda must be >= 0");
   if (!(c.lr > 0.0 && std::isfinite(c.lr))) throw std::invalid_argument("mf config: lr must be > 0");
   if (!(c.lr_decay > 0.0 && c.lr_decay <= 1.0)) throw std::invalid_argument("mf config: lr_decay must be in (0, 1]");
@@ -291,8 +314,12 @@ MfConfig parse_config(const Config& cfg) {
 static_assert(std::endian::native == std::endian::little, "artifact I/O assumes a little-endian host");
 
 constexpr char kMagic[8] = {'R', 'E', 'C', 'S', 'M', 'F', '0', '1'};
-constexpr std::uint32_t kFormatVersion = 1;
-// magic, format version, n_items, k
+// Format 2 added the per-item training rating counts (the min_support floor); format 1 files are
+// rejected (retrain to upgrade).
+constexpr std::uint32_t kFormatVersion = 2;
+// item_factors.bin: magic[8] | u32 version | u32 n_items | u32 k | f64 mu | f32 b_i[n_items] |
+// u32 n_ratings[n_items] (training ratings per item) | f32 Q[n_items * k] (row-major).
+// Header: magic, format version, n_items, k.
 constexpr std::uint64_t kHeaderBytes = sizeof(kMagic) + 3 * sizeof(std::uint32_t);
 // Bounds a servable model must meet, checked by save() and load() (not by fit(): training with
 // lambda = 0 is allowed, it just cannot be served). |mu|, |b_i| and every |q_if| are at most
@@ -434,6 +461,8 @@ class MfSgd final : public Model {
     n_items_ = ni;
     bu_.assign(m.bu.begin(), m.bu.end());
     bi_.assign(m.bi.begin(), m.bi.end());
+    n_ratings_.resize(ni);
+    for (std::uint32_t i = 0; i < ni; ++i) n_ratings_[i] = static_cast<std::uint32_t>(train.by_item.row_size(i));
     P_.assign(m.P.begin(), m.P.end());
     Q_.assign(m.Q.begin(), m.Q.end());
     has_users_ = true;
@@ -460,6 +489,13 @@ class MfSgd final : public Model {
   void score(const UserState& u, std::span<float> out) const override {
     if (u.vec.size() != cfg_.k) throw std::invalid_argument("mf score: user vector has the wrong size");
     score_with(u.bias, u.vec.data(), out);
+  }
+
+  // The min_support floor (see "Ranking floor" above); recommend() calls this after score().
+  void mask_unrankable(std::span<float> scores) const override {
+    if (scores.size() != n_items_) throw std::invalid_argument("mf mask: scores.size() != n_items");
+    for (std::uint32_t i = 0; i < n_items_; ++i)
+      if (n_ratings_[i] < cfg_.min_support) scores[i] = -std::numeric_limits<float>::infinity();
   }
 
   void score_trained_user(UserIdx u, std::span<float> out) const override {
@@ -506,6 +542,7 @@ class MfSgd final : public Model {
     put(buf, cfg_.k);
     put(buf, mu_);
     for (const float x : bi_) put(buf, x);
+    for (const std::uint32_t c : n_ratings_) put(buf, c);
     for (const float x : Q_) put(buf, x);
     write_file(dir / "item_factors.bin", buf);
     write_file(dir / "config.json", cfg_.to_json().dump(2) + "\n");
@@ -517,7 +554,10 @@ class MfSgd final : public Model {
     char magic[sizeof(kMagic)];
     for (char& c : magic) c = in.get<char>();
     if (std::memcmp(magic, kMagic, sizeof(kMagic)) != 0) throw std::runtime_error("mf model file: bad magic");
-    if (in.get<std::uint32_t>() != kFormatVersion) throw std::runtime_error("mf model file: unknown version");
+    const auto version = in.get<std::uint32_t>();
+    if (version == 1)
+      throw std::runtime_error("mf model file: format 1 has no per-item rating counts (min_support); retrain");
+    if (version != kFormatVersion) throw std::runtime_error("mf model file: unknown version");
     const auto ni = in.get<std::uint32_t>();
     const auto k = in.get<std::uint32_t>();
     if (k != cfg.k) throw std::runtime_error("mf model file: k does not match config.json");
@@ -526,13 +566,15 @@ class MfSgd final : public Model {
     // corrupt or hostile n_items cannot trigger a huge allocation. No overflow: ni < 2^32 and
     // k <= 4096 (parse_config), so the products stay far below 2^64.
     const std::uint64_t expected = kHeaderBytes + sizeof(double) + sizeof(float) * std::uint64_t{ni} +
-                                   sizeof(float) * std::uint64_t{ni} * k;
+                                   sizeof(std::uint32_t) * std::uint64_t{ni} + sizeof(float) * std::uint64_t{ni} * k;
     if (in.size() != expected) throw std::runtime_error("mf model file: wrong length for its header");
     const auto mu = in.get<double>();
     // Every parameter within kMaxAbsParam (see the comment there).
     if (!param_in_range(mu)) throw std::runtime_error("mf model file: mu non-finite or out of range");
     std::vector<float> bi(ni), Q(std::size_t{ni} * k);
+    std::vector<std::uint32_t> counts(ni);
     for (auto& x : bi) x = in.get<float>();
+    for (auto& c : counts) c = in.get<std::uint32_t>();  // any count is valid
     for (auto& x : Q) x = in.get<float>();
     if (!std::all_of(bi.begin(), bi.end(), param_in_range) || !std::all_of(Q.begin(), Q.end(), param_in_range))
       throw std::runtime_error("mf model file: non-finite or out-of-range item parameters");
@@ -542,6 +584,7 @@ class MfSgd final : public Model {
     mu_ = mu;
     n_items_ = ni;
     bi_ = std::move(bi);
+    n_ratings_ = std::move(counts);
     Q_ = std::move(Q);
     n_users_ = 0;
     bu_.clear();
@@ -629,6 +672,7 @@ class MfSgd final : public Model {
   std::uint32_t n_users_ = 0;
   std::uint32_t n_items_ = 0;
   std::vector<float> bu_, bi_;  // biases
+  std::vector<std::uint32_t> n_ratings_;  // training ratings per item (the min_support floor)
   std::vector<float> P_, Q_;    // row-major factors, n_users x k and n_items x k
   bool has_users_ = false;
   std::vector<std::pair<int, double>> curve_;

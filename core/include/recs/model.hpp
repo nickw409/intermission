@@ -10,6 +10,9 @@
 //    fold_in() too, so the website and the evaluator run the same code path.
 //  - score() writes one score per item (out.size() == n_items). Higher is better. NaN is never
 //    allowed; use -infinity for "cannot score".
+//  - mask_unrankable() sets -infinity for items the model never recommends (a ranking rule such
+//    as MF's min_support floor). recommend() applies it after score(); score() itself stays the
+//    model's full prediction, so rating metrics (RMSE/MAE) are unaffected.
 //  - explain() only ever cites items present in u.ratings.
 //  - save()/load() use only files inside `dir` (created by the caller).
 #pragma once
@@ -74,6 +77,9 @@ class Model {
   virtual UserState fold_in(std::span<const Rating> ratings) const = 0;
   virtual void score(const UserState& u, std::span<float> out) const = 0;
   virtual Explanation explain(const UserState& u, ItemIdx item) const = 0;
+  /// Ranking-only mask: set scores[i] = -infinity for every item this model will not recommend
+  /// (scores.size() == n_items()). The default ranks everything.
+  virtual void mask_unrankable(std::span<float> scores) const { (void)scores; }
   virtual void save(const fs::path& dir) const = 0;
   virtual void load(const fs::path& dir) = 0;
 
@@ -109,9 +115,10 @@ class Model {
   virtual bool supports_similar() const { return false; }
 };
 
-/// Shared top-k: score every item, mask `exclude` (and every item in u.ratings), take the k best
-/// with nth_element, then sort. Order: score descending, then ItemIdx ascending (deterministic
-/// ties). Items scored -infinity are never returned, so the result may be shorter than k.
+/// Shared top-k: score every item, apply m.mask_unrankable(), mask `exclude` (and every item in
+/// u.ratings), take the k best with nth_element, then sort. Order: score descending, then ItemIdx
+/// ascending (deterministic ties). Items scored -infinity are never returned, so the result may be
+/// shorter than k.
 std::vector<Scored> recommend(const Model& m, const UserState& u, std::size_t k,
                               std::span<const ItemIdx> exclude = {});
 

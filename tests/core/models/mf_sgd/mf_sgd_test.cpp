@@ -480,9 +480,9 @@ TEST_CASE("MF treats a validation set with no usable ratings as no validation", 
 
 namespace {
 
-// item_factors.bin layout: magic[8] | u32 version | u32 n_items | u32 k | f64 mu | f32 b_i[n] |
-// f32 Q[n * k]
-constexpr std::size_t kOffNItems = 12, kOffMu = 20, kOffBi = 28;
+// item_factors.bin layout (format 2): magic[8] | u32 version | u32 n_items | u32 k | f64 mu |
+// f32 b_i[n] | u32 n_ratings[n] | f32 Q[n * k]
+constexpr std::size_t kOffVersion = 8, kOffNItems = 12, kOffMu = 20, kOffBi = 28;
 
 std::string slurp(const std::filesystem::path& p) {
   std::ifstream in(p, std::ios::binary);
@@ -508,7 +508,7 @@ TEST_CASE("MF load rejects hostile or corrupt model files", "[mf]") {
   const auto bin = dir / "item_factors.bin";
   const auto cfg = dir / "config.json";
   const std::string good_bin = slurp(bin), good_cfg = slurp(cfg);
-  REQUIRE(good_bin.size() == 28 + 4 * 20 + 4 * 20 * 3);
+  REQUIRE(good_bin.size() == 28 + 4 * 20 + 4 * 20 + 4 * 20 * 3);
 
   const auto rejects = [&](const std::string& b, const std::string& c) {
     spit(bin, b);
@@ -552,6 +552,11 @@ TEST_CASE("MF load rejects hostile or corrupt model files", "[mf]") {
     poke<float>(b, b.size() - 4, inf);
     CHECK(rejects(b, good_cfg));
   }
+  SECTION("format 1 (no per-item rating counts) is rejected") {
+    auto b = good_bin;
+    poke<std::uint32_t>(b, kOffVersion, 1u);
+    CHECK(rejects(b, good_cfg));
+  }
   SECTION("trailing bytes") {
     CHECK(rejects(good_bin + '\0', good_cfg));
   }
@@ -593,6 +598,8 @@ TEST_CASE("MF rejects invalid configs", "[mf]") {
   for (const auto& bad : {recs::Config{{"k", 0}}, recs::Config{{"lr", -1.0}},
                           recs::Config{{"lambda", -0.1}}, recs::Config{{"lr_decay", 0.0}},
                           recs::Config{{"max_epochs", 0}}, recs::Config{{"user_init_sd", -0.1}},
+                          recs::Config{{"min_support", -1}}, recs::Config{{"min_support", 2.5}},
+                          recs::Config{{"min_support", 5000000000LL}},
                           recs::Config{{"bogus", 1}}}) {
     INFO(bad.dump());
     auto model = recs::make_mf_sgd();
@@ -718,4 +725,114 @@ TEST_CASE("MF save/load round-trips fold-in scores exactly", "[mf]") {
     if (e.path().extension() == ".bin") std::filesystem::resize_file(e.path(), 20);
   auto broken = recs::make_mf_sgd();
   CHECK_THROWS(broken->load(dir.path()));
+}
+
+// --- Ranking floor (min_support) ----------------------------------------------------------
+
+namespace {
+
+// Synthetic ratings thinned so that item i keeps at most i % 12 of its ratings (in user order):
+// training counts then run from 0 to 11, so a floor of 6 removes about half of the catalog and
+// some movies have no training ratings at all.
+recs::Dataset uneven_items() {
+  const auto s = recs::synthetic::low_rank_explicit(80, 60, 3, 0.1, 0.3, 0.0, 31);
+  std::vector<recs::Triplet> kept;
+  std::vector<std::uint32_t> taken(60, 0);
+  for (recs::UserIdx u = 0; u < 80; ++u)
+    for (const auto& r : user_ratings(s.train, u))
+      if (taken[r.item] < r.item % 12) {
+        ++taken[r.item];
+        kept.push_back({u, r.item, r.value, r.ts});
+      }
+  return recs::make_dataset("mf-uneven", 80, 60, std::move(kept));
+}
+
+std::vector<std::uint32_t> item_counts(const recs::Dataset& ds) {
+  std::vector<std::uint32_t> c(ds.n_items());
+  for (recs::ItemIdx i = 0; i < ds.n_items(); ++i) c[i] = static_cast<std::uint32_t>(ds.by_item.row_size(i));
+  return c;
+}
+
+}  // namespace
+
+// The floor is a ranking rule: recommend() never returns a movie with fewer than min_support
+// training ratings, while fit(), fold-in and score() (the predicted ratings behind RMSE) are
+// exactly what they are without it.
+TEST_CASE("MF min_support: recommend() skips movies below the floor; predictions are unchanged",
+          "[mf][gate]") {
+  const auto train = uneven_items();
+  const auto counts = item_counts(train);
+  const std::uint32_t floor = 6;
+  const auto below = std::count_if(counts.begin(), counts.end(), [&](std::uint32_t c) { return c < floor; });
+  REQUIRE(below >= 5);                                     // the floor bites
+  REQUIRE(below <= static_cast<std::ptrdiff_t>(counts.size()) - 20);  // and leaves plenty to rank
+  REQUIRE(std::count(counts.begin(), counts.end(), 0u) >= 1);  // and an unrated item exists
+
+  const recs::Config base{{"k", 4}, {"max_epochs", 20}};
+  recs::Config with_floor = base;
+  with_floor["min_support"] = floor;
+  recs::Config no_floor = base;
+  no_floor["min_support"] = 0;
+  auto plain = recs::make_mf_sgd();
+  auto floored = recs::make_mf_sgd();
+  plain->fit(train, no_floor, recs::TrainContext{});
+  floored->fit(train, with_floor, recs::TrainContext{});
+  CHECK(floored->config().at("min_support") == floor);
+  CHECK(plain->config().at("min_support") == 0);
+
+  std::vector<float> a(60), b(60), ta(60), tb(60);
+  for (recs::UserIdx u = 0; u < 80; ++u) {
+    INFO("user " << u);
+    const auto rs = user_ratings(train, u);
+    const auto sa = plain->fold_in(rs);
+    const auto sb = floored->fold_in(rs);
+    plain->score(sa, a);
+    floored->score(sb, b);
+    CHECK(a == b);  // identical training and predictions
+    plain->score_trained_user(u, ta);
+    floored->score_trained_user(u, tb);
+    CHECK(ta == tb);
+
+    // The floored list is the unfloored list with the below-floor movies removed, in order.
+    std::vector<recs::ItemIdx> expect;
+    for (const auto& x : recs::recommend(*plain, sa, 60))
+      if (counts[x.item] >= floor) expect.push_back(x.item);
+    std::vector<recs::ItemIdx> got;
+    for (const auto& x : recs::recommend(*floored, sb, 60)) {
+      CHECK(counts[x.item] >= floor);
+      got.push_back(x.item);
+    }
+    CHECK(got == expect);
+  }
+}
+
+TEST_CASE("MF min_support 0 ranks every movie, including ones never rated in training", "[mf]") {
+  const auto train = uneven_items();
+  const auto counts = item_counts(train);
+  auto model = recs::make_mf_sgd();
+  model->fit(train, recs::Config{{"k", 4}, {"max_epochs", 5}, {"min_support", 0}}, recs::TrainContext{});
+  const auto list = recs::recommend(*model, model->fold_in({}), 60);
+  CHECK(list.size() == 60);
+  bool has_unrated = false;
+  for (const auto& x : list) has_unrated = has_unrated || counts[x.item] == 0;
+  CHECK(has_unrated);
+}
+
+TEST_CASE("MF save/load keeps the min_support floor", "[mf]") {
+  const auto train = uneven_items();
+  const auto counts = item_counts(train);
+  auto model = recs::make_mf_sgd();
+  model->fit(train, recs::Config{{"k", 4}, {"max_epochs", 10}, {"min_support", 6}}, recs::TrainContext{});
+  recs::testing::TempDir dir("mf-floor");
+  model->save(dir.path());
+  auto loaded = recs::make_mf_sgd();
+  loaded->load(dir.path());
+  CHECK(loaded->config() == model->config());
+  for (recs::UserIdx u = 0; u < 80; ++u) {
+    const auto rs = user_ratings(train, u);
+    const auto want = recs::recommend(*model, model->fold_in(rs), 60);
+    const auto got = recs::recommend(*loaded, loaded->fold_in(rs), 60);
+    CHECK(got == want);
+    for (const auto& x : got) CHECK(counts[x.item] >= 6);
+  }
 }

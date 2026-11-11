@@ -1,7 +1,8 @@
 // recommend(): the shared top-k used by every model, the evaluator and recs-model.
 //
 // 1. Score every item with the model (one float per item).
-// 2. Mask: items in `exclude` and every item the user has rated get -infinity. Out-of-range
+// 2. Mask: the model's own ranking mask (Model::mask_unrankable, e.g. MF's min_support floor),
+//    items in `exclude` and every item the user has rated get -infinity. Out-of-range
 //    exclude entries are ignored (e.g. a movie the current artifact does not know).
 // 3. Candidates are the items whose score is not -infinity ("cannot score" or masked).
 // 4. Partial selection: std::nth_element puts the k best candidates first in O(n), then only those
@@ -27,6 +28,7 @@ std::vector<Scored> recommend(const Model& m, const UserState& u, std::size_t k,
   if (k == 0 || n == 0) return {};
   std::vector<float> scores(n);
   m.score(u, scores);
+  m.mask_unrankable(scores);
 
   constexpr float kNegInf = -std::numeric_limits<float>::infinity();
   for (ItemIdx i : exclude) {
