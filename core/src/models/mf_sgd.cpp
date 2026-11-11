@@ -23,9 +23,19 @@
 // Training
 //   - Initialisation: biases 0; factors N(0, init_sd^2), except that users and items with no
 //     training ratings get zero factors (they would otherwise keep pure noise forever).
-//   - Each epoch visits every rating once in an order given by a seeded Fisher-Yates shuffle
-//     (mf_detail::EpochShuffler: one recs::Rng(mix_seed(seed, 2)) stream for the run, each epoch
-//     re-shuffling the previous permutation), then multiplies the learning rate by lr_decay.
+//   - Each epoch visits every rating once in a seeded Fisher-Yates order, then multiplies the
+//     learning rate by lr_decay. The order is defined by mf_detail::EpochShuffler (one
+//     recs::Rng(mix_seed(seed, 2)) stream for the run, each epoch re-shuffling the previous
+//     permutation); fit() applies the same swaps to the rating records themselves
+//     (mf_detail::RecordShuffler), which yields the same sequence of ratings.
+//   - Speed: the loop is bound by memory latency, not arithmetic (each update reads one random
+//     user row and one random item row; on ml-32m P and Q are far larger than the caches).
+//     Shuffling 12-byte records in place lets each epoch read the ratings sequentially instead of
+//     gathering them through an index, and mf_detail::sgd_epoch prefetches the parameter rows a
+//     few ratings ahead. Neither changes any arithmetic: results are bit-identical to the plain
+//     index-shuffle loop (a golden test pins them). Measured in PR #57 on ml-32m-sized synthetic
+//     data (k = 64, one thread): 15.8 s per epoch before, 6.3 s after. Bit-identity assumes the
+//     project's flags (no -ffast-math, no -march that enables FMA contraction).
 //   - Early stopping: with a validation set (ctx.validation), the RMSE on it is measured after each
 //     epoch; training stops after `patience` epochs without improvement and the parameters of the
 //     best epoch are restored. Without one, or when none of its ratings is
@@ -164,6 +174,35 @@ void sgd_step(Params& m, const Triplet& rating, double lr, double lambda) {
   add_rating_gradient(e, m.bu[u], m.bi[i], p, q, m.k, lambda, -lr, m.bu[u], m.bi[i], p, q);
 }
 
+void sgd_epoch(Params& m, std::span<const SgdRating> in_order, double lr, double lambda) {
+  const std::size_t n = in_order.size();
+  const std::uint32_t k = m.k;
+  for (std::size_t j = 0; j < n; ++j) {
+    if (j + kPrefetchAhead < n) {
+      // Hints only (no effect on results): the rows rating j + kPrefetchAhead will touch.
+      const SgdRating& ahead = in_order[j + kPrefetchAhead];
+      const double* p = m.P.data() + std::size_t{ahead.row} * k;
+      const double* q = m.Q.data() + std::size_t{ahead.col} * k;
+      // Hints 64 bytes (8 doubles) apart, plus the row's last element: rows are not cache-line
+      // aligned, so a row can end in one more line. GCC/Clang builtin (the project's compilers).
+      for (std::uint32_t f = 0; f < k; f += 8) {
+        __builtin_prefetch(p + f, 1);
+        __builtin_prefetch(q + f, 1);
+      }
+      __builtin_prefetch(p + k - 1, 1);
+      __builtin_prefetch(q + k - 1, 1);
+      __builtin_prefetch(m.bu.data() + ahead.row, 1);
+      __builtin_prefetch(m.bi.data() + ahead.col, 1);
+    }
+    const SgdRating& r = in_order[j];
+    sgd_step(m, Triplet{r.row, r.col, r.value, 0}, lr, lambda);
+  }
+}
+
+RecordShuffler::RecordShuffler(std::uint64_t seed) : rng_(mix_seed(seed, 2)) {}
+
+void RecordShuffler::next(std::span<SgdRating> records) { rng_.shuffle(records.begin(), records.end()); }
+
 EpochShuffler::EpochShuffler(std::size_t n, std::uint64_t seed)
     : rng_(mix_seed(seed, 2)), order_(n) {
   std::iota(order_.begin(), order_.end(), 0u);
@@ -247,6 +286,23 @@ constexpr char kMagic[8] = {'R', 'E', 'C', 'S', 'M', 'F', '0', '1'};
 constexpr std::uint32_t kFormatVersion = 1;
 // magic, format version, n_items, k
 constexpr std::uint64_t kHeaderBytes = sizeof(kMagic) + 3 * sizeof(std::uint32_t);
+// Bounds a servable model must meet, checked by save() and load() (not by fit(): training with
+// lambda = 0 is allowed, it just cannot be served). |mu|, |b_i| and every |q_if| are at most
+// kMaxAbsParam, and lambda (the fold-in ridge, lambda * n) is in [kMinServeLambda, kMaxServeLambda].
+// With those, k <= 4096 and ratings in [0.5, 5], the fold-in solve and every score stay far inside
+// float range. Finite alone is not enough: fuzz_model_load_mf found mu = -1.1e297, and lambda = 0
+// leaves only the 1e-9 ridge floor, either of which overflows fold-in into NaN scores. Trained
+// models are many orders of magnitude inside these bounds (configs/mf.json: lambda 0.05).
+constexpr double kMaxAbsParam = 1e6;
+constexpr double kMinServeLambda = 1e-6;
+constexpr double kMaxServeLambda = 1e6;
+
+bool param_in_range(double x) { return std::abs(x) <= kMaxAbsParam; }  // false for NaN and inf
+
+void check_servable_lambda(double lambda) {
+  if (!(lambda >= kMinServeLambda && lambda <= kMaxServeLambda))
+    throw std::runtime_error("mf model: lambda must be in [1e-6, 1e6] to be served");
+}
 
 template <class T>
 void put(std::string& buf, const T& x) {
@@ -304,22 +360,23 @@ class MfSgd final : public Model {
     const std::uint32_t k = cfg_.k;
     const std::uint32_t nu = train.n_users(), ni = train.n_items();
 
-    // Every training rating as a triplet, in CSR order (the shuffle permutes indices into this).
-    std::vector<Triplet> ratings;
-    ratings.reserve(train.n_ratings());
+    // Every training rating as a compact record, starting in CSR order; the epochs shuffle this
+    // vector in place (RecordShuffler).
+    std::vector<mf_detail::SgdRating> order;
+    order.reserve(train.n_ratings());
     double sum = 0.0;
     for (std::uint32_t u = 0; u < nu; ++u) {
       const auto items = train.by_user.row_indices(u);
       const auto vals = train.by_user.row_values(u);
       for (std::size_t j = 0; j < items.size(); ++j) {
-        ratings.push_back({u, items[j], vals[j], 0});
+        order.push_back({u, items[j], vals[j]});
         sum += vals[j];
       }
     }
 
     Params m;
     m.k = k;
-    m.mu = ratings.empty() ? 0.0 : sum / static_cast<double>(ratings.size());
+    m.mu = order.empty() ? 0.0 : sum / static_cast<double>(order.size());
     m.bu.assign(nu, 0.0);
     m.bi.assign(ni, 0.0);
     m.P.assign(std::size_t{nu} * k, 0.0);
@@ -339,17 +396,18 @@ class MfSgd final : public Model {
     curve_metric_ = validation != nullptr ? "val_rmse" : "train_rmse";
     curve_.clear();
 
-    mf_detail::EpochShuffler shuffler(ratings.size(), ctx.seed);
+    mf_detail::RecordShuffler shuffler(ctx.seed);
 
     Params best = m;
     double best_rmse = std::numeric_limits<double>::infinity();
     int since_best = 0;
     double lr = cfg_.lr;
     for (int epoch = 1; epoch <= cfg_.max_epochs; ++epoch) {
-      for (const std::uint32_t idx : shuffler.next()) mf_detail::sgd_step(m, ratings[idx], lr, cfg_.lambda);
+      shuffler.next(order);
+      mf_detail::sgd_epoch(m, order, lr, cfg_.lambda);
       lr *= cfg_.lr_decay;
 
-      const double rmse = validation != nullptr ? validation_rmse(m, *validation) : train_rmse(m, ratings);
+      const double rmse = validation != nullptr ? validation_rmse(m, *validation) : train_rmse(m, train);
       if (!std::isfinite(rmse))
         throw std::runtime_error("mf: training diverged at epoch " + std::to_string(epoch) +
                                  " (lower lr or raise lambda)");
@@ -386,6 +444,10 @@ class MfSgd final : public Model {
     const auto x = solve_user(ratings, std::nullopt);
     st.bias = x[0];
     for (std::uint32_t f = 0; f < k; ++f) st.vec[f] = static_cast<float>(x[f + 1]);
+    // Defensive: the save/load bounds keep this finite; never hand score() an inf/NaN state.
+    if (!std::isfinite(st.bias)) throw std::runtime_error("mf: fold-in produced a non-finite user bias");
+    for (const float v : st.vec)
+      if (!std::isfinite(v)) throw std::runtime_error("mf: fold-in produced a non-finite user vector");
     return st;
   }
 
@@ -426,6 +488,11 @@ class MfSgd final : public Model {
   }
 
   void save(const fs::path& dir) const override {
+    // The bounds load() enforces, so an unservable model fails here, at train time.
+    check_servable_lambda(cfg_.lambda);
+    if (!param_in_range(mu_) || !std::all_of(bi_.begin(), bi_.end(), param_in_range) ||
+        !std::all_of(Q_.begin(), Q_.end(), param_in_range))
+      throw std::runtime_error("mf model: parameters non-finite or out of range; not saved");
     std::string buf;
     buf.append(kMagic, sizeof(kMagic));
     put(buf, kFormatVersion);
@@ -448,6 +515,7 @@ class MfSgd final : public Model {
     const auto ni = in.get<std::uint32_t>();
     const auto k = in.get<std::uint32_t>();
     if (k != cfg.k) throw std::runtime_error("mf model file: k does not match config.json");
+    check_servable_lambda(cfg.lambda);
     // Check the exact length implied by the header before allocating anything from it, so a
     // corrupt or hostile n_items cannot trigger a huge allocation. No overflow: ni < 2^32 and
     // k <= 4096 (parse_config), so the products stay far below 2^64.
@@ -455,13 +523,13 @@ class MfSgd final : public Model {
                                    sizeof(float) * std::uint64_t{ni} * k;
     if (in.size() != expected) throw std::runtime_error("mf model file: wrong length for its header");
     const auto mu = in.get<double>();
-    if (!std::isfinite(mu)) throw std::runtime_error("mf model file: non-finite mu");
+    // Every parameter within kMaxAbsParam (see the comment there).
+    if (!param_in_range(mu)) throw std::runtime_error("mf model file: mu non-finite or out of range");
     std::vector<float> bi(ni), Q(std::size_t{ni} * k);
     for (auto& x : bi) x = in.get<float>();
     for (auto& x : Q) x = in.get<float>();
-    const auto finite = [](float x) { return std::isfinite(x); };
-    if (!std::all_of(bi.begin(), bi.end(), finite) || !std::all_of(Q.begin(), Q.end(), finite))
-      throw std::runtime_error("mf model file: non-finite item parameters");
+    if (!std::all_of(bi.begin(), bi.end(), param_in_range) || !std::all_of(Q.begin(), Q.end(), param_in_range))
+      throw std::runtime_error("mf model file: non-finite or out-of-range item parameters");
     if (!in.at_end()) throw std::runtime_error("mf model file: trailing bytes");
 
     cfg_ = cfg;
@@ -501,14 +569,20 @@ class MfSgd final : public Model {
     return std::sqrt(sse / static_cast<double>(n));
   }
 
-  static double train_rmse(const Params& m, const std::vector<Triplet>& ratings) {
-    if (ratings.empty()) return 0.0;
+  // Over the training matrix in CSR order (user, then item ascending), so the sum's order never
+  // depends on the epoch shuffle.
+  static double train_rmse(const Params& m, const Dataset& train) {
+    if (train.n_ratings() == 0) return 0.0;
     double sse = 0.0;
-    for (const auto& r : ratings) {
-      const double e = r.value - mf_detail::predict(m, r.row, r.col);
-      sse += e * e;
+    for (std::uint32_t u = 0; u < train.n_users(); ++u) {
+      const auto items = train.by_user.row_indices(u);
+      const auto vals = train.by_user.row_values(u);
+      for (std::size_t j = 0; j < items.size(); ++j) {
+        const double e = vals[j] - mf_detail::predict(m, u, items[j]);
+        sse += e * e;
+      }
     }
-    return std::sqrt(sse / static_cast<double>(ratings.size()));
+    return std::sqrt(sse / static_cast<double>(train.n_ratings()));
   }
 
   // lambda * n (the per-rating penalty summed over the user's n ratings), floored so that the

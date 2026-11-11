@@ -6,6 +6,13 @@
 #   - /api/* and /healthz reach recs-api with Host preserved
 #   - a 65 KB body to /api/* gets 413 from Caddy
 #   - the only host binding is 127.0.0.1
+#   - security audit fixes: gzip only (no zstd), unknown /assets/* is 404, recs-api's sandbox
+#     CSP survives on /api/posters/*, no h2c, a stalled body gets security headers and a close
+#     (its 499 status is the tracked expected failure SA3-5b, see xfail), and the access
+#     log holds no query strings, headers or cookies but does hold the request id, which is
+#     set on every request (Caddy-made responses included) and matches X-Request-ID
+#
+# EDGE_PROJECT overrides the compose project name, EDGE_PORT the loopback port.
 #
 #   deploy/tests/check_edge.sh <tag>     # needs intermission-{web,api,model}:<tag>
 #
@@ -18,11 +25,14 @@ set -Eeuo pipefail
 tag="${1:?usage: check_edge.sh <tag>}"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 port="${EDGE_PORT:-18081}"
-project=intermission-edgetest
+project="${EDGE_PROJECT:-intermission-edgetest}"
 scratch="$(mktemp -d)"
 fails=0
 fail() { echo "  FAIL: $*" >&2; fails=$((fails + 1)); }
 pass() { echo "  ok: $*"; }
+# xfail ID MESSAGE: a known, tracked open finding. Never counted as a pass; listed in the summary.
+xfails=()
+xfail() { echo "  XFAIL [$1, open finding]: $2" >&2; xfails+=("$1"); }
 
 # Scratch data dirs (read-only mounts only; everything writable is a named volume).
 mkdir -p "$scratch/data/artifacts" "$scratch/data/reports" "$scratch/data/backups"
@@ -73,7 +83,8 @@ expect() { # expect NAME VALUE
   local v; v="$(hdr "$scratch/h" "$1")"
   [[ "$v" == "$2" ]] && pass "$1: $v" || fail "$1 is '$v', want '$2'"
 }
-expect Content-Security-Policy "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'"
+site_csp="default-src 'self'; img-src 'self' data:; frame-ancestors 'none'; form-action 'self'; base-uri 'none'"
+expect Content-Security-Policy "$site_csp"
 expect X-Content-Type-Options nosniff
 expect Referrer-Policy strict-origin-when-cross-origin
 v="$(hdr "$scratch/h" Strict-Transport-Security)"
@@ -111,29 +122,176 @@ code="$(get /api/auth/login -X POST "${csrf[@]}" --data-binary '{"username": "x"
 head -c 66560 /dev/zero | tr '\0' 'a' > "$scratch/big"
 code="$(get /api/auth/login -X POST "${csrf[@]}" --data-binary "@$scratch/big")"
 [[ "$code" == 413 ]] && pass "65 KB body -> 413" || fail "65 KB body returned $code"
+# Caddy's own 413 must look like recs-api's: the public Error shape, the security headers,
+# no Server header, an X-Request-ID.
+grep -q '"code":"body_too_large"' "$scratch/b" && [[ "$(hdr "$scratch/h" Content-Type)" == application/json* ]] \
+  && pass "413 body is the Error shape (body_too_large)" || fail "413 body is not the Error shape: $(head -c 200 "$scratch/b")"
+[[ "$(hdr "$scratch/h" Content-Security-Policy)" == "$site_csp" && -z "$(hdr "$scratch/h" Server)" && -n "$(hdr "$scratch/h" X-Request-ID)" ]] \
+  && pass "413 has the site CSP, security headers and X-Request-ID, no Server" || fail "413 headers: CSP '$(hdr "$scratch/h" Content-Security-Policy)', Server '$(hdr "$scratch/h" Server)', X-Request-ID '$(hdr "$scratch/h" X-Request-ID)'"
+[[ "$(hdr "$scratch/h" Cache-Control)" == no-store ]] && pass "413 is Cache-Control: no-store" || fail "413 Cache-Control is '$(hdr "$scratch/h" Cache-Control)'"
 head -c 65000 /dev/zero | tr '\0' 'a' > "$scratch/big"
 code="$(get /api/auth/login -X POST "${csrf[@]}" --data-binary "@$scratch/big")"
 [[ "$code" == 413 ]] && pass "65,000-byte body -> 413" || fail "65,000-byte body returned $code"
 
-echo "== compression"
+echo "== compression (gzip only: SA4-2, zstd disabled until Caddy ships a fixed klauspost/compress)"
 asset="$(grep -o '/assets/[^"]*\.js' "$(get / >/dev/null; echo "$scratch/b")" | head -n 1 || true)"
 if [[ -n "$asset" ]]; then
   get "$asset" -H 'Accept-Encoding: zstd, gzip' >/dev/null
   enc="$(hdr "$scratch/h" Content-Encoding)"
-  [[ "$enc" == zstd || "$enc" == gzip ]] && pass "$asset served with Content-Encoding: $enc" || fail "$asset not compressed"
+  [[ "$enc" == gzip ]] && pass "$asset served with Content-Encoding: gzip" || fail "$asset Content-Encoding is '$enc', want gzip"
+  get "$asset" -H 'Accept-Encoding: zstd' >/dev/null
+  enc="$(hdr "$scratch/h" Content-Encoding)"
+  [[ -z "$enc" ]] && pass "zstd-only client gets an uncompressed response" || fail "zstd-only client got Content-Encoding '$enc'"
 else
   fail "no JS asset referenced from index.html"
 fi
 
-echo "== access log is JSON without cookies"
-get /api/me -H 'Cookie: session=edgetest-secret-cookie' >/dev/null
+echo "== unknown /assets/* is a 404, not the SPA (SA3-3)"
+code="$(get /assets/does-not-exist-0123456789.js)"
+[[ "$code" == 404 ]] && pass "missing asset -> 404" || fail "missing asset returned $code"
+grep -qi '<!doctype html' "$scratch/b" && fail "missing asset served index.html" || pass "missing asset is not index.html"
+[[ "$(hdr "$scratch/h" Cache-Control)" == *immutable* ]] && fail "missing asset cached as immutable" || pass "missing asset not cached as immutable"
+[[ -n "$(hdr "$scratch/h" Content-Security-Policy)" ]] && pass "missing asset has security headers" || fail "missing asset lacks CSP"
+
+echo "== recs-api's sandbox CSP kept on posters (SA5-7)"
+code="$(get /api/posters/1)"
+[[ "$code" == 200 ]] && pass "/api/posters/1 -> 200" || fail "/api/posters/1 returned $code"
+expect Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; sandbox"
+get /api/me >/dev/null
+expect Content-Security-Policy "$site_csp"
+
+echo "== HTTP/1.1 only: no h2c (SA3-1)"
+ver="$(curl -s -o /dev/null --max-time 5 --http2-prior-knowledge -w '%{http_version}' -H "Host: $host" "$base/" || true)"
+[[ "$ver" != 2 ]] && pass "h2c prior knowledge refused (http_version '$ver')" || fail "h2c prior knowledge accepted"
+ver="$(curl -s -o /dev/null --max-time 5 --http2 -w '%{http_version}' -H "Host: $host" "$base/" || true)"
+[[ "$ver" == 1.1 ]] && pass "h2c upgrade ignored, served HTTP/1.1" || fail "h2c upgrade gave http_version '$ver'"
+
+echo "== stalled request body (SA3-5)"
+# Send headers announcing 100 bytes, then 10 bytes, then stall past read_body (15 s). The
+# client must get a 408 with the security headers or a clean close, never a 499.
+stall="$(python3 -I - "$port" "$host" <<'PY'
+import socket, sys
+port, host = int(sys.argv[1]), sys.argv[2]
+s = socket.create_connection(("127.0.0.1", port), timeout=30)
+s.sendall((f"POST /api/auth/login HTTP/1.1\r\nHost: {host}\r\nOrigin: http://{host}\r\n"
+           "X-Requested-With: recs\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n"
+           '{"username"').encode())
+data = b""
+try:
+    while True:
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        data += chunk
+except socket.timeout:
+    pass
+print(data.decode("latin-1"))
+PY
+)"
+status="$(head -n 1 <<<"$stall" | tr -d '\r')"
+# Expected failure, tracked as open finding SA3-5b (owner decision): the wanted outcome is a
+# 408 or a clean close, but Caddy 2.11.9's reverse_proxy writes this 499 itself when the
+# request context is cancelled, bypassing handle_errors (see the Caddyfile). Which status the
+# client sees is a race between Caddy's read_body timeout and recs-api's own 15 s ReadTimeout.
+# recs-api always answers the truncated body with 400 at 15 s (seen in its log for every
+# stalled request); the client then gets 499 when Caddy's timeout fires first, 504 (through
+# handle_errors) when Caddy treats the upstream as timed out, or recs-api's 400 when it
+# reaches Caddy just before Caddy's own timeout. All three were observed (400 rarely, in CI).
+# Each is reported as XFAIL, never as a pass; any other wrong answer fails; and the wanted
+# outcome itself fails as XPASS, so this check must be updated (and SA3-5b closed) the moment
+# the behaviour changes.
+if [[ "$status" == "HTTP/1.1 499"* || "$status" == "HTTP/1.1 504"* || "$status" == "HTTP/1.1 400"* ]]; then
+  xfail "SA3-5b" "stalled body answered '$status', want 408 or a clean close (Caddy/recs-api timeout race)"
+elif [[ -z "$status" || "$status" == "HTTP/1.1 408"* ]]; then
+  fail "XPASS: stalled body now gives '${status:-a clean close}'; SA3-5b looks fixed: make this a normal pass and close the finding"
+else
+  fail "stalled body answered '$status'"
+fi
+if [[ -n "$status" ]]; then
+  grep -qi '^Content-Security-Policy:' <<<"$stall" && pass "stalled-body answer has security headers" || fail "stalled-body answer lacks CSP"
+  grep -qi '^Server:' <<<"$stall" && fail "stalled-body answer has a Server header" || pass "stalled-body answer has no Server header"
+  grep -qi '^Connection: close' <<<"$stall" && pass "stalled-body answer closes the connection" || fail "stalled-body answer keeps the connection open"
+fi
+
+echo "== access log: method, path, status, timing, request id only (SA3-2, SA5-2)"
+get '/api/me?edgecanary=query-canary-7c1e' -H 'Cookie: session=edgetest-secret-cookie' \
+  -H 'X-Edge-Canary: header-canary-5d2b' -H 'User-Agent: ua-canary-9f4a' >/dev/null
 sleep 1
 logs="$(dc logs --no-color caddy 2>&1)"
 grep -q '"logger":"http.log.access' <<<"$logs" && pass "JSON access log lines" || fail "no JSON access log lines"
-grep -q 'edgetest-secret-cookie' <<<"$logs" && fail "cookie value appears in access log" || pass "cookie value not logged"
+for canary in edgetest-secret-cookie query-canary-7c1e header-canary-5d2b ua-canary-9f4a; do
+  grep -q "$canary" <<<"$logs" && fail "'$canary' appears in the caddy log" || pass "'$canary' not logged"
+done
+line="$(grep '"logger":"http.log.access' <<<"$logs" | grep '"/api/me"' | tail -n 1 || true)"
+if [[ -n "$line" ]]; then
+  pass "access log records the path without its query string"
+  for field in '"method":"GET"' '"status":' '"duration":' '"size":' '"request_id":"'; do
+    grep -q "$field" <<<"$line" && pass "access log has $field" || fail "access log lacks $field: $line"
+  done
+  rid="$(hdr "$scratch/h" X-Request-ID)"
+  [[ -n "$rid" ]] && grep -q "\"request_id\":\"$rid\"" <<<"$line" \
+    && pass "access log request_id matches X-Request-ID" || fail "request_id '$rid' not in: $line"
+else
+  fail "no access log line with uri \"/api/me\" (query stripped)"
+fi
+
+echo "== one request id per request, also for responses Caddy makes itself (M2)"
+# logged_rid STATUS: the response's X-Request-ID (from $scratch/h) must be non-empty, appear as
+# request_id in exactly the access-log line of this request, and that line has STATUS.
+logged_rid() {
+  local want="$1" rid line
+  rid="$(hdr "$scratch/h" X-Request-ID)"
+  [[ -n "$rid" ]] || { fail "$want response has no X-Request-ID"; return; }
+  sleep 1
+  line="$(dc logs --no-color caddy 2>&1 | grep '"logger":"http.log.access' | grep -F "\"request_id\":\"$rid\"" || true)"
+  if [[ "$(grep -c . <<<"$line")" == 1 ]] && grep -q "\"status\":$want" <<<"$line"; then
+    pass "$want: access log request_id = X-Request-ID ($rid)"
+  else
+    fail "$want: no single access-log line with request_id '$rid' and status $want: $line"
+  fi
+}
+code="$(get /assets/also-missing-0123.js)"
+[[ "$code" == 404 ]] || fail "missing asset returned $code"
+logged_rid 404
+head -c 66560 /dev/zero | tr '\0' 'a' > "$scratch/big"
+code="$(get /api/auth/login -X POST "${csrf[@]}" --data-binary "@$scratch/big")"
+[[ "$code" == 413 ]] || fail "65 KB body returned $code"
+logged_rid 413
+code="$(get /)"
+logged_rid 200
+# A valid incoming id is kept end to end (recs-api reuses it too); an invalid one is replaced.
+code="$(get /api/me -H 'X-Request-ID: edge-check-req-1234')"
+[[ "$(hdr "$scratch/h" X-Request-ID)" == edge-check-req-1234 ]] && pass "valid incoming X-Request-ID kept" \
+  || fail "valid incoming X-Request-ID became '$(hdr "$scratch/h" X-Request-ID)'"
+code="$(get /api/me -H 'X-Request-ID: bad id <script>')"
+v="$(hdr "$scratch/h" X-Request-ID)"
+[[ -n "$v" && "$v" != *script* && "$v" =~ ^[A-Za-z0-9._-]{1,64}$ ]] && pass "invalid incoming X-Request-ID replaced ($v)" \
+  || fail "invalid incoming X-Request-ID gave '$v'"
+logged_rid 401
+# Two X-Request-ID headers, each valid on its own: neither is trusted; one fresh id is set.
+code="$(get /api/me -H 'X-Request-ID: edge-dup-aaa' -H 'X-Request-ID: edge-dup-bbb')"
+v="$(hdr "$scratch/h" X-Request-ID)"
+[[ "$v" =~ ^[A-Za-z0-9._-]{1,64}$ && "$v" != *edge-dup* ]] && pass "repeated X-Request-ID replaced by one fresh id ($v)" \
+  || fail "repeated X-Request-ID gave '$v'"
+[[ "$(grep -ci '^X-Request-ID:' "$scratch/h")" == 1 ]] && pass "one X-Request-ID on the response" \
+  || fail "$(grep -ci '^X-Request-ID:' "$scratch/h") X-Request-ID headers on the response"
+logged_rid 401
+
+echo "== errors Caddy raises itself (recs-api stopped: 502)"
+dc stop api >/dev/null 2>&1
+code="$(get /api/me)"
+[[ "$code" == 502 ]] && pass "recs-api down -> 502 from Caddy" || fail "recs-api down returned $code"
+[[ "$(hdr "$scratch/h" Content-Security-Policy)" == "$site_csp" && -z "$(hdr "$scratch/h" Server)" && -n "$(hdr "$scratch/h" X-Request-ID)" ]] \
+  && pass "502 has the site CSP, security headers and X-Request-ID, no Server" || fail "502 headers: CSP '$(hdr "$scratch/h" Content-Security-Policy)', Server '$(hdr "$scratch/h" Server)', X-Request-ID '$(hdr "$scratch/h" X-Request-ID)'"
+[[ "$(hdr "$scratch/h" Cache-Control)" == no-store ]] && pass "502 is Cache-Control: no-store" || fail "502 Cache-Control is '$(hdr "$scratch/h" Cache-Control)'"
 
 if [[ $fails -gt 0 ]]; then
   echo "FAIL: $fails edge check(s) failed" >&2
+  [[ ${#xfails[@]} -gt 0 ]] && printf '  (and expected failures: %s)\n' "${xfails[*]}" >&2
   exit 1
 fi
-echo "PASS: edge checks"
+if [[ ${#xfails[@]} -gt 0 ]]; then
+  echo "PASS: edge checks, with ${#xfails[@]} EXPECTED FAILURE(S) still open: ${xfails[*]}"
+else
+  echo "PASS: edge checks"
+fi

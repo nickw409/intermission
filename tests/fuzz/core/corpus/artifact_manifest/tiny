@@ -1,0 +1,20 @@
+{
+  "config": {
+    "pop": {
+      "m": 5.0
+    }
+  },
+  "created_at": "2026-01-01T00:00:00Z",
+  "dataset": "tiny",
+  "default_model": "pop",
+  "files": {
+    "catalog/catalog.bin": "3083c29d5c597fa6f5227240caa84438caea4f6e95bacd5aa627ad819fe28446",
+    "pop/scores.bin": "8a88406f7b42db8c9a8316f196237c17da91929f819e460e796f9a8bbba1d08c"
+  },
+  "format_version": 1,
+  "git_sha": "abc1234",
+  "models": [
+    "pop"
+  ],
+  "version": "v1"
+}

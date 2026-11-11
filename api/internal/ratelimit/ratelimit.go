@@ -69,6 +69,7 @@ type Keyed struct {
 
 	mu      sync.Mutex
 	buckets map[string]*bucket
+	retired map[string]struct{} // see Retire
 }
 
 type bucket struct {
@@ -91,6 +92,9 @@ func (k *Keyed) Allow(key string) (bool, time.Duration) {
 	now := k.opts.now()
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	if _, gone := k.retired[key]; gone {
+		return false, k.cfg.Every
+	}
 	b, ok := k.buckets[key]
 	if !ok {
 		if len(k.buckets) >= k.opts.maxKeys {
@@ -116,6 +120,29 @@ func (k *Keyed) sweep(now time.Time) {
 			delete(k.buckets, key)
 		}
 	}
+}
+
+// Forget drops key's bucket, e.g. when the account it belongs to is
+// deleted. Unknown keys are ignored.
+func (k *Keyed) Forget(key string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	delete(k.buckets, key)
+}
+
+// Retire drops key's bucket for good: every later Allow(key) is refused and
+// creates no bucket. For keys that can never be legitimately used again (a
+// deleted account's ID; IDs are never reused), so a request already in
+// flight when the account went can't bring the bucket back. Each retired
+// key costs one map entry for the life of the process.
+func (k *Keyed) Retire(key string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	delete(k.buckets, key)
+	if k.retired == nil {
+		k.retired = make(map[string]struct{})
+	}
+	k.retired[key] = struct{}{}
 }
 
 // Len returns the number of tracked keys.

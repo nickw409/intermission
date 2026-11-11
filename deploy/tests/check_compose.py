@@ -38,6 +38,7 @@ READ_ONLY_MOUNTS = {
     ("model", "/srv/data/artifacts"),
     ("train", "/srv/data/raw"),
     ("train", "/srv/data/exports"),
+    ("train", "/srv/configs"),
     ("prometheus", "/etc/prometheus/prometheus.yml"),
     ("prometheus", "/etc/prometheus/alerts"),
     ("node-exporter", "/host"),
@@ -111,6 +112,21 @@ def check_service(variant, name, svc, networks):
         for net in svc.get("networks") or {}:
             if net == "frontend":
                 fail(variant, "api: must not join the frontend network")
+        # Security audit SA1-2: the Go runtime collects garbage harder as the heap nears
+        # GOMEMLIMIT instead of growing into the container limit and being OOM-killed.
+        # (nightly.sh runs export-ratings as `compose run api`, so it inherits this too.)
+        env = svc.get("environment") or {}
+        if env.get("GOMEMLIMIT") != "512MiB":
+            fail(variant, f"api: GOMEMLIMIT is {env.get('GOMEMLIMIT')!r}, want '512MiB'")
+        limit = svc.get("mem_limit")
+        if limit is not None and int(limit) <= 512 * 1024 * 1024:
+            fail(variant, f"api: mem_limit {limit} must exceed GOMEMLIMIT (512MiB)")
+    if name == "train":
+        # The tuned per-model configs (configs/*.json) must reach production training; without
+        # them recs-train silently falls back to model defaults. WORKDIR is /srv, so recs-train's
+        # default --config-dir (configs) resolves to /srv/configs.
+        if "/srv/configs" not in {v.get("target") for v in svc.get("volumes") or []}:
+            fail(variant, "train: configs not mounted at /srv/configs")
     if name in ("api", "model"):
         targets = {v.get("target") for v in svc.get("volumes") or []}
         if "/run/recs" not in targets:

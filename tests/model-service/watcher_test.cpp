@@ -3,6 +3,7 @@
 // X-Model-Version per response, a corrupted artifact is rejected and the old one keeps serving).
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <filesystem>
 #include <fstream>
@@ -245,4 +246,40 @@ TEST_CASE("recs-model: watcher rejects CURRENT escaping the root and symlinked v
   CHECK(w.poll_once() == Poll::failed);
   CHECK(holder.get()->version == "v1");
   CHECK_THROWS_AS(recs::service::load_current_bundle(root), recs::ArtifactError);
+}
+
+TEST_CASE("recs-model: watcher logs an unreadable CURRENT once, not on every poll", "[model-service][swap]") {
+  TempDir tmp;
+  const fs::path root = tmp.path / "artifacts";
+  publish(root, "v1", 10);
+  std::vector<std::string> lines;
+  recs::service::BundleHolder holder;
+  recs::service::Metrics metrics;
+  recs::service::Service svc(holder, metrics, [&](std::string_view line) { lines.emplace_back(line); });
+  recs::service::ArtifactWatcher w(root, holder, metrics, svc);
+  const auto warnings = [&] {
+    return std::count_if(lines.begin(), lines.end(),
+                         [](const std::string& l) { return l.find("cannot read CURRENT") != std::string::npos; });
+  };
+
+  // A symlinked CURRENT (rejected since SA2-5): one warning however many polls see it.
+  fs::rename(root / "CURRENT", root / "real-current");
+  fs::create_symlink(root / "real-current", root / "CURRENT");
+  for (int i = 0; i < 3; ++i) CHECK(w.poll_once() == Poll::failed);
+  CHECK(warnings() == 1);
+
+  // A different problem is reported again, once.
+  fs::remove(root / "CURRENT");
+  std::ofstream(root / "CURRENT") << std::string(1000, 'a');
+  for (int i = 0; i < 3; ++i) CHECK(w.poll_once() == Poll::failed);
+  CHECK(warnings() == 2);
+
+  // Once CURRENT is readable again, a later failure is reported again.
+  recs::write_current(root, "v1");
+  CHECK(w.poll_once() == Poll::swapped);
+  fs::remove(root / "CURRENT");
+  fs::create_symlink(root / "real-current", root / "CURRENT");
+  CHECK(w.poll_once() == Poll::failed);
+  CHECK(w.poll_once() == Poll::failed);
+  CHECK(warnings() == 3);
 }

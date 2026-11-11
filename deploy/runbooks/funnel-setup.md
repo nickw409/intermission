@@ -49,13 +49,35 @@ Only port 443 is used. Do not add other ports or paths.
 ### Does Funnel pass the client IP?
 
 This decides whether recs-api adds per-IP rate limits for signup and login (spec, "Rate
-limits"). After step 1 above:
+limits"). The access log records no IPs or headers (security audit SA3-2), so look at the
+headers on the wire instead, with a short capture in Caddy's network namespace that prints only
+the forwarding headers (last part of each address masked; `Tailscale-*` values withheld):
 
 ```bash
-docker compose -f deploy/compose.yaml logs --since 5m caddy \
-  | grep '"uri":"/"' | tail -n 3 \
-  | python3 -c 'import sys,json; [print(json.loads(l.split("|",1)[1])["request"].get("remote_ip"), json.loads(l.split("|",1)[1])["request"]["headers"].get("X-Forwarded-For")) for l in sys.stdin]'
+docker build -q -t recs-capture:tmp - <<'EOF2'
+FROM ubuntu:noble-20261024.1@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends tcpdump && rm -rf /var/lib/apt/lists/*
+EOF2
+timeout 200 docker run --rm --network container:intermission-caddy-1 --cap-drop ALL \
+  --cap-add NET_RAW --cap-add NET_ADMIN recs-capture:tmp \
+  timeout 120 tcpdump -Z root -i any -l -A -s 0 -q 'tcp dst port 8080' 2>/dev/null \
+  | grep -aoiE '(x-forwarded-[a-z]+|tailscale-[a-z-]+): ?[^[:cntrl:]]*' \
+  | sed -E 's/(tailscale-[a-z-]+):.*/\1: (withheld)/I; s/([0-9]+\.[0-9]+\.[0-9]+)\.[0-9]+/\1.x/g' \
+  | sort | uniq -c
+docker rmi recs-capture:tmp
 ```
+
+While it runs (2 minutes), reload the site a few times from a phone on mobile data with
+Tailscale disconnected. (`-Z root` is needed because the container has no capabilities to
+switch to tcpdump's own user.)
+
+**Result on 2026-11-10:** Funnel passes the client IP. Requests through Funnel carried
+`X-Forwarded-For` with a public address (the phone's public address, confirmed by the owner; one other
+address, a scanner),
+`X-Forwarded-Host` (the site name), `X-Forwarded-Proto: https` and `Tailscale-Funnel-Request`.
+Per-IP limits are therefore possible (finding SA1-3); the steps below are the follow-up, still to
+do, and need a delta audit. Before trusting the header, the spoofing test in step 3 must show
+that Funnel overwrites or appends to a client-sent `X-Forwarded-For` rather than passing it on.
 
 - `remote_ip` will be the Docker bridge gateway (Funnel → tailscaled → 127.0.0.1:8080 →
   docker-proxy), so it never identifies the visitor.

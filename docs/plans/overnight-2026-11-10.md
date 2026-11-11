@@ -23,6 +23,33 @@ Stop conditions (only the affected task stops; the others keep going):
 - K1 review: browser security clean; accessibility blocker (unrated slider missing aria-valuenow) and a login race fixed.
 - Wave 2 started early (Pipelined): D (item-KNN).
 
+- Wave 2 complete and merged: D (item-KNN), E (content), F (MF-SGD), G (ALS), H (recs-model), J1/J2 (recs-api product endpoints), K2 (web pages), with M (deploy) merging. Every branch had an independent code review or security audit plus test validation (mutation testing); every finding was fixed before merge. A gitleaks false positive (fake test key) is allowlisted by exact fingerprint.
+- Phase 0 signed off (`phase-0-done`, docs/phase-0.md). Phase 1 results are in docs/phase-1.md, awaiting owner decisions (KNN scoring formula; content gate).
+- Wave 3a started: long fuzz runs (libFuzzer 1 CPU-hour across 4 harnesses; Go fuzz 15 min per decoder) and the integration agent (contract tests against real services, robustness through Caddy, degradation, p99 load, deploy/rollback and restore drills).
+
+- Morning, 2026-11-10: my usage limit paused the run around 05:00; it resumed after the reset.
+- Fuzz gates passed. libFuzzer ran 4 harnesses for 900 s each with 0 crashes. Go fuzz ran 5 decoders for 15 min each, all passing. Details are in jobs.md.
+- PR #38 (the SA0 threat model) was merged.
+- PR #39 (Wave 3a integration) was merged after a code review, a test validation and a security audit. The code review failed on script safety: shell variables could point the test stacks at production data or the production compose project. All 12 fixes were made and re-reviewed. One last fix moved the drill's credentials into a 0700 directory. Gate results:
+  - N1 contract tests on both sides, with no waivers: PASS.
+  - N2 robustness through Caddy: PASS.
+  - N3 degradation (503 in ≤ 503 ms with recs-model hung): PASS.
+  - N3 load p99, threshold 75 ms: PASS at 13.4 ms on ml-32m with the tuned KNN config and 8.4 ms on ml-latest-small. Both runs used 20 concurrent cache-missing GETs and 2,000 timed requests with 0 errors.
+  - M2 deploy, rollback and restore drill: PASS.
+  - The only published port is 127.0.0.1:8080: PASS.
+- The integration run found and fixed one bug: errors raised by Caddy itself (413, 502) had no security headers and leaked `Server: Caddy`.
+- Wave 3b audit started against main 7f7cfd4, with a staging stack on 127.0.0.1:8080.
+- Wave 3b security audit is done: six independent passes (SA1–SA6) against the 7f7cfd4 images on a local staging stack, with no Funnel.
+  - Findings: no critical or high. Four medium: three fixed and re-tested; one (SA4-1) is code-fixed and also needs a repo setting from the owner.
+  - Fixes merged in four PRs, each with tests written first, an independent code review, mutation testing, and a re-test by the auditor who found the issue:
+    - #40: account deletion in the UI;
+    - #41: C++ loader bounds and fuzzing for every file parser;
+    - #42: recs-api and Caddy fixes (ID reuse, deleted-data residue, retention, logging, h2c, gzip-only and more);
+    - #43: weekly vulnerability scan, branch secret scan, deterministic fuzz-replay gate, ccache.
+  - Re-verified on 440079e (final main 621541b only adds CI): every gate passes. Load p99 is 16.8 ms on ml-32m and 9.8 ms on ml-latest-small.
+  - **The audit doc is `docs/security/audit-2026-11-10.md`. It needs the owner's decisions (§4) and signature (§7) before Funnel.**
+- Housekeeping: stale branches removed. Locally that was 19 merged agent worktrees and 39 branches; on GitHub it was 19 remote branches, all merged or superseded.
+
 ## Decisions made without the owner (please review)
 
 | # | Decision | Why | Easy to change? |
@@ -46,6 +73,8 @@ Stop conditions (only the affected task stops; the others keep going):
 | 18 | `roc_auc` ignores positives that are also excluded. | Header was ambiguous; throwing would abort the ALS gate on overlapping sets. | Yes. |
 | 19 | Rating task: a non-finite predicted rating (e.g. a cold movie) is replaced by the training global mean and counted, instead of aborting the evaluation. | The spec keeps cold test movies; aborting after an hours-long fit wastes the run. | Yes. |
 | 20 | The paired comparison reports `user_rmse` (mean of per-user RMSE differences), not a pooled RMSE difference. | The paired bootstrap works on per-user values; calling it "rmse" would contradict the report's pooled RMSE. | Yes (add a pooled paired bootstrap later). |
+| 21 | MF fold-in solves [b_u, p_u] jointly as one (k+1)×(k+1) ridge system instead of the spec's literal "damped-mean b_u, then ridge p_u". | That's the fixed point of repeating the spec's two steps; parity on ml-latest-small trained to convergence: 0.972 joint vs 0.906 one-sweep; synthetic fold-in RMSE 0.13 vs 0.20. | Yes (one flag). |
+| 22 | ALS planted-structure gate: the synthetic generator uses softmax temperature T = 0.25. At T = 0.5 even the oracle (true affinities) only reaches AUC 0.876, so the > 0.9 gate was unattainable by any model; at T = 0.25 the oracle reaches 0.964 and ALS 0.94. Threshold unchanged; oracle numbers documented in implicit.cpp. | The spec doesn't fix the synthetic noise level. | Yes. |
 | 10 | GitHub Actions pinned to commit SHAs; gitleaks 8.30.1 runs in CI with a checksum check. | Public repo supply-chain hygiene. | — |
 
 - An independent reviewer checked the interfaces against the spec before freezing: 5 blockers, 9 should-fix. All blockers and should-fix items were fixed (decisions 2, 6, 11–15 below came from it; also: rating-baseline and paired-comparison outputs, an explicit byte-identical exclusion list, a frozen export format `contracts/export.md`, input limits on compare/feedback/posters, ROC AUC for the ALS gate, and the spine now implements the sparse helpers and `make_dataset` so Wave 1 tasks don't block each other).
@@ -53,9 +82,47 @@ Stop conditions (only the affected task stops; the others keep going):
 ## Open questions for the owner
 
 2. **Item-KNN scoring formula (blocks Phase 1 sign-off).** The spec's score Σ s'(r−μ)/Σ|s'| is a rating-prediction formula; used for top-N ranking it promotes obscure items with a single highly rated neighbour. On ml-latest-small: spec formula NDCG@10 = 0.0041; without the Σ|s'| denominator 0.0560; positive neighbours only, unnormalized 0.0579; rating-count popularity 0.0427 (Cremonesi et al. 2010 describe this effect). I kept the spec formula as the default and added `normalize` / `positive_only` as config hyperparameters, selectable on the validation set only. **Your call:** (a) keep the spec formula as "knn" and report it as failing popularity if it does, or (b) amend the spec so "knn" uses the unnormalized top-N score (tuned on validation), or (c) report both as separate models. I'll run the ml-32m numbers for all variants so you can decide with data.
+3. **Content model vs its spec gate (blocks Phase 1 sign-off).** The spec's profile Σ(r − μ_u)·v_j cancels any feature shared by every rated movie, so a user who rated only comedies with mixed scores gets few comedies (0/10 for 13 of 20 seeds). The gate test passes only because its synthetic user rates pure comedies high and comedy hybrids low. Independent validation confirmed the first fixture was reshaped to pass (swapping its ratings → 0/20 seeds). The honest test-first version is restored as an explicitly **open, failing gate** (hidden Catch2 tag, documented), not counted as passed. Options: (a) accept as-is and document the limitation; (b) change the profile centering (e.g. damped/global mean instead of the user mean); (c) restate the gate. Also: content NDCG@10 on ml-latest-small is 0.0025 vs 0.0457 for rating-count — expect it to lose to popularity.
+4. **MF fold-in parity on ml-32m (Phase 3 risk).** With early stopping, SGD stops before user vectors converge, so trained vectors still carry init noise while fold-in returns the exact ridge solution: parity on ml-latest-small 0.44 (default config) – 0.79 (tuned), 0.97 when trained to convergence. The ml-32m gate (> 0.9) will likely need hyperparameters that converge before validation RMSE turns up (more epochs, slower decay, larger λ), chosen on validation. Nothing loosened; flagged early.
+5. **CSP hardening (spec change).** The spec's CSP is `default-src 'self'; img-src 'self' data:; frame-ancestors 'none'`. The deploy audit recommends adding `base-uri 'none'; form-action 'self'`. Approve to update the spec and Caddyfile.
+6. **Alert delivery.** Prometheus alert rules exist, but no notification channel is configured (no Alertmanager receiver). Pick one (email, ntfy, Discord webhook…).
 1. **gitleaks locally.** I wasn't allowed to install the gitleaks binary on your machine without asking (it's external code). CI scans every push regardless. To also scan before each commit, install it yourself (e.g. `go install github.com/zricethezav/gitleaks/v8@v8.30.1`); the pre-commit hook (`tools/hooks/pre-commit`, already enabled) uses it automatically.
+7. **Training configs aren't in the train image.** `compose run train train` would silently use the model defaults, not `configs/*.json`. Also, `deploy/runbooks/deploy.md` points to a `train/README` that doesn't exist. Options: bake `configs/` into the image, or mount it read-only. I recommend mounting it, so tuned configs don't need a rebuild.
+8. **Small edge mismatches.**
+   - Body cap: Caddy's `64KB` is 64,000 bytes, but recs-api's is 65,536.
+   - Request-ID length: recs-api accepts up to 64 characters, recs-model up to 128.
+
+   Neither is a security issue. Pick one value for each and I'll align them.
+9. **Pre-launch decisions from the security audit.** These are listed in `docs/security/audit-2026-11-10.md` §4, with a recommended answer for each:
+   - turn on Dependabot alerts;
+   - accept the login-lockout risk;
+   - accept the 499/504 on a stalled request;
+   - launch without `/metrics`;
+   - the CSP spec change;
+   - egress firewall rules;
+   - the `__Host-` cookie name;
+   - GitHub secret-scanning and Actions SHA-pinning settings;
+   - the fixture movie titles;
+   - the TMDB logo.
+
+## Follow-ups (not blocking)
+- Deploy integration (from M): DB lives at `data/db/app.db` (directory mount for WAL) instead of the spec's `data/app.db`; recs-model runs with `network_mode: none`, so its `/metrics` needs a relay through recs-api or a dedicated listener; no alert delivery channel yet (owner picks); `recs-api admin sessions revoke-all` doesn't exist (runbook has an SQL fallback); smoke test needs `SMOKE_USERNAME`/`SMOKE_PASSWORD` in deploy/.env (account created once via invite).
+- recs-api's HTTP connection pool to recs-model must stay ≤ recs-model `--threads` (default 16): each keep-alive connection holds a server worker.
+- `Manifest` has no `trained_at`; `/v1/models` reports `created_at` as trained_at.
+- `recs-train eval` run IDs omit the dataset, so the same model on two datasets within one second collides ("report already exists"). Include the dataset in the run ID suffix.
+- Web: the account menu's rating count goes stale while rating; needs a small `refreshMe()` in `web/src/auth/session.tsx` that doesn't reset the sign-in time used for session-expiry detection.
+- Rate-limit message text says "wait a minute" but Retry-After is often ~2 s; reword once with the login tests.
+- Monitoring:
+  - recs-api has no `/metrics`, though the spec requires it (SA6-2), so the Prometheus alerts can't fire.
+  - recs-backup's future-dated-file warning only reaches stdout (L-a). Wire both up together with an alert channel.
+- MF `fit()` accepts lambda < 1e-6, but `save()` refuses it, so a bad config fails only after training. Check it before fitting.
+- Local cleanup for the owner:
+  - 42 stale `/tmp/recs-fuzz-*` directories (`rm -rf /tmp/recs-fuzz-*`; run it only when no fuzzer is running);
+  - the stale `build/debug` and `build/release` trees, which hold httplib 0.18.3: reconfigure or delete them.
+- Weekly `security-scan.yml`: the Caddy Trivy job is expected to fail until upstream Caddy ships fixed x/net and klauspost/compress.
 
 ## Carry-forward for the Wave 3b security audit (from I1)
+0. (from H) cpp-httplib upgraded 0.18.3 → 0.63.0 (CVE-2025-46728: unbounded chunked bodies/headers; checksum verified); pre-routing refuses Transfer-Encoding and length-less POSTs. Residual: a ~1 byte/s trickler can hold one recs-model worker (no whole-request deadline in httplib; only the recs group can reach the socket); re-verify the pinned version and the pre-routing guards in 3b. Also re-check slow-loris behaviour through Caddy (Caddy should bound request time before it reaches recs-api).
 
 1. Login lockout: anyone can burn a user's 5/min login budget, and the 60/min global login cap lets one attacker block all logins. Inherent to the spec's design until per-IP limits (pending the Funnel client-IP check).
 2. CrossOriginProtection runs with no trusted origins: Caddy must preserve `Host`, and `RECS_SITE_ORIGIN` must equal the public origin exactly. Dev proxy must not use changeOrigin.

@@ -1,0 +1,23 @@
+{
+  "config": {
+    "pop": {
+      "m": 5.0
+    },
+    "pop_count": {}
+  },
+  "created_at": "2026-01-01T00:00:00Z",
+  "dataset": "fuzz-fixture",
+  "default_model": "pop",
+  "files": {
+    "catalog/catalog.bin": "849fb2d4a644abc71e9cd276b52ab65aaad4b08c18851ff8a37559659b3c3da5",
+    "pop/scores.bin": "9fe322ec0666d1dc0c4c82a4446516b35a56e8eceb2605078af0618e58c387bc",
+    "pop_count/scores.bin": "249e2a99c8c09b31cdcdc29593c65185d112a018a24c51c0330a922f47248962"
+  },
+  "format_version": 1,
+  "git_sha": "abc1234",
+  "models": [
+    "pop",
+    "pop_count"
+  ],
+  "version": "v1"
+}

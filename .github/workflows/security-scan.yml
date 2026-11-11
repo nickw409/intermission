@@ -1,0 +1,98 @@
+# Weekly vulnerability scan (audit finding SA4-1), so new advisories surface even when
+# nothing is pushed:
+#   - govulncheck on both Go modules and npm audit of the shipped (non-dev) web/contracts deps;
+#   - Trivy (fixable HIGH/CRITICAL) on every runtime image the deploy uses: the three base images
+#     our images are built FROM (which include the Caddy binary) and the monitoring images in
+#     deploy/compose.yaml. Build-stage images (golang, node, ubuntu) ship nothing and are skipped;
+#   - a longer, seeded fuzz run of every harness (the required CI check only replays corpora).
+# Every action and image is pinned (public repo: supply-chain hygiene). Keep the image list in
+# step with deploy/docker/*.Dockerfile and deploy/compose.yaml.
+# Note: GitHub disables scheduled workflows after 60 days without repository activity.
+name: security-scan
+on:
+  schedule:
+    - cron: '17 6 * * 1'   # Mondays 06:17 UTC
+  workflow_dispatch:
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: govulncheck
+    timeout-minutes: 15
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [api, deploy/tools/recs-backup]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version: '1.27.4', cache-dependency-path: '${{ matrix.module }}/go.sum' }
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+        working-directory: ${{ matrix.module }}
+
+  npm:
+    name: npm audit
+    timeout-minutes: 10
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: [web, tools/contracts]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with: { node-version: '24' }
+      # Shipped dependencies only; any advisory of level low or above fails the scan.
+      - run: npm audit --omit=dev --audit-level=low
+        working-directory: ${{ matrix.dir }}
+
+  images:
+    name: trivy (${{ matrix.name }})
+    timeout-minutes: 15
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: caddy, image: 'caddy:2.11.9@sha256:0c2243efcf437ab7f7a978f1027fcf0d4f9be8a75df27b1b3fbc5dbe0ffa8cf0' }
+          - { name: distroless-cc, image: 'gcr.io/distroless/cc-debian13:nonroot@sha256:cc66d222f0a7ec996b78a99fe76a969bc80b539a5016ad866c14d1949bc6d0ab' }
+          - { name: distroless-static, image: 'gcr.io/distroless/static-debian13:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329' }
+          - { name: prometheus, image: 'prom/prometheus:v3.16.0-distroless@sha256:e8b8fb0e336fe0affce6f9ea347b11d24975465fd3ba8119420186679c3efd5f' }
+          - { name: grafana, image: 'grafana/grafana:13.2.5-distroless@sha256:7bd4a6c9fa5425e722654c56f4fc8404ed042a89542fdb6d963177b6d80497ec' }
+          - { name: node-exporter, image: 'prom/node-exporter:v1.12.1-distroless@sha256:8c9bac11973b94b59be88d6e11fee4429aa743c8846cdc75d65b18db33f6a106' }
+    steps:
+      # Trivy 0.69.3 pinned by digest (0.69.4 was a compromised release; do not float the tag).
+      - name: Scan for fixable HIGH/CRITICAL
+        env: { IMAGE: '${{ matrix.image }}' }
+        # Findings exit 2; anything else (e.g. the rate-limited vulnerability DB download) exits 1
+        # and is retried once after a pause.
+        run: |
+          scan() {
+            docker run --rm aquasec/trivy:0.69.3@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c \
+              image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 2 --no-progress "$IMAGE"
+          }
+          rc=0; scan || rc=$?
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ]; then sleep 60; rc=0; scan || rc=$?; fi
+          exit "$rc"
+
+  fuzz:
+    name: fuzz (seeded, 2 min per harness)
+    timeout-minutes: 60
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - run: sudo apt-get update -q && sudo apt-get install -y -q ninja-build clang libomp-dev
+      - run: cmake --preset fuzz && cmake --build --preset fuzz
+      # To reproduce a failure, run the harness on the crash input from the uploaded fuzz-out
+      # artifact. The seed (derived from the run id, printed by the script) is recorded too,
+      # but a timed run depends on machine speed, so the seed alone may not repeat it.
+      - run: FUZZ_SEED=$(( RUN_ID % 4294967295 + 1 )) tools/fuzz/replay.sh 120
+        env: { RUN_ID: '${{ github.run_id }}' }
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with: { name: fuzz-out, path: build/fuzz/fuzz-out, retention-days: 30 }

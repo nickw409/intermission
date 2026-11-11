@@ -251,6 +251,177 @@
           }
         }
       }
+    },
+    {
+      "name": "ok_genres",
+      "request": {
+        "method": "GET",
+        "path": "/api/recommend/compare",
+        "query": {
+          "models": "pop,knn,als",
+          "k": "3",
+          "genres": "Horror,Thriller"
+        },
+        "headers": {
+          "Cookie": "session=fixture-session-token"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "model_version": "2026-11-09T21-14-03Z",
+          "cold_start": false,
+          "results": [
+            {
+              "model": "pop",
+              "items": [
+                {
+                  "movieId": 593,
+                  "title": "Silence of the Lambs, The",
+                  "year": 1991,
+                  "score": 4.08,
+                  "because": []
+                },
+                {
+                  "movieId": 2959,
+                  "title": "Fight Club",
+                  "year": 1999,
+                  "score": 4.05,
+                  "because": []
+                },
+                {
+                  "movieId": 480,
+                  "title": "Jurassic Park",
+                  "year": 1993,
+                  "score": 3.71,
+                  "because": []
+                }
+              ]
+            },
+            {
+              "model": "knn",
+              "items": [
+                {
+                  "movieId": 480,
+                  "title": "Jurassic Park",
+                  "year": 1993,
+                  "score": 0.58,
+                  "because": [
+                    {
+                      "movieId": 260,
+                      "title": "Star Wars: Episode IV - A New Hope",
+                      "weight": 0.49
+                    }
+                  ]
+                },
+                {
+                  "movieId": 2959,
+                  "title": "Fight Club",
+                  "year": 1999,
+                  "score": 0.41,
+                  "because": [
+                    {
+                      "movieId": 2571,
+                      "title": "Matrix, The",
+                      "weight": 0.36
+                    }
+                  ]
+                },
+                {
+                  "movieId": 593,
+                  "title": "Silence of the Lambs, The",
+                  "year": 1991,
+                  "score": 0.27,
+                  "because": [
+                    {
+                      "movieId": 2571,
+                      "title": "Matrix, The",
+                      "weight": 0.21
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "model": "als",
+              "items": [
+                {
+                  "movieId": 2959,
+                  "title": "Fight Club",
+                  "year": 1999,
+                  "score": 0.71,
+                  "because": [
+                    {
+                      "movieId": 2571,
+                      "title": "Matrix, The",
+                      "weight": 0.38
+                    },
+                    {
+                      "movieId": 296,
+                      "title": "Pulp Fiction",
+                      "weight": 0.3
+                    }
+                  ]
+                },
+                {
+                  "movieId": 593,
+                  "title": "Silence of the Lambs, The",
+                  "year": 1991,
+                  "score": 0.64,
+                  "because": [
+                    {
+                      "movieId": 2571,
+                      "title": "Matrix, The",
+                      "weight": 0.29
+                    }
+                  ]
+                },
+                {
+                  "movieId": 480,
+                  "title": "Jurassic Park",
+                  "year": 1993,
+                  "score": 0.52,
+                  "because": [
+                    {
+                      "movieId": 260,
+                      "title": "Star Wars: Episode IV - A New Hope",
+                      "weight": 0.33
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "unknown_genre",
+      "request": {
+        "method": "GET",
+        "path": "/api/recommend/compare",
+        "query": {
+          "models": "pop,knn,als",
+          "k": "3",
+          "genres": "Horror,Noir"
+        },
+        "headers": {
+          "Cookie": "session=fixture-session-token"
+        }
+      },
+      "response": {
+        "status": 400,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "bad_request",
+            "message": "genres must list up to 19 distinct genre names"
+          }
+        }
+      }
     }
   ]
 }

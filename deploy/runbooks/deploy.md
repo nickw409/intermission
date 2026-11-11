@@ -39,6 +39,13 @@ any value still starts with `change-me` (the `.env.example` placeholders). Relea
 nightly and restore-drill also share one lock (`deploy/ops.lock`), so they never overlap; a
 release waits at most 2 minutes for it (`RELEASE_LOCK_WAIT`), then stops and names the holder.
 
+**Model artifacts that need a retrain first.** A content model saved before the profile-centering
+change (Phase 1, `docs/phase-1.md` "Content centering (option b)") has no `content/centering.bin`.
+The new recs-model refuses it ("content artifact predates centering.bin; retrain"), and because an
+artifact loads as one unit, the whole artifact would be rejected. Before deploying that change (or
+any later SHA), run `recs-train retrain` with the new image so `CURRENT` points at an artifact
+that has the file. Production has no such artifact yet, but check `data/artifacts/CURRENT` first.
+
 Development uses a separate compose project (`intermission-dev`), port 127.0.0.1:8088 and data
 directory `data/dev/` (see `deploy/compose.dev.yaml`), so it never touches production.
 
@@ -59,12 +66,20 @@ directory `data/dev/` (see `deploy/compose.dev.yaml`), so it never touches produ
 
    ```bash
    docker compose -f deploy/compose.yaml run --rm train ingest --dataset ml-32m
-   docker compose -f deploy/compose.yaml run --rm train train --dataset ml-32m ...   # see train/README
+   docker compose -f deploy/compose.yaml run --rm train train --dataset ml-32m \
+     --models pop,pop_count,knn,content,mf,als --default-model knn --set-current --seed 42
    ```
+
+   The train job mounts `configs/` read-only (`RECS_CONFIG_DIR`). Each model uses
+   `configs/<model>.<dataset>.tuned.json` when it exists (for example
+   `knn.ml-32m.tuned.json`), else `configs/<model>.json`, else its built-in defaults; the
+   train log prints which file each model used (`config <model>: <path>`).
 
 6. Create the smoke-test account (needs an invite; `create-invites.md`):
 
    ```bash
+   # admin never migrates; on a brand-new database apply the schema first:
+   docker compose -f deploy/compose.yaml run --rm --no-deps api migrate
    code=$(docker compose -f deploy/compose.yaml run --rm --no-deps api admin invite create --uses 1 --expires 1d --note smoke)
    # then sign up as SMOKE_USERNAME with that code through the site (or curl /api/auth/signup
    # with headers Origin: <RECS_SITE_ORIGIN> and X-Requested-With: recs)

@@ -17,7 +17,9 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"slices"
 	"strings"
+	"sync"
 
 	_ "modernc.org/sqlite" // registers the "sqlite" database/sql driver (pure Go)
 )
@@ -31,6 +33,15 @@ type DB struct {
 	Writer *sql.DB // SetMaxOpenConns(1)
 	Reader *sql.DB
 	path   string
+
+	hooksMu     sync.Mutex
+	userDeleted []func(userID int64)
+
+	// maint is a one-connection pool with a short busy timeout for
+	// checkpoints (scrub.go), so a checkpoint waiting on a reader never
+	// holds the writer connection or blocks writers for long.
+	maint *sql.DB
+	scrub scrubState
 }
 
 // BusyTimeoutMS is how long a connection waits on a lock before SQLITE_BUSY.
@@ -38,7 +49,8 @@ const BusyTimeoutMS = 5000
 
 // Open opens app.db at path: a writer pool limited to one connection (so
 // writes queue in Go instead of fighting over SQLite's lock) and a read-only
-// reader pool. Both use WAL, foreign_keys=ON and busy_timeout=5000. Writer
+// reader pool. Both use WAL, foreign_keys=ON, secure_delete=ON,
+// journal_size_limit=0 and busy_timeout=5000. Writer
 // transactions start with BEGIN IMMEDIATE so a transaction that reads and
 // then writes can never fail half-way on a lock upgrade.
 //
@@ -57,6 +69,16 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		"foreign_keys(1)",
 		"journal_mode(WAL)",
 		"synchronous(NORMAL)",
+		// Overwrite deleted content with zeros, including whole pages that
+		// go to the freelist (FAST skips those, and a deleted account with
+		// a few thousand ratings frees whole pages: security audit SA5-3).
+		// The zeroed pages go through the WAL; the deleted page images
+		// already in the WAL leave it at the next TRUNCATE checkpoint
+		// (scrub.go).
+		"secure_delete(1)",
+		// Shrink the WAL file back to zero bytes whenever it is reset after
+		// a checkpoint, instead of leaving old frames in a large file.
+		"journal_size_limit(0)",
 	}
 	writer, err := openPool(ctx, path, common, "immediate")
 	if err != nil {
@@ -74,7 +96,16 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	n := max(4, runtime.NumCPU())
 	reader.SetMaxOpenConns(n)
 	reader.SetMaxIdleConns(n)
-	return &DB{Writer: writer, Reader: reader, path: path}, nil
+
+	maint, err := openPool(ctx, path, []string{"busy_timeout(" + maintBusyMS + ")", "journal_mode(WAL)"}, "deferred")
+	if err != nil {
+		_ = writer.Close()
+		_ = reader.Close()
+		return nil, fmt.Errorf("db: open maintenance pool: %w", err)
+	}
+	maint.SetMaxOpenConns(1)
+	maint.SetMaxIdleConns(1)
+	return &DB{Writer: writer, Reader: reader, maint: maint, path: path}, nil
 }
 
 // createPrivate creates an empty file at path with mode 0600 unless one exists.
@@ -117,18 +148,54 @@ func (d *DB) Version(ctx context.Context) (int, error) {
 }
 
 // Migrate backs up the database and applies pending migrations; see migrate.go.
+//
+// It runs at every startup, so it also does the startup housekeeping:
+// backup retention (inside migrate) and, best effort, a TRUNCATE checkpoint,
+// so data deleted before a crash or restart doesn't wait in app.db-wal.
 func (d *DB) Migrate(ctx context.Context, logger *slog.Logger) error {
-	return d.migrate(ctx, logger, embedded())
+	if err := d.migrate(ctx, logger, embedded()); err != nil {
+		return err
+	}
+	if err := d.CheckpointTruncateRetry(ctx); err != nil {
+		logger.Warn("startup WAL checkpoint did not complete", "err", err)
+	}
+	return nil
 }
 
-// Close closes both pools.
-func (d *DB) Close() error {
-	var errs []error
-	if d.Writer != nil {
-		errs = append(errs, d.Writer.Close())
+// OnUserDeleted registers f to run after an account is deleted. Packages
+// that keep per-user state in memory (the recommendation cache, per-user
+// rate limits) use it to forget that user, so nothing they hold can outlive
+// the account. f runs synchronously in the deleting request and must be
+// quick and must not call back into OnUserDeleted.
+//
+// The registry lives here because every package already shares the one
+// *DB, and the package that deletes accounts (auth) must not import the
+// packages that cache per-user data (recommend imports auth).
+func (d *DB) OnUserDeleted(f func(userID int64)) {
+	d.hooksMu.Lock()
+	defer d.hooksMu.Unlock()
+	d.userDeleted = append(d.userDeleted, f)
+}
+
+// UserDeleted runs every OnUserDeleted hook. The caller has committed the
+// deletion.
+func (d *DB) UserDeleted(userID int64) {
+	d.hooksMu.Lock()
+	hooks := slices.Clone(d.userDeleted)
+	d.hooksMu.Unlock()
+	for _, f := range hooks {
+		f(userID)
 	}
-	if d.Reader != nil {
-		errs = append(errs, d.Reader.Close())
+}
+
+// Close stops any pending background checkpoint and closes the pools.
+func (d *DB) Close() error {
+	d.stopScrub()
+	var errs []error
+	for _, p := range []*sql.DB{d.Writer, d.Reader, d.maint} {
+		if p != nil {
+			errs = append(errs, p.Close())
+		}
 	}
 	return errors.Join(errs...)
 }

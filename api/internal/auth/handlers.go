@@ -361,13 +361,20 @@ func (s *service) getMe(w http.ResponseWriter, r *http.Request) {
 }
 
 // deleteMe removes the user; ON DELETE CASCADE removes their sessions,
-// ratings and feedback in the same statement.
+// ratings and feedback in the same statement. Afterwards it tells every
+// package holding per-user state in memory to forget this user ID, and
+// schedules a background TRUNCATE checkpoint: secure_delete=ON zeroes the
+// rows, but their old page images stay in app.db-wal until a checkpoint
+// resets it.
 func (s *service) deleteMe(w http.ResponseWriter, r *http.Request) {
-	sess := r.Context().Value(sessionKey{}).(*Session)
-	if _, err := s.db.Writer.ExecContext(r.Context(), "DELETE FROM users WHERE id = ?", sess.UserID); err != nil {
+	ctx := r.Context()
+	sess := ctx.Value(sessionKey{}).(*Session)
+	if _, err := s.db.Writer.ExecContext(ctx, "DELETE FROM users WHERE id = ?", sess.UserID); err != nil {
 		s.fail(w, r, err)
 		return
 	}
+	s.db.UserDeleted(sess.UserID)
+	s.db.ScheduleCheckpoint() // background; see internal/db/scrub.go
 	http.SetCookie(w, clearedCookie())
 	w.WriteHeader(http.StatusNoContent)
 }

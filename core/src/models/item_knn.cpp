@@ -3,8 +3,8 @@
 // THE IDEA
 //   Two movies are similar if the same people rated them in the same direction relative to their
 //   own taste. To score a movie i for a user, look at the movies the user already rated that are
-//   among i's nearest neighbours, and take a similarity-weighted average of how much the user
-//   liked each of them compared with their own average.
+//   among i's nearest neighbours, and add up how much the user liked each of them compared with
+//   their own average, weighted by how similar each one is to i.
 //
 // SIMILARITY: ADJUSTED COSINE (Sarwar et al. 2001, section 3.1.3)
 //   Centre every rating by its USER's mean, so a harsh rater's 3 and a generous rater's 4 can mean
@@ -28,42 +28,60 @@
 //
 // NEIGHBOURHOODS
 //   Only items with at least `min_support` training ratings take part: they get neighbour lists
-//   and only they may appear in someone's list. Each item keeps its top M = `neighbors` partners
-//   by |s'| (ties broken by ItemIdx ascending); zero similarities are dropped. By default we keep
-//   strongly NEGATIVE neighbours too, because the scoring formula below uses them correctly: a
-//   user who disliked a movie that is anti-correlated with i is evidence FOR i.
-//   Option `positive_only` (default false): drop every s' <= 0 first, then keep the top M of the
-//   rest (equivalently the top M by s'). Many top-N implementations do this, since "users who
-//   hated X tend to like i" is weak evidence compared with "users who liked X liked i".
+//   and only they may appear in someone's list. Zero similarities are always dropped.
+//   Option `positive_only` (default true): drop every s' <= 0, then keep the top M = `neighbors`
+//   of the rest by s' (ties broken by ItemIdx ascending). "Users who hated X tend to like i" is
+//   weak evidence next to "users who liked X liked i", and most top-N implementations keep only
+//   positive neighbours (Deshpande & Karypis 2004).
+//   With positive_only = false each item keeps its top M partners by |s'| instead, negative ones
+//   included. That is the rating-prediction setting: there a user who disliked a movie that is
+//   anti-correlated with i is evidence FOR i, and the normalised score below uses it that way.
 //
-// SCORE (Sarwar et al. 2001, section 3.2.1, in mean-centred form; Desrosiers & Karypis 2011)
-//   With N(i) the neighbour list of i and R(u) the items u rated,
+// SCORE: TWO FORMS
+//   With N(i) the neighbour list of i, R(u) the items u rated and c_uj = r_uj - mu_u:
 //
-//                 sum_{j in N(i) and R(u)} s'_ij (r_uj - mu_u)
-//     score_ui = ----------------------------------------------
+//   (1) Top-N form, the default (normalize = false; spec "Item-KNN"; Cremonesi et al. 2010):
+//
+//         score_ui = sum_{j in N(i) and R(u)} s'_ij c_uj
+//
+//   (2) Rating-prediction form (normalize = true, usually with positive_only = false; Sarwar et
+//       al. 2001, section 3.2.1, in mean-centred form; Desrosiers & Karypis 2011):
+//
+//                     sum_{j in N(i) and R(u)} s'_ij c_uj
+//         score_ui = -------------------------------------
 //                     sum_{j in N(i) and R(u)} |s'_ij|
 //
-//   i.e. the predicted deviation from the user's mean (add mu_u to read it as a star rating; we do
-//   not, since a per-user constant changes nothing in the ranking). If none of i's neighbours was
-//   rated, score_ui = -infinity: the item cannot be recommended. Sums run in double precision in
-//   the stored neighbour order, so the result is fully deterministic.
+//       This is the predicted deviation from the user's mean (add mu_u to read it as a star
+//       rating; we do not, since a per-user constant changes nothing in the ranking).
 //
-//   Option `normalize` (default true = the formula above, as in the spec). With normalize = false
-//   the denominator is dropped:  score_ui = sum_{j in N(i) and R(u)} s'_ij (r_uj - mu_u).
-//   Why offer it: the normalised score is a predicted RATING, and as a top-N RANKING it is known to
-//   favour obscure items. An item whose single rated neighbour the user loved gets the maximum
-//   possible score (r_uj - mu_u), however thin that evidence is. The unnormalised sum grows with
-//   the amount of agreeing evidence, which ranks much better: Cremonesi, Koren and Turrin (2010)
-//   found non-normalised neighbourhood scores far stronger for top-N, and Deshpande and Karypis
-//   (2004) rank by plain similarity sums. Items with no rated neighbour still score -infinity, so
-//   both modes recommend from the same candidate set. Which mode to use is a validation-set
-//   decision; the default stays the spec's formula.
+//   Why the top-N form is the default. Form (2) answers "what would this user rate i?", and it
+//   answers it well, but it is a poor answer to "which movies should we show first?". Its value
+//   does not depend on how much evidence there is: an obscure item whose single rated neighbour
+//   the user loved gets the maximum possible score (that neighbour's c_uj), ahead of a movie that
+//   ten of the user's favourites point to. Lists fill up with such items. Form (1) drops the
+//   denominator, so the score grows with the amount of agreeing evidence, which is what a ranking
+//   needs. Cremonesi, Koren and Turrin (2010) found the non-normalised neighbourhood score far
+//   stronger for top-N recommendation, and Deshpande and Karypis (2004) rank by plain similarity
+//   sums. Our own numbers agree (docs/phase-1.md): on ml-32m, form (2) with the spec's starting
+//   values scores NDCG@10 0.0039, well below the rating-count baseline's 0.0440, while form (1)
+//   with positive neighbours and validation-tuned M and lambda scores 0.0726. Form (2) stays as a
+//   config option so the two can be compared.
+//
+//   Tuning note: with form (1) the best shrinkage is large (lambda = 30,000 on ml-32m), so s' is
+//   dominated by the co-rating count n_ij and the model behaves much like a "people who rated X
+//   also rated Y" co-occurrence ranker. M and lambda are chosen on the validation split for each
+//   dataset: M = 10, lambda = 1,000 on ml-latest-small (configs/knn.json, also the code defaults)
+//   and M = 50, lambda = 30,000 on ml-32m (configs/knn.ml-32m.tuned.json).
+//
+//   In both forms, if none of i's neighbours was rated, score_ui = -infinity: the item cannot be
+//   recommended, so both forms rank the same candidate set. Sums run in double precision in the
+//   stored neighbour order, so the result is fully deterministic.
 //
 // EXPLANATIONS
 //   explain(u, i) lists the rated neighbours j whose term in the score is positive, largest first
 //   (at most 3), with weight = that term, i.e. each one's actual share of score_ui:
+//     normalize = false:  weight_j = s'_ij (r_uj - mu_u)
 //     normalize = true:   weight_j = s'_ij (r_uj - mu_u) / sum |s'|
-//     normalize = false:  weight_j = s'_ij (r_uj - mu_u)            (the same term, no divisor)
 //   In both modes the score is the sum of all such terms, positive and negative (up to rounding).
 //
 // FOLD-IN AND THE BATCH PATH
@@ -95,7 +113,7 @@
 //   C. Desrosiers, G. Karypis. "A comprehensive survey of neighborhood-based recommendation
 //     methods." Recommender Systems Handbook, 2011.
 //
-// ARTIFACT (save/load): one file `item_knn.bin`, little-endian, see write_file() below.
+// ARTIFACT (save/load): one file `item_knn.bin`, little-endian, see save() below.
 #include <omp.h>
 
 #include <algorithm>
@@ -115,6 +133,7 @@
 
 #include "models/item_knn_detail.hpp"
 #include "recs/model.hpp"
+#include "sparse/offsets.hpp"
 
 namespace recs {
 
@@ -577,8 +596,10 @@ class ItemKnn final : public Model {
     item_knn_detail::parse_config(item_knn_detail::to_config(p));  // same validation as fit()
     const std::uint64_t nnz = r.u64();
     // Size check before allocating, so a corrupt count cannot trigger a huge allocation.
+    // nnz is bounded by the file size first, so nnz * 8 below cannot overflow.
+    if (nnz > r.remaining()) throw std::runtime_error("knn: model file has the wrong size");
     const std::uint64_t expect = (static_cast<std::uint64_t>(n_items) + 1) * 8 + nnz * 8;
-    if (nnz > r.remaining() || expect != r.remaining()) throw std::runtime_error("knn: model file has the wrong size");
+    if (expect != r.remaining()) throw std::runtime_error("knn: model file has the wrong size");
 
     std::vector<std::uint64_t> ptr(static_cast<std::size_t>(n_items) + 1);
     for (auto& v : ptr) v = r.u64();
@@ -587,11 +608,12 @@ class ItemKnn final : public Model {
     std::vector<float> sims(nnz);
     for (auto& v : sims) v = r.f32();
 
-    if (ptr.front() != 0 || ptr.back() != nnz) throw std::runtime_error("knn: bad row offsets");
+    // Validate the whole offset array before walking any row (audit SA2-1).
+    if (const auto err = recs::detail::check_row_offsets(ptr, n_items, nnz)) throw std::runtime_error("knn: bad " + *err);
     // seen_in_row[j] == i + 1 marks j as already listed in row i (catches duplicate ids).
     std::vector<std::uint32_t> seen_in_row(n_items, 0);
     for (std::uint32_t i = 0; i < n_items; ++i) {
-      if (ptr[i] > ptr[i + 1] || ptr[i + 1] - ptr[i] > p.neighbors) throw std::runtime_error("knn: bad row offsets");
+      if (ptr[i + 1] - ptr[i] > p.neighbors) throw std::runtime_error("knn: bad row offsets");
       for (std::uint64_t e = ptr[i]; e < ptr[i + 1]; ++e) {
         if (items[e] >= n_items || items[e] == i) throw std::runtime_error("knn: bad neighbour id");
         if (seen_in_row[items[e]] == i + 1) throw std::runtime_error("knn: duplicate neighbour id");

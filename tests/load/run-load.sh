@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# Gate N3 load: /api/recommend (item-KNN, recommendation-cache miss on every request) through
+# Caddy, p99 < 75 ms at 20 concurrent clients, on the real compose stack on 127.0.0.1.
+#
+#   tests/load/run-load.sh <tag> [dataset]        # dataset: ml-latest-small (default) | ml-32m
+#
+#   KNN_CONFIG=path   KNN config for the artifact (default: configs/knn.<dataset>.tuned.json if
+#                     it exists, else configs/knn.json)
+#   LOAD_USERS=70 LOAD_CLIENTS=20 LOAD_ARGS="..."   passed to the load generator
+#   LOAD_GENRES=list  genre filter (e.g. Film-Noir or Horror,Thriller) added to every recommend
+#                     request as &genres= (-genres); default none. Named in the label and the
+#                     summary file name.
+#   LOAD_OUT=path     JSON summary (default data/load-results/<UTC time>-<dataset>.json; data/ is
+#                     gitignored)
+#   KEEP_STACK=1      leave the stack running (prints the teardown command)
+#
+# The sign-off measurement is ml-32m with the tuned KNN config (configs/knn.ml-32m.tuned.json);
+# ml-latest-small is a quick check. The Phase 2 ml-32m run must also include filtered passes
+# (LOAD_GENRES=Film-Noir, narrow, and all 19 genres) next to the unfiltered one.
+#
+# Trains pop + knn (default knn) on the dataset with the train image into a scratch data dir,
+# starts a scratch compose project (intermission-load, 127.0.0.1:${STACK_PORT:-18091}), runs
+# tests/load (main.go) and tears everything down. Wait for other heavy jobs (fuzzers, builds)
+# to finish first: the measurement is only meaningful on a quiet host. The script prints the
+# load average and any running fuzzers before it starts.
+set -Eeuo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STACK_PORT="${STACK_PORT:-18091}" # before stack-lib.sh, which defaults it to 18090
+# shellcheck source=../integration/stack-lib.sh
+source "$here/../integration/stack-lib.sh"
+
+STACK_TAG="${1:?usage: run-load.sh <tag> [dataset]}"
+dataset="${2:-ml-latest-small}"
+genres="${LOAD_GENRES:-}"
+[[ "$genres" =~ ^([A-Za-z-]+(,[A-Za-z-]+){0,18})?$ ]] || { echo "LOAD_GENRES: comma-separated genre names, no spaces" >&2; exit 2; }
+STACK_PROJECT=intermission-load # fixed: never inherited (stack_check_project refuses real stacks)
+stack_check_project
+STACK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/intermission-load.XXXXXX")"
+if [[ -z "${KEEP_STACK:-}" ]]; then
+  trap stack_down EXIT
+else
+  trap 'slog "kept; tear down with: STACK_PROJECT=$STACK_PROJECT STACK_DIR=$STACK_DIR bash -c \"source $here/../integration/stack-lib.sh; stack_down\""' EXIT
+fi
+suffix=""
+if [[ -n "$genres" ]]; then
+  n_genres="$(tr ',' '\n' <<<"$genres" | wc -l)"
+  if (( n_genres == 1 )); then suffix="-$genres"; else suffix="-${n_genres}genres"; fi
+fi
+out="${LOAD_OUT:-$STACK_REPO/data/load-results/$(date -u +%Y%m%dT%H%M%SZ)-$dataset$suffix.json}"
+mkdir -p "$(dirname "$out")"
+
+knn_config="${KNN_CONFIG:-}"
+if [[ -z "$knn_config" ]]; then
+  knn_config="$STACK_REPO/configs/knn.$dataset.tuned.json"
+  [[ -f "$knn_config" ]] || knn_config="$STACK_REPO/configs/knn.json"
+fi
+
+stack_init
+# recs-train prefers knn.<dataset>.tuned.json over knn.json; remove the copied tuned files so the
+# config requested here is the one trained (and named in the result label).
+rm -f "$STACK_DIR"/configs/knn.*.tuned.json
+install -m 0644 "$knn_config" "$STACK_DIR/configs/knn.json"
+slog "knn config ($knn_config): $(cat "$knn_config")"
+stack_train "$dataset" pop,knn knn
+stack_up
+code="$(stack_invite "$(( ${LOAD_USERS:-70} + 5 ))")"
+[[ -n "$code" ]] || { slog "no invite code"; exit 1; }
+
+(cd "$here" && go build -o "$STACK_DIR/recs-load" .)
+# Between setup and measurement: report the host state; with WAIT_QUIET=1, first wait until no
+# fuzzer is running (other load is reported, not waited for).
+# (Bracketed so the pattern does not match the shell running it.)
+fuzz_re='[b]uild/fuzz/|-test[.]fu[z]z|go test .*-fu[z]z'
+quiet="$(cat <<EOF
+if [ -n "${WAIT_QUIET:-}" ]; then
+  until ! pgrep -f '$fuzz_re' >/dev/null; do sleep 10; done
+fi
+echo "host: $(nproc) CPUs, load average \$(cut -d' ' -f1-3 /proc/loadavg)" >&2
+if pgrep -f '$fuzz_re' >/dev/null; then echo "WARNING: fuzzers are running; latency numbers will be skewed" >&2; fi
+EOF
+)"
+# shellcheck disable=SC2086
+LOAD_INVITE="$code" "$STACK_DIR/recs-load" -before-measure "$quiet" -base "http://127.0.0.1:$STACK_PORT" -origin "$STACK_ORIGIN" \
+  -out "$out" -users "${LOAD_USERS:-70}" -clients "${LOAD_CLIENTS:-20}" -genres "$genres" \
+  -label "$dataset, knn $(tr -d '\n ' < "$knn_config")${genres:+, genres $genres}" \
+  ${LOAD_ARGS:-}

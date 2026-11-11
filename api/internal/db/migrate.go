@@ -2,6 +2,8 @@ package db
 
 import (
 	"context"
+	"database/sql/driver"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -21,9 +23,12 @@ import (
 //     api/migrations.
 //   - PRAGMA user_version holds the number of the last applied file.
 //   - Before anything is applied to a non-empty database, a consistent copy is
-//     written with VACUUM INTO to <db dir>/backups/.
+//     written with VACUUM INTO to <db dir>/backups/; old ones are pruned by
+//     count and age (pruneBackups).
 //   - All pending files and the user_version bump run in ONE transaction, so a
-//     failure leaves the database exactly as it was.
+//     failure leaves the database exactly as it was. Foreign key enforcement
+//     is off during that transaction (so a table can be rebuilt) and
+//     foreign_key_check must pass before it commits.
 //   - A database newer than this binary (after a rollback) is left untouched:
 //     migrations are additive, so the older binary still works with it.
 
@@ -78,6 +83,9 @@ func (d *DB) migrate(ctx context.Context, logger *slog.Logger, fsys fs.FS) error
 		return fmt.Errorf("read user_version: %w", err)
 	}
 	latest := len(ms)
+	// Retention runs on every call (every startup), not only when a
+	// migration writes a new backup.
+	d.PruneBackups(logger)
 	switch {
 	case current > latest:
 		logger.Warn("database schema is newer than this binary; leaving it alone",
@@ -98,17 +106,87 @@ func (d *DB) migrate(ctx context.Context, logger *slog.Logger, fsys fs.FS) error
 			return fmt.Errorf("backup before migrating: %w", err)
 		}
 		logger.Info("database backup written before migrating", "backup", path, "version", current)
+		future, err := pruneBackups(filepath.Dir(path), time.Now(), filepath.Base(path))
+		if err != nil {
+			// The new backup exists; failing to delete old ones is not a
+			// reason to refuse to start.
+			logger.Warn("pruning old pre-migration backups failed", "err", err)
+		}
+		warnFuture(logger, future)
 	}
 
-	tx, err := d.Writer.BeginTx(ctx, nil)
+	if err := d.applyWithoutForeignKeys(ctx, ms[current:], latest); err != nil {
+		return err
+	}
+	logger.Info("database migrated", "from", current, "to", latest)
+	return nil
+}
+
+// RequireCurrent returns an error unless every embedded migration has been
+// applied. Commands that run next to a live server (`recs-api admin`) use
+// it instead of migrating themselves.
+func (d *DB) RequireCurrent(ctx context.Context) error {
+	ms, err := loadMigrations(embedded())
+	if err != nil {
+		return err
+	}
+	current, err := d.Version(ctx)
+	if err != nil {
+		return fmt.Errorf("read user_version: %w", err)
+	}
+	if current < len(ms) {
+		return fmt.Errorf("database schema is at version %d but this recs-api needs %d: "+
+			"start the server or run `recs-api migrate` first", current, len(ms))
+	}
+	return nil
+}
+
+// applyWithoutForeignKeys runs the pending migrations and the user_version
+// bump in one transaction with foreign key enforcement switched off, the
+// procedure SQLite documents for rebuilding a table
+// (https://www.sqlite.org/lang_altertable.html#otheralter): with foreign keys
+// on, DROP TABLE on a parent table would first DELETE every row and so fire
+// ON DELETE CASCADE on its children. PRAGMA foreign_keys is a no-op inside a
+// transaction, so it is switched on the (single) writer connection, pinned
+// for the duration, around the transaction. Before committing,
+// foreign_key_check must come back empty, so a migration can never leave a
+// dangling reference behind.
+func (d *DB) applyWithoutForeignKeys(ctx context.Context, pending []migration, latest int) (err error) {
+	conn, err := d.Writer.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		// Always switch enforcement back on before the connection returns to
+		// the pool. If that fails, the connection must not be reused.
+		if _, onErr := conn.ExecContext(context.WithoutCancel(ctx), "PRAGMA foreign_keys = ON"); onErr != nil {
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+			if err == nil {
+				err = fmt.Errorf("re-enable foreign keys: %w", onErr)
+			}
+		}
+		_ = conn.Close()
+	}()
+	if _, err := conn.ExecContext(ctx, "PRAGMA foreign_keys = OFF"); err != nil {
+		return fmt.Errorf("disable foreign keys: %w", err)
+	}
+
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	for _, m := range ms[current:] {
+	for _, m := range pending {
 		if _, err := tx.ExecContext(ctx, m.sql); err != nil {
 			return fmt.Errorf("migration %s: %w", m.name, err)
 		}
+	}
+	var violations int
+	if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM pragma_foreign_key_check").Scan(&violations); err != nil {
+		return fmt.Errorf("foreign_key_check: %w", err)
+	}
+	if violations > 0 {
+		return fmt.Errorf("migrations leave %d foreign key violations; nothing applied", violations)
 	}
 	// PRAGMA takes no bound parameters; latest is the count of embedded files.
 	if _, err := tx.ExecContext(ctx, "PRAGMA user_version = "+strconv.Itoa(latest)); err != nil { // sqlguard:allow integer computed from embedded file names
@@ -117,8 +195,110 @@ func (d *DB) migrate(ctx context.Context, logger *slog.Logger, fsys fs.FS) error
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migrations: %w", err)
 	}
-	logger.Info("database migrated", "from", current, "to", latest)
 	return nil
+}
+
+// Retention of pre-migration backups. Each one holds every account's
+// password hash and ratings, including accounts deleted since, and the site
+// promises that backups holding a deleted account's data are gone within 5
+// weeks. So pruneBackups deletes a backup that is beyond the newest
+// keepBackups OR at least maxBackupAge old, except that a backup younger
+// than minBackupAge is never deleted (a fresh migration always leaves a
+// rollback point), nor is the one just written. A name whose timestamp
+// doesn't parse counts as expired. A name dated more than clockSkew in the
+// future is most likely a real, recent backup and the clock stepped back:
+// it is never deleted, does not count towards the newest keepBackups, and is
+// reported so the caller can warn that the clock or the file dates look
+// wrong. (Deleting such files would wipe every recent backup whenever the
+// host clock jumps back.)
+const (
+	keepBackups  = 3
+	maxBackupAge = 35 * 24 * time.Hour
+	minBackupAge = 24 * time.Hour
+	clockSkew    = 24 * time.Hour
+)
+
+// backupStampLayout is the timestamp format in backup file names (UTC); it
+// sorts chronologically as text.
+const backupStampLayout = "20060102T150405.000000000Z"
+
+// backupName matches the files backup writes; the capture is the timestamp.
+var backupName = regexp.MustCompile(`^app-pre-migrate-v\d+-(\d{8}T\d{6}\.\d{9}Z)\.db$`)
+
+// PruneBackups applies the retention rules above to <db dir>/backups now.
+// Migrate calls it on every run (every startup) and export-ratings on every
+// nightly run. Failures are logged, never fatal.
+func (d *DB) PruneBackups(logger *slog.Logger) {
+	dir := filepath.Join(filepath.Dir(d.path), "backups")
+	future, err := pruneBackups(dir, time.Now(), "")
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		logger.Warn("pruning old pre-migration backups failed", "err", err)
+	}
+	warnFuture(logger, future)
+}
+
+// warnFuture logs the backups pruneBackups kept because they are dated in
+// the future (file names only).
+func warnFuture(logger *slog.Logger, future []string) {
+	if len(future) > 0 {
+		logger.Warn("pre-migration backups are dated more than a day in the future; the system clock "+
+			"or the file dates look wrong. They are kept and not pruned until the clock catches up",
+			"files", future)
+	}
+}
+
+// pruneBackups applies the retention rules above to the pre-migration
+// backups in dir, as of now; protect (a base name, or "") is never deleted.
+// It returns the names it kept because they are dated in the future. Files
+// that don't match backupName are never touched.
+func pruneBackups(dir string, now time.Time, protect string) (future []string, err error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	type backupFile struct {
+		name string
+		at   time.Time
+	}
+	var valid []backupFile
+	var expired []string
+	for _, e := range entries {
+		m := backupName.FindStringSubmatch(e.Name())
+		if m == nil || !e.Type().IsRegular() || e.Name() == protect {
+			continue
+		}
+		at, err := time.Parse(backupStampLayout, m[1])
+		if err != nil {
+			expired = append(expired, e.Name())
+			continue
+		}
+		if at.Sub(now) > clockSkew {
+			future = append(future, e.Name())
+			continue
+		}
+		valid = append(valid, backupFile{e.Name(), at})
+	}
+	sort.Slice(valid, func(i, j int) bool { return valid[i].at.After(valid[j].at) }) // newest first
+	rank := 0
+	if protect != "" {
+		rank = 1 // the protected file is the newest
+	}
+	for _, b := range valid {
+		age := now.Sub(b.at)
+		keep := age < minBackupAge || (rank < keepBackups && age < maxBackupAge)
+		rank++
+		if !keep {
+			expired = append(expired, b.name)
+		}
+	}
+	var errs []error
+	for _, name := range expired {
+		if err := os.Remove(filepath.Join(dir, name)); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	sort.Strings(future)
+	return future, errors.Join(errs...)
 }
 
 func (d *DB) isEmpty(ctx context.Context) (bool, error) {

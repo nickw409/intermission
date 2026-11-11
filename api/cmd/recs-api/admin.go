@@ -12,35 +12,71 @@ import (
 	"time"
 
 	"github.com/nickw409/intermission/api/internal/app"
+	"github.com/nickw409/intermission/api/internal/auth"
 	"github.com/nickw409/intermission/api/internal/invites"
 )
 
 // Owner: workstream I1 (api/cmd/recs-api/admin*.go).
 
-const adminUsage = `usage: recs-api admin invite create [--uses N] [--expires 14d|36h|never] [--note "name"]`
+const adminUsage = `usage:
+  recs-api admin invite create [--uses N] [--expires 14d|36h|never] [--note "name"]
+  recs-api admin sessions revoke-all`
 
 // maxInviteLifetime bounds --expires.
 const maxInviteLifetime = 365 * 24 * time.Hour
 
-// runAdmin handles `recs-api admin ...`, e.g.
-// `recs-api admin invite create --uses N --expires 14d --note "name"`, which
-// prints the new code once. args are the arguments after "admin".
+// runAdmin handles `recs-api admin ...`. args are the arguments after "admin":
+//
+//   - `invite create --uses N --expires 14d --note "name"` prints the new
+//     code once;
+//   - `sessions revoke-all` deletes every session (logs everyone out) and
+//     prints how many it deleted.
 func runAdmin(ctx context.Context, d *app.Deps, args []string) error {
 	return runAdminTo(ctx, d, args, os.Stdout)
 }
 
-// runAdminTo is runAdmin writing the code to out. Only the code goes to out
-// (one line), so it can be piped; it is never logged.
+// runAdminTo is runAdmin writing its result to out.
 func runAdminTo(ctx context.Context, d *app.Deps, args []string, out io.Writer) error {
-	if len(args) < 2 || args[0] != "invite" || args[1] != "create" {
-		return errors.New(adminUsage)
+	switch {
+	case len(args) >= 2 && args[0] == "invite" && args[1] == "create":
+		return adminInviteCreate(ctx, d, args[2:], out)
+	case len(args) >= 2 && args[0] == "sessions" && args[1] == "revoke-all":
+		return adminSessionsRevokeAll(ctx, d, args[2:], out)
 	}
+	return errors.New(adminUsage)
+}
+
+// adminSessionsRevokeAll deletes every session and prints
+// "revoked N sessions". Only the count is printed or logged, never a token
+// (the table holds only token hashes anyway).
+func adminSessionsRevokeAll(ctx context.Context, d *app.Deps, args []string, out io.Writer) error {
+	if len(args) != 0 {
+		return fmt.Errorf("unexpected arguments %q\n%s", args, adminUsage)
+	}
+	// Never migrate from here (see adminInviteCreate).
+	if err := d.DB.RequireCurrent(ctx); err != nil {
+		return err
+	}
+	// The running server needs no signal: it looks sessions up in the
+	// database on every request, so revoked cookies get 401 at once.
+	n, err := auth.RevokeAllSessions(ctx, d.DB)
+	if err != nil {
+		return err
+	}
+	d.Logger.Info("sessions revoked", "count", n)
+	_, err = fmt.Fprintf(out, "revoked %d sessions\n", n)
+	return err
+}
+
+// adminInviteCreate creates an invite and writes the code to out. Only the
+// code goes to out (one line), so it can be piped; it is never logged.
+func adminInviteCreate(ctx context.Context, d *app.Deps, args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("admin invite create", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	uses := fs.Int("uses", 1, "how many signups the code allows")
 	expires := fs.String("expires", "14d", "lifetime: Nd (days), a Go duration such as 36h, or never")
 	note := fs.String("note", "", "who the code is for")
-	if err := fs.Parse(args[2:]); err != nil {
+	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("%w\n%s", err, adminUsage)
 	}
 	if fs.NArg() != 0 {
@@ -54,15 +90,17 @@ func runAdminTo(ctx context.Context, d *app.Deps, args []string, out io.Writer) 
 		return err
 	}
 
-	// The command may run before the server ever has; make sure the schema exists.
-	if err := d.DB.Migrate(ctx, d.Logger); err != nil {
-		return fmt.Errorf("migrate: %w", err)
+	// Never migrate from here: this runs as a second process next to a live
+	// server, and a migration may rebuild tables under it.
+	if err := d.DB.RequireCurrent(ctx); err != nil {
+		return err
 	}
 	code, err := invites.New(d.DB).Create(ctx, *uses, lifetime, *note)
 	if err != nil {
 		return err
 	}
-	d.Logger.Info("invite created", "uses", *uses, "expires_in", lifetime.String(), "note", *note)
+	// The note names a person (personal data): log only whether one was set.
+	d.Logger.Info("invite created", "uses", *uses, "expires_in", lifetime.String(), "note_set", *note != "")
 	_, err = fmt.Fprintln(out, code)
 	return err
 }

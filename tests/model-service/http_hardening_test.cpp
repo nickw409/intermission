@@ -57,11 +57,17 @@ double rss_mib() {
 }
 
 // A raw client connection with 5 s send/receive timeouts.
+//
+// Catch2 assertions are not thread-safe, so a RawConn built on a helper thread (the tricklers
+// below) passes OnHelperThread: the constructor then makes no assertion, and a failed socket()
+// just leaves the connection unusable (send_all returns false).
 class RawConn {
  public:
-  explicit RawConn(const fs::path& sock) {
+  enum Thread { OnTestThread, OnHelperThread };
+  explicit RawConn(const fs::path& sock, Thread thread = OnTestThread) {
     fd_ = ::socket(AF_UNIX, SOCK_STREAM, 0);
-    REQUIRE(fd_ >= 0);
+    if (thread == OnTestThread) REQUIRE(fd_ >= 0);
+    if (fd_ < 0) return;
     timeval tv{5, 0};
     ::setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
     ::setsockopt(fd_, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
@@ -70,7 +76,9 @@ class RawConn {
     std::strncpy(addr.sun_path, sock.c_str(), sizeof(addr.sun_path) - 1);
     connected_ = ::connect(fd_, reinterpret_cast<sockaddr*>(&addr), sizeof addr) == 0;
   }
-  ~RawConn() { ::close(fd_); }
+  ~RawConn() {
+    if (fd_ >= 0) ::close(fd_);
+  }
   bool connected() const { return connected_; }
   // Sends everything; false as soon as the peer stops accepting (closed, reset or timed out).
   bool send_all(std::string_view s) {
@@ -254,8 +262,9 @@ TEST_CASE("recs-model: slow clients do not starve /healthz", "[model-service][ha
   std::atomic<bool> stop{false};
   // Each trickler sends a request line and then one short header line every 200 ms, never
   // finishing its headers; each byte arrives well within the 1 s read timeout.
+  // Runs on helper threads: no Catch2 assertions in here.
   const auto trickle = [&] {
-    RawConn c(s.sock);
+    RawConn c(s.sock, RawConn::OnHelperThread);
     if (!c.send_all("GET /healthz HTTP/1.1\r\n")) return;
     while (!stop.load()) {
       if (!c.send_all("X: y\r\n")) return;

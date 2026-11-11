@@ -1,0 +1,12 @@
+userId,movieId,tag,timestamp
+1,1,pixar,1600000001
+2,1,Pixar,1600000002
+1,23,pixar,1600000003
+4,16,cyberpunk,1600000004
+5,16,philosophy,1600000005
+4,9,space opera,1600000006
+6,10,nonlinear,1600000007
+6,10,"quotable, violent",1600000008
+7,19,epic,1600000009
+8,20,studio ghibli,1600000010
+99,22,creepy,1600000011

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -282,19 +283,32 @@ func TestLoginTimingCoarse(t *testing.T) {
 	params := Params{Time: 1, MemoryKiB: 16 * 1024, Threads: 4, SaltLen: 16, KeyLen: 32}
 	h := newHarness(t, app.SignupOpen, func(o *options) { o.Hasher = NewArgon2id(params, MaxConcurrentHashes) })
 	h.mustSignup("alice", goodPass)
-	measure := func(username string) time.Duration {
-		var ds []time.Duration
-		for i := 0; i < 7; i++ {
-			start := time.Now()
-			if rec := h.do("POST", "/api/auth/login", loginBody{username, "wrong password!"}, ""); rec.Code != 401 {
-				t.Fatalf("status %d", rec.Code)
-			}
-			ds = append(ds, time.Since(start))
+	once := func(username string) time.Duration {
+		start := time.Now()
+		if rec := h.do("POST", "/api/auth/login", loginBody{username, "wrong password!"}, ""); rec.Code != 401 {
+			t.Fatalf("status %d", rec.Code)
 		}
+		return time.Since(start)
+	}
+	median := func(ds []time.Duration) time.Duration {
 		sort.Slice(ds, func(i, j int) bool { return ds[i] < ds[j] })
 		return ds[len(ds)/2]
 	}
-	known, unknown := measure("alice"), measure("nobody")
+	// Interleaved, alternating which path goes first: background load (other test packages
+	// running in parallel, CPU frequency changes) then lands on both paths alike instead of on
+	// whichever was measured first. Measuring all of one path and then all of the other failed
+	// on CI at ratio 2.2 with identical code paths.
+	var knownDs, unknownDs []time.Duration
+	for i := 0; i < 7; i++ {
+		if i%2 == 0 {
+			knownDs = append(knownDs, once("alice"))
+			unknownDs = append(unknownDs, once("nobody"))
+		} else {
+			unknownDs = append(unknownDs, once("nobody"))
+			knownDs = append(knownDs, once("alice"))
+		}
+	}
+	known, unknown := median(knownDs), median(unknownDs)
 	ratio := float64(known) / float64(unknown)
 	t.Logf("median wrong-password %v, unknown-user %v, ratio %.2f", known, unknown, ratio)
 	if ratio < 0.5 || ratio > 2 {
@@ -606,6 +620,56 @@ func TestGetMeCountsRatings(t *testing.T) {
 	}
 	if cc := rec.Header().Get("Cache-Control"); !strings.Contains(cc, "no-store") {
 		t.Fatalf("Cache-Control %q", cc)
+	}
+}
+
+// Security audit SA1-1 / SA5-3: deleting an account tells the rest of the
+// process (recommendation cache, rate limits) to forget that user ID, and
+// checkpoints the WAL so the deleted rows' old pages don't linger in it.
+func TestDeleteMeNotifiesAndCheckpoints(t *testing.T) {
+	h := newHarness(t, app.SignupOpen)
+	var mu sync.Mutex
+	var notified []int64
+	h.db.OnUserDeleted(func(uid int64) {
+		mu.Lock()
+		defer mu.Unlock()
+		notified = append(notified, uid)
+	})
+	token := h.mustSignup("alice", goodPass)
+	var id int64
+	if err := h.db.Reader.QueryRow("SELECT id FROM users WHERE username = 'alice'").Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	if rec := h.do("DELETE", "/api/me", nil, token); rec.Code != 204 {
+		t.Fatalf("delete: %d", rec.Code)
+	}
+	mu.Lock()
+	got := append([]int64(nil), notified...)
+	mu.Unlock()
+	if len(got) != 1 || got[0] != id {
+		t.Fatalf("user-deleted hooks got %v, want [%d]", got, id)
+	}
+	// The checkpoint runs in the background, soon after.
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		st, err := os.Stat(h.db.Path() + "-wal")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Size() == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("WAL still holds %d bytes 5 s after an account deletion", st.Size())
+		}
+	}
+	// A failed delete (no session) notifies nobody.
+	if rec := h.do("DELETE", "/api/me", nil, token); rec.Code != 401 {
+		t.Fatalf("second delete: %d", rec.Code)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(notified) != 1 {
+		t.Fatalf("hooks ran %d times", len(notified))
 	}
 }
 
