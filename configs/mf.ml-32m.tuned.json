@@ -1,0 +1,1 @@
+{ "k": 64, "lambda": 0.06, "lr": 0.03, "lr_decay": 0.995, "max_epochs": 800, "patience": 30, "init_sd": 0.05, "user_init_sd": 0, "min_support": 300, "blocks": 8, "precision": "float" }

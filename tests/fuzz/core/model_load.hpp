@@ -8,7 +8,7 @@
 // fuzz_util.hpp).
 //
 // After a successful load the model is used once (fold_in + score over a few items), so a file
-// that loads but leaves inconsistent state is caught too.
+// that loads but leaves inconsistent state is caught too. The ranking mask runs as well.
 #pragma once
 
 #include <cstddef>
@@ -96,6 +96,7 @@ inline int model_load(std::string_view model, const std::uint8_t* data, std::siz
     const UserState u = m->fold_in(ratings);
     std::vector<float> out(n);
     m->score(u, out);
+    m->mask_unrankable(out);  // the ranking mask must cope with whatever the file held
     for (float v : out) {
       if (v != v) __builtin_trap();  // NaN scores are forbidden by the Model contract
     }

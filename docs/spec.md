@@ -188,7 +188,7 @@ Also report a pure count-based variant. Both are baselines that every other mode
 \hat r_{ui} = \mu + b_u + b_i + p_u^\top q_i \qquad \min \sum_{(u,i)} (r_{ui} - \hat r_{ui})^2 + \lambda\left(b_u^2 + b_i^2 + \lVert p_u\rVert^2 + \lVert q_i\rVert^2\right)
 ```
 
-Shuffle every epoch with a seeded RNG, decay the learning rate, and early-stop on validation RMSE. Fold-in: estimate bᵤ as the damped mean residual, then solve the ridge system for pᵤ with Q and bᵢ fixed.
+Shuffle every epoch with a seeded RNG, decay the learning rate, and early-stop on validation RMSE. Training may run in parallel only as stratified blocks (DSGD: cells that share no user or movie, each shuffled with its own seeded stream), so results depend on the seed and the block count, never the thread count; parameters may be stored in float32 while every sum over ratings stays in double. Fold-in: estimate bᵤ as the damped mean residual, then solve the ridge system for pᵤ with Q and bᵢ fixed.
 
 ### Implicit ALS
 

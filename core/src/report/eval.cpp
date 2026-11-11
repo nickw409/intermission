@@ -4,7 +4,8 @@
 // ----------
 // For every evaluated user u (ascending UserIdx):
 //   1. state = m.fold_in(u's training ratings) — the same code path the website uses.
-//   2. list  = recommend(m, state, max(ks)): every item except u's training items, best first.
+//   2. list  = recommend(m, state, max(ks)): every item except u's training items (and except
+//      what the model's ranking mask removes, e.g. MF's min_support floor), best first.
 //   3. Ranking metrics at each k against u's held-out ratings (recs/metrics.hpp: relevant iff
 //      rating >= 4.0, graded gain rating - 3.5). Users with no relevant held-out item get empty
 //      ranking vectors: they are excluded from ranking-metric means (an all-zero row would only
@@ -12,7 +13,8 @@
 //   4. mean_pop_rank10: the mean popularity rank (1 = most rated in `train`) of the user's top-10,
 //      for every user. NaN if the list is empty (no candidates at all); excluded from the mean.
 //   5. Rating task, only for models that predict star ratings: per-user sums of squared and
-//      absolute errors of score[item] against each held-out rating. If the model cannot score a
+//      absolute errors of score[item] (score() itself, before any ranking mask) against each
+//      held-out rating. If the model cannot score a
 //      held-out item (a non-finite score, e.g. a movie with no training ratings), the prediction
 //      is the global mean of the training ratings and the rating still counts; the number of such
 //      fallbacks is printed to stderr at the end of evaluate().
@@ -123,6 +125,7 @@ class TrainedUserView final : public Model {
   UserState fold_in(std::span<const Rating>) const override { unsupported(); }
   void score(const UserState&, std::span<float> out) const override { inner_.score_trained_user(u_, out); }
   Explanation explain(const UserState&, ItemIdx) const override { unsupported(); }
+  void mask_unrankable(std::span<float> scores) const override { inner_.mask_unrankable(scores); }
   void save(const fs::path&) const override { unsupported(); }
   void load(const fs::path&) override { unsupported(); }
   std::uint32_t n_items() const override { return inner_.n_items(); }
