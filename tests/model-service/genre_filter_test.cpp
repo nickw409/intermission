@@ -285,3 +285,42 @@ TEST_CASE("recs-model: genres: request schemas accept and reject like the servic
   cmp["genres"] = {"Western", "Western"};
   CHECK_FALSE(validate_against(cmp, "CompareRequest").empty());
 }
+
+TEST_CASE("recs-model: genres: catalog genres outside the enum are ignored, not matched", "[model-service][genres]") {
+  // Regression: a catalog genre string the contract enum does not know ("Superhero") gets no bit.
+  // 1081 has it plus a known genre (Western) and matches only via Western; 7003 has only the
+  // unknown genre and so matches no filter. Bundle load must not fail on either.
+  auto artifact = recs::testing::fixture_artifact();
+  for (auto& m : artifact.catalog.movies) {
+    if (m.movie_id == 1081) m.genres = {"Superhero", "Western"};
+    if (m.movie_id == 7003) m.genres = {"Superhero"};
+  }
+  recs::service::BundleHolder holder;
+  REQUIRE_NOTHROW(holder.store(recs::service::make_bundle(std::move(artifact))));
+  recs::service::Metrics metrics;
+  recs::service::Service svc(holder, metrics, [](std::string_view) {});
+  const auto items = [&](const json& body) {
+    const auto r = svc.handle({"POST", "/v1/recommend", {}, "", body.dump()});
+    INFO(body.dump() << " -> " << r.body);
+    REQUIRE(r.status == 200);
+    return json::parse(r.body)["items"];
+  };
+
+  for (const auto& m : kModels) {
+    INFO(m);
+    const json west = items(rec_body(m, 10, json::array({"Western"})));
+    REQUIRE(west.size() == 1);
+    CHECK(west[0]["movie_id"] == 1081);
+    // 7003 was the only Documentary; with only an unknown genre left, nothing matches.
+    CHECK(items(rec_body(m, 10, json::array({"Documentary"}))) == json::array());
+    for (const auto& it : items(rec_body(m, 100, json(kAllGenres)))) CHECK(it["movie_id"] != 7003);
+    // Unfiltered, 7003 is still an ordinary candidate.
+    bool found = false;
+    for (const auto& it : items(rec_body(m, 100, nullptr))) found = found || it["movie_id"] == 7003;
+    CHECK(found);
+  }
+  // The unknown name is still rejected in a request.
+  const auto bad = svc.handle({"POST", "/v1/recommend", {}, "", rec_body("pop", 5, json::array({"Superhero"})).dump()});
+  CHECK(bad.status == 400);
+  CHECK(code_of(bad) == "bad_request");
+}

@@ -319,6 +319,9 @@ GenreMask parse_genres(const json& obj) {
 // filtering its output) means the result is the k best MATCHING items, in the order the unfiltered
 // ranking would put them. Shared by recommend and compare, so every model is filtered the same way
 // and no model needs to know about genres. O(n_items) with one bitwise AND per item.
+// Any future re-ranker (mmr, hybrid) must receive this pre-masked list too, so the genre filter is
+// applied before re-ranking: re-ranking first and filtering after would return fewer than k items
+// and a different order than re-ranking the matching set.
 std::vector<ItemIdx> masked_items(const Bundle& b, std::vector<ItemIdx> exclude, GenreMask wanted) {
   if (wanted == 0) return exclude;
   const std::uint32_t n = b.n_items();
