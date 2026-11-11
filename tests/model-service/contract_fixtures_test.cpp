@@ -195,23 +195,49 @@ TEST_CASE("recs-model: fixture responses validate against the transcribed schema
   }
 }
 
-TEST_CASE("recs-model: transcribed schemas match model.yaml's required lists", "[model-service][contract]") {
+TEST_CASE("recs-model: transcribed schemas match model.yaml", "[model-service][contract]") {
   const std::string yaml = read_text(recs::testing::contracts_dir() / "model.yaml");
-  std::size_t checked = 0;
-  const auto check_required = [&](const json& schema, const auto& self) -> void {
+  const auto& components = recs::testing::model_components();
+  const auto list_line = [](std::string_view key, const json& values) {
+    std::string line = std::string(key) + ": [";
+    for (std::size_t i = 0; i < values.size(); ++i) line += (i ? ", " : "") + values[i].get<std::string>();
+    return line + "]";
+  };
+
+  // Every transcribed `required` and `enum` list appears verbatim in model.yaml.
+  std::size_t required_checked = 0;
+  std::size_t enums_checked = 0;
+  const auto check_lists = [&](const json& schema, const auto& self) -> void {
     if (!schema.is_object()) return;
-    if (schema.contains("required")) {
-      std::string line = "required: [";
-      for (std::size_t i = 0; i < schema["required"].size(); ++i) {
-        line += (i ? ", " : "") + schema["required"][i].get<std::string>();
-      }
-      line += "]";
+    for (const std::string_view key : {"required", "enum"}) {
+      if (!schema.contains(key)) continue;
+      const std::string line = list_line(key, schema[std::string(key)]);
       INFO(line);
       CHECK(yaml.find(line) != std::string::npos);
-      ++checked;
+      ++(key == "required" ? required_checked : enums_checked);
     }
     for (const auto& [k, v] : schema.items()) self(v, self);
   };
-  for (const auto& [name, schema] : recs::testing::model_components().items()) check_required(schema, check_required);
-  CHECK(checked >= 14);
+  for (const auto& [name, schema] : components.items()) check_lists(schema, check_lists);
+  CHECK(required_checked >= 17);
+  CHECK(enums_checked >= 5);
+
+  // The request schemas: every property that is a $ref appears as that line in model.yaml, and the
+  // genre list's bounds match.
+  for (const char* req : {"RecommendRequest", "CompareRequest"}) {
+    const json& props = components.at(req).at("properties");
+    CHECK(props.contains("genres"));
+    for (const auto& [prop, sub] : props.items()) {
+      if (!sub.contains("$ref")) continue;
+      const std::string line = prop + ": { $ref: '" + sub["$ref"].get<std::string>() + "' }";
+      INFO(req << ": " << line);
+      CHECK(yaml.find(line) != std::string::npos);
+    }
+  }
+  const json& genres = components.at("Genres");
+  CHECK(genres.at("maxItems") == 19);
+  CHECK(genres.at("uniqueItems") == true);
+  CHECK(components.at("Genre").at("enum").size() == 19);
+  CHECK(yaml.find("    Genres:\n      type: array\n      maxItems: 19\n      uniqueItems: true\n") != std::string::npos);
+  CHECK(yaml.find("items: { $ref: '#/components/schemas/Genre' }") != std::string::npos);
 }
