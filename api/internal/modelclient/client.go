@@ -92,6 +92,7 @@ const (
 	MaxSearchQ  = 100 // characters
 	MaxSearchN  = 50
 	MaxMovieID  = 2147483647
+	MaxGenres   = 19 // Genres maxItems: every genre at most once
 )
 
 // ModelName is a recommender name (ModelName enum in model.yaml).
@@ -111,6 +112,38 @@ const (
 
 // AllModels lists every ModelName in contract order.
 var AllModels = []ModelName{ModelPop, ModelPopCount, ModelKNN, ModelContent, ModelMF, ModelALS, ModelHybrid, ModelMMR}
+
+// Genre is a MovieLens genre name (Genre enum in model.yaml; public.yaml's
+// Genre enum is the same list). Names are case-sensitive.
+type Genre string
+
+// Every Genre in model.yaml.
+const (
+	GenreAction      Genre = "Action"
+	GenreAdventure   Genre = "Adventure"
+	GenreAnimation   Genre = "Animation"
+	GenreChildren    Genre = "Children"
+	GenreComedy      Genre = "Comedy"
+	GenreCrime       Genre = "Crime"
+	GenreDocumentary Genre = "Documentary"
+	GenreDrama       Genre = "Drama"
+	GenreFantasy     Genre = "Fantasy"
+	GenreFilmNoir    Genre = "Film-Noir"
+	GenreHorror      Genre = "Horror"
+	GenreIMAX        Genre = "IMAX"
+	GenreMusical     Genre = "Musical"
+	GenreMystery     Genre = "Mystery"
+	GenreRomance     Genre = "Romance"
+	GenreSciFi       Genre = "Sci-Fi"
+	GenreThriller    Genre = "Thriller"
+	GenreWar         Genre = "War"
+	GenreWestern     Genre = "Western"
+)
+
+// AllGenres lists every Genre in contract order.
+var AllGenres = []Genre{GenreAction, GenreAdventure, GenreAnimation, GenreChildren, GenreComedy, GenreCrime,
+	GenreDocumentary, GenreDrama, GenreFantasy, GenreFilmNoir, GenreHorror, GenreIMAX, GenreMusical, GenreMystery,
+	GenreRomance, GenreSciFi, GenreThriller, GenreWar, GenreWestern}
 
 // ErrorBody is the Error schema: {"error":{"code","message"}}.
 type ErrorBody struct {
@@ -135,6 +168,9 @@ type RecommendRequest struct {
 	Ratings []RatingIn `json:"ratings"`
 	K       int        `json:"k"`
 	Exclude []int64    `json:"exclude,omitempty"`
+	// Genres restricts results to movies with at least one of these genres.
+	// Empty means no restriction (the field is then omitted).
+	Genres []Genre `json:"genres,omitempty"`
 }
 
 // CompareRequest is the body of POST /v1/compare.
@@ -143,6 +179,8 @@ type CompareRequest struct {
 	Ratings []RatingIn  `json:"ratings"`
 	K       int         `json:"k"`
 	Exclude []int64     `json:"exclude,omitempty"`
+	// Genres: as in RecommendRequest.
+	Genres []Genre `json:"genres,omitempty"`
 }
 
 // Because is one explanation entry: a movie the user rated and its weight.
