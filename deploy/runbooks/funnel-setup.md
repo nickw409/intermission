@@ -72,7 +72,7 @@ Tailscale disconnected. (`-Z root` is needed because the container has no capabi
 switch to tcpdump's own user.)
 
 **Result on 2026-11-10:** Funnel passes the client IP. Requests through Funnel carried
-`X-Forwarded-For` with a public address (the phone's carrier address on the reloads; one other
+`X-Forwarded-For` with a public address (the phone's public address, confirmed by the owner; one other
 address, a scanner),
 `X-Forwarded-Host` (the site name), `X-Forwarded-Proto: https` and `Tailscale-Funnel-Request`.
 Per-IP limits are therefore possible (finding SA1-3); the steps below are the follow-up, still to
