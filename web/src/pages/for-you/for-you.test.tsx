@@ -1,7 +1,7 @@
-import { act, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { feedbackHook } from '../../lib/feedback';
 import { errorBody, gate, queryOf, rateWithKeyboard, recordRequests } from '../../lib/test-helpers';
 import { fixtureFor, handlerFor, responseFor } from '../../mocks/handlers';
@@ -35,6 +35,7 @@ function card(title: string): HTMLElement {
 describe('For you page', () => {
   afterEach(() => {
     vi.useRealTimers();
+    localStorage.clear();
   });
 
   it('shows a loading state, then the top 20 from the default model', async () => {
@@ -284,6 +285,276 @@ describe('For you page', () => {
     setup();
     renderApp('/');
     await screen.findAllByText(marker);
+    expect(await axeViolations()).toEqual([]);
+  });
+});
+
+const MODEL_OPTIONS = [
+  'Popularity',
+  'Popularity (count)',
+  'Item-KNN',
+  'Content-based',
+  'Matrix factorization',
+  'Implicit ALS (default)',
+];
+const STORAGE_KEY = 'intermission.for-you';
+
+/** Answers /api/recommend with `count` movies, echoing the requested model. */
+function recommendWith(count: number) {
+  return http.get('/api/recommend', ({ request }) =>
+    HttpResponse.json({
+      model: new URL(request.url).searchParams.get('model') ?? 'als',
+      model_version: 'v',
+      cold_start: false,
+      items: Array.from({ length: count }, (_, i) => ({
+        movieId: 1000 + i,
+        title: `Movie ${i + 1}`,
+        year: 2000,
+        score: 1 - i / 100,
+        because: [],
+      })),
+    }),
+  );
+}
+
+function modelSelect(): HTMLSelectElement {
+  return screen.getByRole('combobox', { name: 'Model' });
+}
+
+function chip(name: string): HTMLElement {
+  return within(screen.getByRole('group', { name: 'Categories' })).getByRole('button', { name });
+}
+
+function stored(): unknown {
+  const raw = localStorage.getItem(STORAGE_KEY);
+  return raw === null ? null : JSON.parse(raw);
+}
+
+describe('For you: model selector and categories', () => {
+  beforeEach(() => localStorage.clear());
+  afterEach(() => {
+    localStorage.clear();
+    vi.restoreAllMocks();
+  });
+
+  it('lists every loaded model by name, with the default preselected and marked', async () => {
+    await openPage();
+    const select = modelSelect();
+    expect(within(select).getAllByRole('option').map((o) => o.textContent)).toEqual(MODEL_OPTIONS);
+    expect(select.value).toBe('als');
+    expect(screen.getByRole('main')).toHaveTextContent('Picks from Implicit ALS');
+  });
+
+  it('refetches with the chosen model, shows it in the header and keeps it in the URL and storage', async () => {
+    const user = userEvent.setup();
+    server.use(recommendWith(20));
+    const { router } = renderApp('/');
+    await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
+    const recommend = recordRequests('/api/recommend');
+    await user.selectOptions(modelSelect(), 'knn');
+    await screen.findByText('Picks from Item-KNN');
+    expect(recommend.map(queryOf)).toEqual([{ model: 'knn', k: '20' }]);
+    expect(new URLSearchParams(router.state.location.search).get('model')).toBe('knn');
+    expect(stored()).toEqual({ model: 'knn', genres: [] });
+  });
+
+  it('shows the genres as toggle buttons, IMAX last, none pressed at first', async () => {
+    await openPage();
+    const group = screen.getByRole('group', { name: 'Categories' });
+    const chips = within(group)
+      .getAllByRole('button')
+      .filter((b) => b.hasAttribute('aria-pressed'));
+    expect(chips).toHaveLength(19);
+    expect(chips[0]).toHaveAccessibleName('Action');
+    expect(chips.at(-1)).toHaveAccessibleName('IMAX');
+    for (const c of chips) expect(c).toHaveAttribute('aria-pressed', 'false');
+    expect(within(group).getByRole('button', { name: 'Clear' })).toBeInTheDocument();
+  });
+
+  it('sends the chosen genres comma-joined in enum order, and Clear removes them', async () => {
+    const user = userEvent.setup();
+    server.use(recommendWith(20));
+    const { router } = renderApp('/');
+    await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
+    const recommend = recordRequests('/api/recommend');
+
+    await user.click(chip('Horror'));
+    expect(chip('Horror')).toHaveAttribute('aria-pressed', 'true');
+    await waitFor(() => expect(recommend).toHaveLength(1));
+    await user.click(chip('Action'));
+    await waitFor(() => expect(recommend).toHaveLength(2));
+    expect(queryOf(recommend[0]!)).toEqual({ model: 'als', k: '20', genres: 'Horror' });
+    expect(queryOf(recommend[1]!)).toEqual({ model: 'als', k: '20', genres: 'Action,Horror' });
+    expect(new URLSearchParams(router.state.location.search).get('genres')).toBe('Action,Horror');
+    expect(stored()).toEqual({ model: 'als', genres: ['Action', 'Horror'] });
+    await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
+
+    await user.click(chip('Clear'));
+    await waitFor(() => expect(recommend).toHaveLength(3));
+    expect(queryOf(recommend[2]!)).toEqual({ model: 'als', k: '20' });
+    expect(chip('Horror')).toHaveAttribute('aria-pressed', 'false');
+    expect(new URLSearchParams(router.state.location.search).has('genres')).toBe(false);
+    expect(document.activeElement).not.toBe(document.body);
+  });
+
+  it('chips work from the keyboard', async () => {
+    const user = userEvent.setup();
+    await openPage();
+    const recommend = recordRequests('/api/recommend');
+    act(() => chip('Comedy').focus());
+    await user.keyboard('{Enter}');
+    expect(chip('Comedy')).toHaveAttribute('aria-pressed', 'true');
+    await waitFor(() => expect(recommend).toHaveLength(1));
+    expect(queryOf(recommend[0]!).genres).toBe('Comedy');
+  });
+
+  it('starts from the model and genres in the URL', async () => {
+    server.use(recommendWith(20));
+    const recommend = recordRequests('/api/recommend');
+    renderApp('/?model=knn&genres=Horror,Action');
+    await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
+    expect(recommend.map(queryOf)).toEqual([{ model: 'knn', k: '20', genres: 'Action,Horror' }]);
+    expect(modelSelect().value).toBe('knn');
+    expect(chip('Horror')).toHaveAttribute('aria-pressed', 'true');
+    expect(chip('Action')).toHaveAttribute('aria-pressed', 'true');
+    expect(chip('Drama')).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it.each([
+    ['an unknown model and genre', '/?model=bogus&genres=Horror,Nope', { model: 'als', k: '20', genres: 'Horror' }],
+    ['a model that is not loaded', '/?model=hybrid', { model: 'als', k: '20' }],
+    ['only unknown genres', '/?genres=horror,,Sci%20Fi', { model: 'als', k: '20' }],
+  ])('ignores %s in the URL', async (_, path, expected) => {
+    server.use(recommendWith(20));
+    const recommend = recordRequests('/api/recommend');
+    renderApp(path);
+    await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
+    expect(recommend.map(queryOf)).toEqual([expected]);
+  });
+
+  it('remembers the last choice in this browser when the URL has none', async () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ model: 'content', genres: ['Comedy', 'Animation'] }));
+    server.use(recommendWith(20));
+    const recommend = recordRequests('/api/recommend');
+    const { router } = renderApp('/');
+    await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
+    expect(recommend.map(queryOf)).toEqual([{ model: 'content', k: '20', genres: 'Animation,Comedy' }]);
+    expect(modelSelect().value).toBe('content');
+    // The URL shows the remembered view, so it can be shared as is.
+    const params = new URLSearchParams(router.state.location.search);
+    expect(params.get('model')).toBe('content');
+    expect(params.get('genres')).toBe('Animation,Comedy');
+  });
+
+  it('the URL wins over the remembered choice', async () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ model: 'content', genres: ['Comedy'] }));
+    const recommend = recordRequests('/api/recommend');
+    renderApp('/?model=mf&genres=War');
+    await screen.findByRole('heading', { level: 2, name: LOTR });
+    expect(recommend.map(queryOf)).toEqual([{ model: 'mf', k: '20', genres: 'War' }]);
+  });
+
+  it.each([
+    ['unknown values', JSON.stringify({ model: 'bogus', genres: ['Nope', 5, 'horror'] })],
+    ['a model that is not loaded', JSON.stringify({ model: 'mmr', genres: 'Horror' })],
+    ['malformed JSON', '{not json'],
+    ['the wrong shape', JSON.stringify(['knn', 'Horror'])],
+  ])('ignores a remembered choice with %s', async (_, raw) => {
+    localStorage.setItem(STORAGE_KEY, raw);
+    const recommend = recordRequests('/api/recommend');
+    await openPage();
+    expect(recommend.map(queryOf)).toEqual([{ model: 'als', k: '20' }]);
+  });
+
+  it('still works when browser storage is unavailable', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new DOMException('denied', 'SecurityError');
+    });
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new DOMException('denied', 'SecurityError');
+    });
+    const recommend = recordRequests('/api/recommend');
+    await openPage();
+    await user.selectOptions(modelSelect(), 'knn');
+    await waitFor(() => expect(recommend).toHaveLength(2));
+    expect(queryOf(recommend[1]!)).toEqual({ model: 'knn', k: '20' });
+  });
+
+  it('says when a category filter returns fewer than 20 movies', async () => {
+    server.use(recommendWith(3));
+    renderApp('/?genres=Horror');
+    await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
+    expect(screen.getByRole('main')).toHaveTextContent(
+      'Only 3 horror picks right now — rate more movies or widen the categories.',
+    );
+  });
+
+  it('names several categories in the short-list message', async () => {
+    server.use(recommendWith(1));
+    renderApp('/?genres=Horror,Sci-Fi,Action');
+    await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
+    expect(screen.getByRole('main')).toHaveTextContent(
+      'Only 1 action, horror or sci-fi pick right now — rate more movies or widen the categories.',
+    );
+  });
+
+  it('does not show the short-list message for a full list or without categories', async () => {
+    server.use(recommendWith(20));
+    renderApp('/?genres=Horror');
+    await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
+    expect(screen.queryByText(/Only \d+/)).not.toBeInTheDocument();
+    cleanup();
+    server.use(recommendWith(3));
+    renderApp('/');
+    await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
+    expect(screen.queryByText(/Only \d+/)).not.toBeInTheDocument();
+  });
+
+  it('shows an empty state with "Clear categories" when the filter matches nothing', async () => {
+    const user = userEvent.setup();
+    server.use(recommendWith(0));
+    renderApp('/?genres=Western');
+    const main = screen.getByRole('main');
+    await within(main).findByText('No western picks right now.');
+    expect(await axeViolations()).toEqual([]);
+    const recommend = recordRequests('/api/recommend');
+    server.use(recommendWith(20));
+    await user.click(within(main).getByRole('button', { name: 'Clear categories' }));
+    await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
+    expect(recommend.map(queryOf)).toEqual([{ model: 'als', k: '20' }]);
+    expect(chip('Western')).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('keeps the cold-start message with categories chosen', async () => {
+    server.use(handlerFor('recommend', 'ok_cold_start'));
+    const recommend = recordRequests('/api/recommend');
+    renderApp('/?genres=Drama');
+    await screen.findByRole('heading', { level: 2, name: 'The Shawshank Redemption' });
+    expect(screen.getByRole('main')).toHaveTextContent(/Rate at least 5 movies/);
+    expect(queryOf(recommend[0]!).genres).toBe('Drama');
+  });
+
+  it('refetches with the same model and genres after a rating change', async () => {
+    const recommend = recordRequests('/api/recommend');
+    renderApp('/?model=knn&genres=Fantasy');
+    await screen.findByRole('heading', { level: 2, name: LOTR });
+    rateWithKeyboard(within(card(LOTR)).getByRole('slider'), 4);
+    await waitFor(() => expect(recommend).toHaveLength(2));
+    expect(queryOf(recommend[1]!)).toEqual({ model: 'knn', k: '20', genres: 'Fantasy' });
+  });
+
+  it('hides the model selector when the model list is unavailable, still showing categories', async () => {
+    server.use(http.get('/api/models', () => errorBody('internal', 500)));
+    await openPage();
+    expect(screen.queryByRole('combobox', { name: 'Model' })).not.toBeInTheDocument();
+    expect(chip('Horror')).toBeInTheDocument();
+  });
+
+  it('has no axe violations with categories chosen', async () => {
+    server.use(recommendWith(3));
+    renderApp('/?model=knn&genres=Horror,Action');
+    await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
     expect(await axeViolations()).toEqual([]);
   });
 });
