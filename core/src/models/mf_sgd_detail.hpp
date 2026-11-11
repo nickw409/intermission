@@ -40,8 +40,8 @@ Params gradient(const Params& m, std::span<const Triplet> ratings, double lambda
 /// partial derivative taken at the old parameter values (simultaneous update).
 void sgd_step(Params& m, const Triplet& rating, double lr, double lambda);
 
-/// A training rating as fit() stores it: 12 bytes (Triplet is 24), so the epoch loop streams half
-/// the memory.
+/// A training rating as fit() stores it: 12 bytes (Triplet is 24). fit() shuffles these records
+/// in place and reads them sequentially, rather than gathering Triplets through an index.
 struct SgdRating {
   std::uint32_t row = 0;  // user
   std::uint32_t col = 0;  // item
