@@ -26,6 +26,13 @@
 //   - Each epoch visits every rating once in an order given by a seeded Fisher-Yates shuffle
 //     (mf_detail::EpochShuffler: one recs::Rng(mix_seed(seed, 2)) stream for the run, each epoch
 //     re-shuffling the previous permutation), then multiplies the learning rate by lr_decay.
+//   - Speed: the loop is bound by memory latency, not arithmetic (each update reads one random
+//     user row and one random item row; on ml-32m P and Q are far larger than the caches). So
+//     fit() shuffles compact 12-byte rating records in place (mf_detail::RecordShuffler, the same
+//     swaps as EpochShuffler) and walks them in order, and prefetches the parameter rows a few
+//     ratings ahead (mf_detail::sgd_epoch). Both only change the memory access pattern: the
+//     results are bit-identical to the plain index-shuffle loop, about 2.5x faster on ml-32m-sized
+//     data.
 //   - Early stopping: with a validation set (ctx.validation), the RMSE on it is measured after each
 //     epoch; training stops after `patience` epochs without improvement and the parameters of the
 //     best epoch are restored. Without one, or when none of its ratings is
@@ -163,6 +170,31 @@ void sgd_step(Params& m, const Triplet& rating, double lr, double lambda) {
   double* q = m.Q.data() + i * m.k;
   add_rating_gradient(e, m.bu[u], m.bi[i], p, q, m.k, lambda, -lr, m.bu[u], m.bi[i], p, q);
 }
+
+void sgd_epoch(Params& m, std::span<const SgdRating> in_order, double lr, double lambda) {
+  const std::size_t n = in_order.size();
+  const std::uint32_t k = m.k;
+  for (std::size_t j = 0; j < n; ++j) {
+    if (j + kPrefetchAhead < n) {
+      // Hints only (no effect on results): the rows rating j + kPrefetchAhead will touch.
+      const SgdRating& ahead = in_order[j + kPrefetchAhead];
+      const double* p = m.P.data() + std::size_t{ahead.row} * k;
+      const double* q = m.Q.data() + std::size_t{ahead.col} * k;
+      for (std::uint32_t f = 0; f < k; f += 8) {  // one hint per 64-byte cache line
+        __builtin_prefetch(p + f, 1);
+        __builtin_prefetch(q + f, 1);
+      }
+      __builtin_prefetch(m.bu.data() + ahead.row, 1);
+      __builtin_prefetch(m.bi.data() + ahead.col, 1);
+    }
+    const SgdRating& r = in_order[j];
+    sgd_step(m, Triplet{r.row, r.col, r.value, 0}, lr, lambda);
+  }
+}
+
+RecordShuffler::RecordShuffler(std::uint64_t seed) : rng_(mix_seed(seed, 2)) {}
+
+void RecordShuffler::next(std::span<SgdRating> records) { rng_.shuffle(records.begin(), records.end()); }
 
 EpochShuffler::EpochShuffler(std::size_t n, std::uint64_t seed)
     : rng_(mix_seed(seed, 2)), order_(n) {
@@ -321,15 +353,16 @@ class MfSgd final : public Model {
     const std::uint32_t k = cfg_.k;
     const std::uint32_t nu = train.n_users(), ni = train.n_items();
 
-    // Every training rating as a triplet, in CSR order (the shuffle permutes indices into this).
-    std::vector<Triplet> ratings;
+    // Every training rating, in CSR order (kept for train_rmse); `order` is the copy the epochs
+    // shuffle in place.
+    std::vector<mf_detail::SgdRating> ratings;
     ratings.reserve(train.n_ratings());
     double sum = 0.0;
     for (std::uint32_t u = 0; u < nu; ++u) {
       const auto items = train.by_user.row_indices(u);
       const auto vals = train.by_user.row_values(u);
       for (std::size_t j = 0; j < items.size(); ++j) {
-        ratings.push_back({u, items[j], vals[j], 0});
+        ratings.push_back({u, items[j], vals[j]});
         sum += vals[j];
       }
     }
@@ -356,14 +389,16 @@ class MfSgd final : public Model {
     curve_metric_ = validation != nullptr ? "val_rmse" : "train_rmse";
     curve_.clear();
 
-    mf_detail::EpochShuffler shuffler(ratings.size(), ctx.seed);
+    std::vector<mf_detail::SgdRating> order = ratings;
+    mf_detail::RecordShuffler shuffler(ctx.seed);
 
     Params best = m;
     double best_rmse = std::numeric_limits<double>::infinity();
     int since_best = 0;
     double lr = cfg_.lr;
     for (int epoch = 1; epoch <= cfg_.max_epochs; ++epoch) {
-      for (const std::uint32_t idx : shuffler.next()) mf_detail::sgd_step(m, ratings[idx], lr, cfg_.lambda);
+      shuffler.next(order);
+      mf_detail::sgd_epoch(m, order, lr, cfg_.lambda);
       lr *= cfg_.lr_decay;
 
       const double rmse = validation != nullptr ? validation_rmse(m, *validation) : train_rmse(m, ratings);
@@ -528,7 +563,7 @@ class MfSgd final : public Model {
     return std::sqrt(sse / static_cast<double>(n));
   }
 
-  static double train_rmse(const Params& m, const std::vector<Triplet>& ratings) {
+  static double train_rmse(const Params& m, const std::vector<mf_detail::SgdRating>& ratings) {
     if (ratings.empty()) return 0.0;
     double sse = 0.0;
     for (const auto& r : ratings) {

@@ -393,6 +393,48 @@ TEST_CASE("MF epoch order is a fresh seeded permutation every epoch", "[mf]") {
   }
 }
 
+TEST_CASE("MF record shuffle applies exactly the EpochShuffler order", "[mf]") {
+  // fit() shuffles the records in place; after every epoch, record j must be rating order[j].
+  const std::size_t n = 1000;
+  std::vector<recs::mf_detail::SgdRating> ratings(n);
+  for (std::uint32_t j = 0; j < n; ++j) ratings[j] = {j % 37, j, static_cast<float>(j)};
+  for (const std::uint64_t seed : {1u, 42u, 9001u}) {
+    INFO("seed " << seed);
+    recs::mf_detail::EpochShuffler reference(n, seed);
+    recs::mf_detail::RecordShuffler shuffler(seed);
+    auto records = ratings;
+    for (int e = 0; e < 5; ++e) {
+      const auto& order = reference.next();
+      shuffler.next(records);
+      bool same = true;
+      for (std::size_t j = 0; j < n; ++j)
+        same = same && records[j].row == ratings[order[j]].row && records[j].col == ratings[order[j]].col &&
+               records[j].value == ratings[order[j]].value;
+      CHECK(same);
+    }
+  }
+}
+
+TEST_CASE("MF sgd_epoch is bit-identical to sgd_step over the same ratings", "[mf]") {
+  // Prefetching changes memory access only; the parameters must match exactly, including for
+  // epochs shorter than the prefetch distance.
+  recs::Rng rng(77);
+  for (const std::size_t n_users : {3u, 40u}) {
+    const Params start = random_params(rng, n_users, 30, 16);
+    const auto triplets = random_ratings(rng, n_users, 30, n_users == 3 ? 0.08 : 0.5);
+    INFO(triplets.size() << " ratings");
+    std::vector<recs::mf_detail::SgdRating> records;
+    for (const auto& t : triplets) records.push_back({t.row, t.col, t.value});
+    Params a = start, b = start;
+    for (const auto& t : triplets) recs::mf_detail::sgd_step(a, t, 0.01, 0.05);
+    recs::mf_detail::sgd_epoch(b, records, 0.01, 0.05);
+    CHECK(a.bu == b.bu);
+    CHECK(a.bi == b.bi);
+    CHECK(a.P == b.P);
+    CHECK(a.Q == b.Q);
+  }
+}
+
 TEST_CASE("MF fit visits ratings in the seeded per-epoch shuffled order", "[mf]") {
   // init_sd = 0 makes the initial parameters independent of the seed (all zero; with zero factors
   // only the biases move), so any dependence of the result on the seed comes from the update
