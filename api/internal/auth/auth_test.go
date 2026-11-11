@@ -283,19 +283,32 @@ func TestLoginTimingCoarse(t *testing.T) {
 	params := Params{Time: 1, MemoryKiB: 16 * 1024, Threads: 4, SaltLen: 16, KeyLen: 32}
 	h := newHarness(t, app.SignupOpen, func(o *options) { o.Hasher = NewArgon2id(params, MaxConcurrentHashes) })
 	h.mustSignup("alice", goodPass)
-	measure := func(username string) time.Duration {
-		var ds []time.Duration
-		for i := 0; i < 7; i++ {
-			start := time.Now()
-			if rec := h.do("POST", "/api/auth/login", loginBody{username, "wrong password!"}, ""); rec.Code != 401 {
-				t.Fatalf("status %d", rec.Code)
-			}
-			ds = append(ds, time.Since(start))
+	once := func(username string) time.Duration {
+		start := time.Now()
+		if rec := h.do("POST", "/api/auth/login", loginBody{username, "wrong password!"}, ""); rec.Code != 401 {
+			t.Fatalf("status %d", rec.Code)
 		}
+		return time.Since(start)
+	}
+	median := func(ds []time.Duration) time.Duration {
 		sort.Slice(ds, func(i, j int) bool { return ds[i] < ds[j] })
 		return ds[len(ds)/2]
 	}
-	known, unknown := measure("alice"), measure("nobody")
+	// Interleaved, alternating which path goes first: background load (other test packages
+	// running in parallel, CPU frequency changes) then lands on both paths alike instead of on
+	// whichever was measured first. Measuring all of one path and then all of the other failed
+	// on CI at ratio 2.2 with identical code paths.
+	var knownDs, unknownDs []time.Duration
+	for i := 0; i < 7; i++ {
+		if i%2 == 0 {
+			knownDs = append(knownDs, once("alice"))
+			unknownDs = append(unknownDs, once("nobody"))
+		} else {
+			unknownDs = append(unknownDs, once("nobody"))
+			knownDs = append(knownDs, once("alice"))
+		}
+	}
+	known, unknown := median(knownDs), median(unknownDs)
 	ratio := float64(known) / float64(unknown)
 	t.Logf("median wrong-password %v, unknown-user %v, ratio %.2f", known, unknown, ratio)
 	if ratio < 0.5 || ratio > 2 {
