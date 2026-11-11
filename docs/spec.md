@@ -468,7 +468,7 @@ Every production change is a versioned image deployed by one command, and every 
 
 - A nightly backup of `app.db` uses SQLite's online backup API (`VACUUM INTO`), runs an integrity check, and keeps 7 daily and 4 weekly copies. Model artifacts are not backed up, because retraining rebuilds them.
 - A monthly restore drill restores the latest backup into a scratch compose project and runs the smoke test against it. A backup that hasn't been restored doesn't count.
-- `deploy/runbooks/` contains one page each for deploy, rollback, restore, rotate the TMDB key, revoke all sessions, create invites, open signup, and take the site offline (`tailscale funnel --bg off`).
+- `deploy/runbooks/` contains one page each for deploy, rollback, restore, rotate the TMDB key, revoke all sessions, create invites, open signup, and take the site offline (`tailscale funnel reset`).
 
 ## Phased plan and acceptance gates
 
