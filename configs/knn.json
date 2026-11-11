@@ -1,1 +1,1 @@
-{ "neighbors": 100, "shrinkage": 100, "min_support": 20 }
+{ "neighbors": 10, "shrinkage": 1000, "min_support": 20, "normalize": false, "positive_only": true }

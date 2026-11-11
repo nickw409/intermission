@@ -172,7 +172,7 @@ Also report a pure count-based variant. Both are baselines that every other mode
 ### Content-based
 
 - Movie vector: tag-genome relevance if available, else TF-IDF over user tags plus one-hot genres, L2-normalized.
-- User profile: Σ (rᵤⱼ − μᵤ)·vⱼ over rated movies, where μᵤ is the user's mean rating.
+- User profile: Σ (rᵤⱼ − μ − bᵤ − bⱼ)·vⱼ over rated movies: each rating minus the damped baseline predictor (Koren 2010). μ is the mean training rating; bⱼ = Σᵤ (rᵤⱼ − μ)/(βᵢ + nⱼ) is learned at training time and saved with the model; bᵤ = Σⱼ (rᵤⱼ − μ − bⱼ)/(βᵤ + nᵤ) is computed at fold-in. Choose βᵤ and βᵢ on the validation split (ml-latest-small: βᵤ = 100, βᵢ = 1,000). Centering on the user's own mean, the original formula, is kept as a config option (`centering: user_mean`, with `global_mean` and `damped_user_mean`) for comparison only: its weights sum to zero, so a feature shared by every rated movie cancels, and a user who rated only comedies gets no comedy signal. Amended 2026-11-10 by owner decision; see `docs/phase-1.md` (Content centering).
 - Score: cosine(profile, vᵢ). Explanation: the rated movie whose vector contributes most to that score.
 
 ### Item-KNN
@@ -332,8 +332,8 @@ Two APIs, each defined in an OpenAPI file under contracts/. Public endpoints are
 | GET | /api/ratings | session | The user's ratings, newest first |
 | PUT | /api/ratings/{movieId} | session | `{rating}` in 0.5 steps; creates or updates |
 | DELETE | /api/ratings/{movieId} | session | Removes a rating |
-| GET | /api/recommend?model=&k= | session | Top-k with score and explanation for one model |
-| GET | /api/recommend/compare?models=pop,knn,als&k= | session | One list per model, for the side-by-side view |
+| GET | /api/recommend?model=&k=&genres= | session | Top-k with score and explanation for one model, optionally limited to genres |
+| GET | /api/recommend/compare?models=pop,knn,als&k=&genres= | session | One list per model, for the side-by-side view |
 | POST | /api/feedback | session | `{movieId, model, action}` (phase 6) |
 | GET | /api/models | none | Loaded models, artifact version, trained-at time |
 | GET | /api/reports | none | List of run reports (id, model, dataset, headline metrics) |
@@ -364,7 +364,7 @@ recs-model speaks HTTP/1.1 JSON on the Unix socket `/run/recs/model.sock`, which
 
 | Method | Path | Body or query | Returns |
 | --- | --- | --- | --- |
-| POST | /v1/recommend | `{model, ratings: [{movie_id, rating}], k, exclude: [movie_id]}` | `{items: [{movie_id, score, because: [{movie_id, weight}]}], ignored}` |
+| POST | /v1/recommend | `{model, ratings: [{movie_id, rating}], k, exclude: [movie_id], genres: [genre]}` | `{items: [{movie_id, score, because: [{movie_id, weight}]}], ignored}` |
 | POST | /v1/compare | `{models: [...], ratings, k, exclude}` | One item list per model |
 | GET | /v1/similar/{movie\_id} | `?model=&k=` | Neighbor list with similarity |
 | POST | /v1/onboarding | `{n, exclude}` | Popular, genre-diverse movie IDs |
@@ -391,7 +391,7 @@ The frontend is a TypeScript single-page app (Vite + React), built to static fil
 
 1. **Sign up / log in.**
 2. **Onboarding:** a grid of about 30 movies from `/api/onboarding` with 0.5-step star ratings and a progress bar to 10 ratings. Searching for any movie to rate is also available here.
-3. **For you:** the user's top 20 from the default model (ALS once it exists). Poster cards show the explanation ("Because you rated X, Y"), a rate control and "not interested".
+3. **For you:** the user's top 20, from the default model (ALS once it exists) unless the user picks another. A model selector lists every loaded model, and genre chips (any of the MovieLens genres) narrow the list to movies with at least one chosen genre. Both choices are kept in the URL query and remembered per browser. Poster cards show the explanation ("Because you rated X, Y"), a rate control and "not interested". Added 2026-11-11 at the owner's request.
 4. **Compare models:** three to five columns side by side, one per model, for the same user. Movies that appear in several columns are highlighted. This page is the core of "see it in action".
 5. **Movie page:** details, the user's rating control, and a similar-movies row with a model toggle.
 6. **My ratings:** sortable list with edit and delete.
@@ -468,7 +468,7 @@ Every production change is a versioned image deployed by one command, and every 
 
 - A nightly backup of `app.db` uses SQLite's online backup API (`VACUUM INTO`), runs an integrity check, and keeps 7 daily and 4 weekly copies. Model artifacts are not backed up, because retraining rebuilds them.
 - A monthly restore drill restores the latest backup into a scratch compose project and runs the smoke test against it. A backup that hasn't been restored doesn't count.
-- `deploy/runbooks/` contains one page each for deploy, rollback, restore, rotate the TMDB key, revoke all sessions, create invites, open signup, and take the site offline (`tailscale funnel --bg off`).
+- `deploy/runbooks/` contains one page each for deploy, rollback, restore, rotate the TMDB key, revoke all sessions, create invites, open signup, and take the site offline (`tailscale funnel reset`).
 
 ## Phased plan and acceptance gates
 

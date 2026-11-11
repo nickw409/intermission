@@ -17,6 +17,7 @@
 #include <string_view>
 #include <vector>
 
+#include "genres.hpp"
 #include "recs/artifact.hpp"
 #include "search.hpp"
 
@@ -29,6 +30,7 @@ struct Bundle {
   std::map<std::string, std::unique_ptr<Model>, std::less<>> models;
   SearchIndex search;
   std::vector<ItemIdx> by_popularity;  // every item, most rated first (catalog.popularity_rank)
+  std::vector<GenreMask> genre_mask;   // per item: its genres as bits (genres.hpp); 0 = none listed
 
   /// The loaded model with this name, or nullptr.
   const Model* find_model(std::string_view name) const;

@@ -62,8 +62,10 @@ Dataset hand_fixture() {
 
 TEST_CASE("Content hand fixture: TF-IDF, cosine, profile, scores and explanation match the hand computation",
           "[content][features]") {
+  // The user-mean centering, whose arithmetic is easy to follow by hand (the default is checked
+  // against the same fixture in the next test).
   auto model = make_content();
-  model->fit(hand_fixture(), Config::object(), TrainContext{});
+  model->fit(hand_fixture(), Config{{"centering", "user_mean"}}, TrainContext{});
   REQUIRE(model->n_items() == 3);
   REQUIRE(model->supports_similar());
 
@@ -99,17 +101,137 @@ TEST_CASE("Content hand fixture: TF-IDF, cosine, profile, scores and explanation
   CHECK_THAT(e.because[0].weight, WithinAbs(0.622120, 1e-5));
 }
 
+TEST_CASE("Content hand fixture: the default baseline-residual profile matches the hand computation",
+          "[content][features]") {
+  auto model = make_content();
+  model->fit(hand_fixture(), Config::object(), TrainContext{});
+
+  // Training ratings (catalog(): user u rates item i with 1 + (u + i) % 5):
+  //   user 0: items 0, 1, 2 -> 1, 2, 3;   user 1: items 0, 1, 2 -> 2, 3, 4.
+  // mu = 15 / 6 = 2.5; b_i = sum (r - mu) / (1000 + n_i): b_0 = -2/1002, b_1 = 0, b_2 = 2/1002.
+  const double mu = 2.5, b0 = -2.0 / 1002.0, b2 = 2.0 / 1002.0;
+  // The user rates item 2 = 3 and item 0 = 5: b_u = ((3 - mu - b2) + (5 - mu - b0)) / (100 + 2).
+  const double bu = ((3.0 - mu - b2) + (5.0 - mu - b0)) / 102.0;
+  const double w0 = 5.0 - (mu + bu) - b0, w2 = 3.0 - (mu + bu) - b2;
+  REQUIRE(w0 > 0.0);
+  REQUIRE(w2 > 0.0);  // under the user mean (4.0) item 2 would get weight -1
+
+  // Features (dark, funny, Action, Comedy). Tags have N = 3 tagged movies and df = 2 for both
+  // kept terms, so idf is the same and cancels in the normalization.
+  const double r2 = std::sqrt(2.0), L = std::sqrt(1.0 + (1.0 + std::log(2.0)) * (1.0 + std::log(2.0)));
+  const std::vector<double> v0{1.0 / (r2 * L), (1.0 + std::log(2.0)) / (r2 * L), 1.0 / r2, 0.0};
+  const std::vector<double> v1{0.0, 1.0 / std::sqrt(3.0), 1.0 / std::sqrt(3.0), 1.0 / std::sqrt(3.0)};
+  const std::vector<double> v2{1.0 / r2, 0.0, 0.0, 1.0 / r2};
+  std::vector<double> p(4);
+  for (int f = 0; f < 4; ++f) p[f] = w0 * v0[f] + w2 * v2[f];
+
+  const std::vector<Rating> ratings{{2, 3.0f, 1}, {0, 5.0f, 2}};
+  const auto state = model->fold_in(ratings);
+  CHECK_THAT(state.mean, WithinAbs(mu + bu, 1e-12));
+  REQUIRE(state.vec.size() == 4);
+  for (int f = 0; f < 4; ++f) CHECK_THAT(state.vec[f], WithinAbs(p[f], 1e-5));
+
+  const auto dot = [](const std::vector<double>& a, const std::vector<double>& b) {
+    double d = 0.0;
+    for (std::size_t k = 0; k < a.size(); ++k) d += a[k] * b[k];
+    return d;
+  };
+  const double pn = std::sqrt(dot(p, p));
+  const auto scores = scores_of(*model, state);
+  CHECK_THAT(scores[0], WithinAbs(dot(p, v0) / pn, 1e-5));
+  CHECK_THAT(scores[1], WithinAbs(dot(p, v1) / pn, 1e-5));
+  CHECK_THAT(scores[2], WithinAbs(dot(p, v2) / pn, 1e-5));
+
+  // Both rated movies now count for item 1: c_j = w_j (v_j . v_1) / |p|.
+  const double c0 = w0 * dot(v0, v1) / pn;
+  const double c2 = w2 * dot(v2, v1) / pn;
+  const auto e = model->explain(state, 1);
+  REQUIRE(e.because.size() == 2);
+  CHECK(e.because[0].item == 0);
+  CHECK_THAT(e.because[0].weight, WithinAbs(c0, 1e-5));
+  CHECK(e.because[1].item == 2);
+  CHECK_THAT(e.because[1].weight, WithinAbs(c2, 1e-5));
+  CHECK_THAT(static_cast<double>(e.because[0].weight + e.because[1].weight), WithinAbs(scores[1], 1e-5));
+}
+
+TEST_CASE("Content hand fixture: with small dampings the item bias changes the sign of a weight",
+          "[content][features]") {
+  // beta_u = beta_i = 1, so b_j is large enough that a wrong sign or scale changes the answer.
+  auto model = make_content();
+  model->fit(hand_fixture(), Config{{"user_damping", 1.0}, {"item_damping", 1.0}}, TrainContext{});
+  // mu = 2.5; b_0 = -2/3, b_1 = 0, b_2 = +2/3 (each item rated twice, see the test above).
+  // The user rates item 2 = 3 and item 0 = 5:
+  //   b_u = ((3 - 2.5 - 2/3) + (5 - 2.5 + 2/3)) / (1 + 2) = (-1/6 + 19/6) / 3 = 1, m_u = 3.5
+  //   w_0 = 5 - 3.5 + 2/3 = 13/6,   w_2 = 3 - 3.5 - 2/3 = -7/6
+  // (with the sign of b_j flipped: w_0 = 5/6, w_2 = 1/6; without it: w_0 = 1.5, w_2 = -0.5).
+  const double w0 = 13.0 / 6.0, w2 = -7.0 / 6.0;
+  const double r2 = std::sqrt(2.0), L = std::sqrt(1.0 + (1.0 + std::log(2.0)) * (1.0 + std::log(2.0)));
+  const std::vector<double> v0{1.0 / (r2 * L), (1.0 + std::log(2.0)) / (r2 * L), 1.0 / r2, 0.0};
+  const std::vector<double> v2{1.0 / r2, 0.0, 0.0, 1.0 / r2};
+
+  const auto state = model->fold_in(std::vector<Rating>{{2, 3.0f, 1}, {0, 5.0f, 2}});
+  CHECK_THAT(state.mean, WithinAbs(3.5, 1e-12));
+  REQUIRE(state.vec.size() == 4);
+  for (int f = 0; f < 4; ++f) CHECK_THAT(state.vec[f], WithinAbs(w0 * v0[f] + w2 * v2[f], 1e-6));
+  CHECK(state.vec[3] < 0.0f);  // Comedy (only item 2 has it) is pushed away
+
+  // Item 1 (Action + Comedy + funny): item 0 contributes positively, item 2 negatively, so only
+  // item 0 is cited.
+  const auto e = model->explain(state, 1);
+  REQUIRE(e.because.size() == 1);
+  CHECK(e.because[0].item == 0);
+}
+
+TEST_CASE("Content: fit refuses ratings outside [0.5, 5]; statistics at the edges round-trip",
+          "[content][features][persist]") {
+  const auto movies = std::vector<MovieMeta>{movie(1, {"Drama"}), movie(2, {"Comedy"}), movie(3, {"Drama", "Comedy"})};
+  const auto with_ratings = [&](std::vector<float> values) {
+    std::vector<Triplet> t;
+    for (std::uint32_t i = 0; i < values.size(); ++i) t.push_back({0, i, values[i], 1});
+    return make_dataset("edges", 1, 3, std::move(t), movies);
+  };
+  auto m = make_content();
+  CHECK_THROWS_AS(m->fit(with_ratings({5.0f, 5.5f, 4.0f}), Config::object(), TrainContext{}), std::invalid_argument);
+  CHECK_THROWS_AS(m->fit(with_ratings({0.0f, 1.0f, 4.0f}), Config::object(), TrainContext{}), std::invalid_argument);
+
+  // mu = 5 and mu = 0.5 exactly; and with item_damping 0, {0.5, 5, 5} (mu = 3.5) gives
+  // b = -(mu - 0.5) = -3 and b = 5 - mu = +1.5: large biases of both signs.
+  for (const auto& values : {std::vector<float>{5.0f, 5.0f, 5.0f}, std::vector<float>{0.5f, 0.5f, 0.5f},
+                             std::vector<float>{0.5f, 5.0f, 5.0f}}) {
+    auto trained = make_content();
+    trained->fit(with_ratings(values), Config{{"item_damping", 0.0}}, TrainContext{});
+    ScratchDir dir;
+    trained->save(dir.path());
+    auto loaded = make_content();
+    CHECK_NOTHROW(loaded->load(dir.path()));
+  }
+}
+
 TEST_CASE("Content config: defaults are filled in and bad values are rejected", "[content][features]") {
   auto model = make_content();
   model->fit(hand_fixture(), Config::object(), TrainContext{});
-  CHECK(model->config() == Config{{"min_tag_count", 2}, {"genre_weight", 1.0}});
+  CHECK(model->config() == Config{{"min_tag_count", 2},
+                                  {"genre_weight", 1.0},
+                                  {"centering", "baseline"},
+                                  {"user_damping", 100.0},
+                                  {"item_damping", 1000.0}});
   CHECK(model->name() == "content");
+  for (const char* c : {"user_mean", "global_mean", "damped_user_mean", "baseline"}) {
+    auto m = make_content();
+    m->fit(hand_fixture(), Config{{"centering", c}}, TrainContext{});
+    CHECK(m->config().at("centering") == c);
+  }
 
   auto m2 = make_content();
   CHECK_THROWS_AS(m2->fit(hand_fixture(), Config{{"min_tag_count", 0}}, TrainContext{}), std::invalid_argument);
   CHECK_THROWS_AS(m2->fit(hand_fixture(), Config{{"genre_weight", -1.0}}, TrainContext{}), std::invalid_argument);
   CHECK_THROWS_AS(m2->fit(hand_fixture(), Config{{"genre_wieght", 1.0}}, TrainContext{}), std::invalid_argument);
   CHECK_THROWS_AS(m2->fit(hand_fixture(), Config{{"min_tag_count", "2"}}, TrainContext{}), std::invalid_argument);
+  CHECK_THROWS_AS(m2->fit(hand_fixture(), Config{{"centering", "midpoint"}}, TrainContext{}), std::invalid_argument);
+  CHECK_THROWS_AS(m2->fit(hand_fixture(), Config{{"centering", 1}}, TrainContext{}), std::invalid_argument);
+  CHECK_THROWS_AS(m2->fit(hand_fixture(), Config{{"user_damping", -1.0}}, TrainContext{}), std::invalid_argument);
+  CHECK_THROWS_AS(m2->fit(hand_fixture(), Config{{"item_damping", "10"}}, TrainContext{}), std::invalid_argument);
+  CHECK_THROWS_AS(m2->fit(hand_fixture(), Config{{"user_damping", 1e300}}, TrainContext{}), std::invalid_argument);
 }
 
 TEST_CASE("Content TF-IDF: tags are case-folded and trimmed before counting", "[content][features]") {
@@ -167,10 +289,17 @@ TEST_CASE("Content: featureless items score -inf; a zero profile scores everythi
   CHECK(model->explain(state, 2).because.empty());
   CHECK(model->similar(2, 3).empty());
 
-  // Every rating equal to the mean: p = 0, nothing can be scored.
-  const auto flat = model->fold_in(std::vector<Rating>{{0, 4.0f, 1}, {1, 4.0f, 1}});
-  for (float s : scores_of(*model, flat)) CHECK(s == kNegInf);
-  CHECK(model->explain(flat, 3).because.empty());
+  // With the user-mean centering, every rating equal to the mean gives p = 0: nothing can be scored.
+  auto user_mean = make_content();
+  user_mean->fit(ds, Config{{"centering", "user_mean"}}, TrainContext{});
+  const auto flat = user_mean->fold_in(std::vector<Rating>{{0, 4.0f, 1}, {1, 4.0f, 1}});
+  for (float s : scores_of(*user_mean, flat)) CHECK(s == kNegInf);
+  CHECK(user_mean->explain(flat, 3).because.empty());
+  // The default centering compares them with the catalog average (here below 4), so the same
+  // ratings say "likes Drama and Comedy".
+  const auto liked = model->fold_in(std::vector<Rating>{{0, 4.0f, 1}, {1, 4.0f, 1}});
+  CHECK(std::isfinite(scores_of(*model, liked)[3]));
+  CHECK(model->explain(liked, 3).because.size() == 2);
 
   // No ratings at all.
   const auto none = model->fold_in(std::vector<Rating>{});
@@ -293,8 +422,8 @@ TEST_CASE("Content: the profile is accumulated in double precision", "[content][
   movies.push_back(movie(n + 1, {}));
   tags.push_back(tag(1, n + 1, "u"));
   auto model = make_content();
-  model->fit(catalog(std::move(movies), std::move(tags)), Config{{"min_tag_count", 1}, {"genre_weight", g}},
-             TrainContext{});
+  model->fit(catalog(std::move(movies), std::move(tags)),
+             Config{{"min_tag_count", 1}, {"genre_weight", g}, {"centering", "user_mean"}}, TrainContext{});
 
   std::vector<Rating> ratings{{0, 5.0f, 1}};
   for (std::uint32_t k = 1; k <= n; ++k) ratings.push_back({k, 1.0f, 1});

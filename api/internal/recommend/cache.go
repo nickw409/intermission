@@ -29,6 +29,9 @@ import (
 //   - op, models and k: what was asked. For compare the model list is
 //     sorted, so permutations share one entry; the handler renders results
 //     in the order each request asked for.
+//   - genres: the genre filter as a sorted, comma-joined set ("" = none),
+//     so a filtered request never gets an unfiltered list or one filtered
+//     by another set, while the same set in another order shares an entry.
 //
 // Eviction is least-recently-used under three bounds: a number of entries,
 // an approximate number of bytes, and a number of entries per user (so one
@@ -43,6 +46,7 @@ type cacheKey struct {
 	op             string // "recommend" or "compare"
 	models         string // comma-joined model names (sorted for compare)
 	k              int
+	genres         string // sorted, comma-joined genre filter; "" = none
 }
 
 // entry is a fully enriched answer, ready to render as either response.
@@ -66,7 +70,7 @@ func (e *entry) size(k cacheKey) int64 {
 		itemOverhead    = 96
 		becauseOverhead = 48
 	)
-	n := int64(entryOverhead + len(k.modelVersion) + len(k.models) + len(k.op) + len(e.modelVersion))
+	n := int64(entryOverhead + len(k.modelVersion) + len(k.models) + len(k.genres) + len(k.op) + len(e.modelVersion))
 	for _, r := range e.results {
 		n += int64(48 + len(r.Model))
 		for _, it := range r.Items {

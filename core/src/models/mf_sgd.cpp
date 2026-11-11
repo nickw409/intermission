@@ -23,9 +23,19 @@
 // Training
 //   - Initialisation: biases 0; factors N(0, init_sd^2), except that users and items with no
 //     training ratings get zero factors (they would otherwise keep pure noise forever).
-//   - Each epoch visits every rating once in an order given by a seeded Fisher-Yates shuffle
-//     (mf_detail::EpochShuffler: one recs::Rng(mix_seed(seed, 2)) stream for the run, each epoch
-//     re-shuffling the previous permutation), then multiplies the learning rate by lr_decay.
+//   - Each epoch visits every rating once in a seeded Fisher-Yates order, then multiplies the
+//     learning rate by lr_decay. The order is defined by mf_detail::EpochShuffler (one
+//     recs::Rng(mix_seed(seed, 2)) stream for the run, each epoch re-shuffling the previous
+//     permutation); fit() applies the same swaps to the rating records themselves
+//     (mf_detail::RecordShuffler), which yields the same sequence of ratings.
+//   - Speed: the loop is bound by memory latency, not arithmetic (each update reads one random
+//     user row and one random item row; on ml-32m P and Q are far larger than the caches).
+//     Shuffling 12-byte records in place lets each epoch read the ratings sequentially instead of
+//     gathering them through an index, and mf_detail::sgd_epoch prefetches the parameter rows a
+//     few ratings ahead. Neither changes any arithmetic: results are bit-identical to the plain
+//     index-shuffle loop (a golden test pins them). Measured in PR #57 on ml-32m-sized synthetic
+//     data (k = 64, one thread): 15.8 s per epoch before, 6.3 s after. Bit-identity assumes the
+//     project's flags (no -ffast-math, no -march that enables FMA contraction).
 //   - Early stopping: with a validation set (ctx.validation), the RMSE on it is measured after each
 //     epoch; training stops after `patience` epochs without improvement and the parameters of the
 //     best epoch are restored. Without one, or when none of its ratings is
@@ -163,6 +173,35 @@ void sgd_step(Params& m, const Triplet& rating, double lr, double lambda) {
   double* q = m.Q.data() + i * m.k;
   add_rating_gradient(e, m.bu[u], m.bi[i], p, q, m.k, lambda, -lr, m.bu[u], m.bi[i], p, q);
 }
+
+void sgd_epoch(Params& m, std::span<const SgdRating> in_order, double lr, double lambda) {
+  const std::size_t n = in_order.size();
+  const std::uint32_t k = m.k;
+  for (std::size_t j = 0; j < n; ++j) {
+    if (j + kPrefetchAhead < n) {
+      // Hints only (no effect on results): the rows rating j + kPrefetchAhead will touch.
+      const SgdRating& ahead = in_order[j + kPrefetchAhead];
+      const double* p = m.P.data() + std::size_t{ahead.row} * k;
+      const double* q = m.Q.data() + std::size_t{ahead.col} * k;
+      // Hints 64 bytes (8 doubles) apart, plus the row's last element: rows are not cache-line
+      // aligned, so a row can end in one more line. GCC/Clang builtin (the project's compilers).
+      for (std::uint32_t f = 0; f < k; f += 8) {
+        __builtin_prefetch(p + f, 1);
+        __builtin_prefetch(q + f, 1);
+      }
+      __builtin_prefetch(p + k - 1, 1);
+      __builtin_prefetch(q + k - 1, 1);
+      __builtin_prefetch(m.bu.data() + ahead.row, 1);
+      __builtin_prefetch(m.bi.data() + ahead.col, 1);
+    }
+    const SgdRating& r = in_order[j];
+    sgd_step(m, Triplet{r.row, r.col, r.value, 0}, lr, lambda);
+  }
+}
+
+RecordShuffler::RecordShuffler(std::uint64_t seed) : rng_(mix_seed(seed, 2)) {}
+
+void RecordShuffler::next(std::span<SgdRating> records) { rng_.shuffle(records.begin(), records.end()); }
 
 EpochShuffler::EpochShuffler(std::size_t n, std::uint64_t seed)
     : rng_(mix_seed(seed, 2)), order_(n) {
@@ -321,22 +360,23 @@ class MfSgd final : public Model {
     const std::uint32_t k = cfg_.k;
     const std::uint32_t nu = train.n_users(), ni = train.n_items();
 
-    // Every training rating as a triplet, in CSR order (the shuffle permutes indices into this).
-    std::vector<Triplet> ratings;
-    ratings.reserve(train.n_ratings());
+    // Every training rating as a compact record, starting in CSR order; the epochs shuffle this
+    // vector in place (RecordShuffler).
+    std::vector<mf_detail::SgdRating> order;
+    order.reserve(train.n_ratings());
     double sum = 0.0;
     for (std::uint32_t u = 0; u < nu; ++u) {
       const auto items = train.by_user.row_indices(u);
       const auto vals = train.by_user.row_values(u);
       for (std::size_t j = 0; j < items.size(); ++j) {
-        ratings.push_back({u, items[j], vals[j], 0});
+        order.push_back({u, items[j], vals[j]});
         sum += vals[j];
       }
     }
 
     Params m;
     m.k = k;
-    m.mu = ratings.empty() ? 0.0 : sum / static_cast<double>(ratings.size());
+    m.mu = order.empty() ? 0.0 : sum / static_cast<double>(order.size());
     m.bu.assign(nu, 0.0);
     m.bi.assign(ni, 0.0);
     m.P.assign(std::size_t{nu} * k, 0.0);
@@ -356,17 +396,18 @@ class MfSgd final : public Model {
     curve_metric_ = validation != nullptr ? "val_rmse" : "train_rmse";
     curve_.clear();
 
-    mf_detail::EpochShuffler shuffler(ratings.size(), ctx.seed);
+    mf_detail::RecordShuffler shuffler(ctx.seed);
 
     Params best = m;
     double best_rmse = std::numeric_limits<double>::infinity();
     int since_best = 0;
     double lr = cfg_.lr;
     for (int epoch = 1; epoch <= cfg_.max_epochs; ++epoch) {
-      for (const std::uint32_t idx : shuffler.next()) mf_detail::sgd_step(m, ratings[idx], lr, cfg_.lambda);
+      shuffler.next(order);
+      mf_detail::sgd_epoch(m, order, lr, cfg_.lambda);
       lr *= cfg_.lr_decay;
 
-      const double rmse = validation != nullptr ? validation_rmse(m, *validation) : train_rmse(m, ratings);
+      const double rmse = validation != nullptr ? validation_rmse(m, *validation) : train_rmse(m, train);
       if (!std::isfinite(rmse))
         throw std::runtime_error("mf: training diverged at epoch " + std::to_string(epoch) +
                                  " (lower lr or raise lambda)");
@@ -528,14 +569,20 @@ class MfSgd final : public Model {
     return std::sqrt(sse / static_cast<double>(n));
   }
 
-  static double train_rmse(const Params& m, const std::vector<Triplet>& ratings) {
-    if (ratings.empty()) return 0.0;
+  // Over the training matrix in CSR order (user, then item ascending), so the sum's order never
+  // depends on the epoch shuffle.
+  static double train_rmse(const Params& m, const Dataset& train) {
+    if (train.n_ratings() == 0) return 0.0;
     double sse = 0.0;
-    for (const auto& r : ratings) {
-      const double e = r.value - mf_detail::predict(m, r.row, r.col);
-      sse += e * e;
+    for (std::uint32_t u = 0; u < train.n_users(); ++u) {
+      const auto items = train.by_user.row_indices(u);
+      const auto vals = train.by_user.row_values(u);
+      for (std::size_t j = 0; j < items.size(); ++j) {
+        const double e = vals[j] - mf_detail::predict(m, u, items[j]);
+        sse += e * e;
+      }
     }
-    return std::sqrt(sse / static_cast<double>(ratings.size()));
+    return std::sqrt(sse / static_cast<double>(train.n_ratings()));
   }
 
   // lambda * n (the per-rating penalty summed over the user's n ratings), floored so that the

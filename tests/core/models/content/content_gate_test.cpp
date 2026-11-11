@@ -1,10 +1,11 @@
 // Phase 1 gates for the content-based model (spec: Phase 1; brief E gates 1-3):
-//  1. a synthetic user who rated only movies of one genre gets >= 7 of 10 recommendations in it
-//     (hidden tag [.gate-open]: currently fails, see the comment on the test);
+//  1. a synthetic user who rated only movies of one genre, with mixed scores, gets >= 7 of 10
+//     recommendations in it;
 //  2. fold_in + score equals the batch path (score_trained_user) bit for bit;
 //  3. explanations only cite movies the user rated.
 #include <algorithm>
 #include <cmath>
+#include <iostream>
 #include <limits>
 #include <set>
 #include <string>
@@ -91,26 +92,53 @@ GenreCatalog genre_catalog(Rng& rng, std::uint32_t n_items, Primary primary) {
 
 }  // namespace
 
-// Spec Phase 1 gate. Currently FAILS with the spec's profile formula because mean-centering
-// cancels features shared by every rated movie; owner decision pending
-// (docs/plans/overnight-2026-11-10.md open question 3).
-// Hidden tag: run with  recs_tests "[.gate-open]"
-TEST_CASE("Content gate: a user who rated only one genre gets >= 7 of 10 recommendations in it",
-          "[content][gate][phase1][.gate-open]") {
-  recs::testing::for_seeds(20, 2026, [](Rng& rng, std::uint64_t) {
-    const auto cat = genre_catalog(rng, 120, Primary::kUniform);
+namespace {
+
+// Every centering the model offers (the default is "baseline"; see USER PROFILE in content.cpp).
+const std::vector<Config>& all_centerings() {
+  static const std::vector<Config> c{Config::object(), Config{{"centering", "user_mean"}},
+                                     Config{{"centering", "global_mean"}},
+                                     Config{{"centering", "damped_user_mean"}, {"user_damping", 5.0}},
+                                     Config{{"centering", "baseline"}, {"user_damping", 2.0}, {"item_damping", 3.0}}};
+  return c;
+}
+
+struct SeedResult {
+  long in_genre = 0;         // comedies among the 10 recommendations
+  std::size_t unrated = 0;   // comedies the user has not rated (the most that can be recommended)
+};
+
+// The one-genre gate scenario over 20 seeds, for the model config `cfg`, per seed; with `check`
+// set, each seed must reach 7 of 10.
+std::vector<SeedResult> one_genre_user(const Config& cfg, bool check) {
+  std::vector<SeedResult> per_seed;
+  recs::testing::for_seeds(20, 2026, [&](Rng& rng, std::uint64_t) {
+    // The user rates 8 comedies, so the catalog needs at least 15 for 7 to remain unrated:
+    // otherwise "7 of 10 in-genre" is impossible for any model. Catalogs with fewer are redrawn
+    // from the same seeded stream (rejection sampling; the generator itself is unchanged).
+    constexpr std::size_t kRated = 8, kMinComedies = kRated + 7;
+    const auto n_comedies = [](const Dataset& d) {
+      return static_cast<std::size_t>(std::count_if(d.movies.begin(), d.movies.end(),
+                                                    [](const MovieMeta& m) { return has_genre(m, "Comedy"); }));
+    };
+    auto cat = genre_catalog(rng, 120, Primary::kUniform);
+    for (int attempt = 0; n_comedies(cat.ds) < kMinComedies; ++attempt) {
+      REQUIRE(attempt < 100);
+      cat = genre_catalog(rng, 120, Primary::kUniform);
+    }
     const auto& ds = cat.ds;
     auto model = make_content();
-    model->fit(ds, Config::object(), TrainContext{});
+    model->fit(ds, cfg, TrainContext{});
 
     // The synthetic user rates 8 comedies with a spread of ratings (a real user is never
     // uniformly enthusiastic): mean-centering then gives some of them negative weight.
     std::vector<ItemIdx> comedies;
     for (ItemIdx i = 0; i < ds.n_items(); ++i)
       if (has_genre(ds.movies[i], "Comedy")) comedies.push_back(i);
-    REQUIRE(comedies.size() >= 12);
+    REQUIRE(comedies.size() >= kMinComedies);
     rng.shuffle(comedies.begin(), comedies.end());
     const std::vector<float> values{5.0f, 4.5f, 4.5f, 4.0f, 4.0f, 3.5f, 3.0f, 2.5f};
+    REQUIRE(values.size() == kRated);
     std::vector<Rating> ratings;
     for (std::size_t k = 0; k < values.size(); ++k) ratings.push_back({comedies[k], values[k], 1});
 
@@ -129,17 +157,67 @@ TEST_CASE("Content gate: a user who rated only one genre gets >= 7 of 10 recomme
     }
     INFO("comedy share of candidates = " << comedy_candidates << "/" << candidates);
     REQUIRE(static_cast<double>(comedy_candidates) / static_cast<double>(candidates) < 0.35);
+    REQUIRE(comedy_candidates >= 7);  // the gate is reachable on this seed
 
     const auto in_genre = std::count_if(top.begin(), top.end(),
                                         [&](ItemIdx i) { return has_genre(ds.movies[i], "Comedy"); });
-    CHECK(in_genre >= 7);
+    per_seed.push_back({in_genre, comedy_candidates});
+    if (check) CHECK(in_genre >= 7);
   });
+  return per_seed;
 }
 
-// NOT the spec gate (see the hidden test above). This documents a narrower behaviour: a user whose
-// ratings rise with how purely a movie belongs to one genre (straight comedies 4.5-5, comedy
-// hybrids 2-3) gets mostly that genre. It passes only because the ratings correlate with the
-// genre's weight in each vector; with the ratings swapped, or random, it does not.
+}  // namespace
+
+// Spec Phase 1 gate, with the default config. The user's ratings are mixed (5 down to 2.5), all
+// within one genre: a profile centered on the user's own mean cancels the genre every rated movie
+// shares and fails this (0 of 20 seeds reach 7); see USER PROFILE in content.cpp.
+TEST_CASE("Content gate: a user who rated only one genre gets >= 7 of 10 recommendations in it",
+          "[content][gate][phase1]") {
+  one_genre_user(Config::object(), true);
+}
+
+// Stronger than the gate: the one-genre user is recommended every unrated movie of the genre, up
+// to 10.
+TEST_CASE("Content: a user who rated only one genre gets every unrated movie of it, up to 10",
+          "[content][behaviour]") {
+  for (const auto& r : one_genre_user(Config::object(), false))
+    CHECK(static_cast<std::size_t>(r.in_genre) == std::min<std::size_t>(10, r.unrated));
+}
+
+// The gate scenario for every centering (the evidence behind the default; docs/phase-1.md).
+// Prints, never fails. Run with  recs_tests "[.centering-comparison]" -s
+TEST_CASE("Content: one-genre gate result for each centering", "[content][.centering-comparison]") {
+  // Every configuration of the validation search in docs/phase-1.md, then the default.
+  std::vector<Config> configs{Config{{"centering", "user_mean"}}, Config{{"centering", "global_mean"}}};
+  for (double b : {1.0, 3.0, 10.0, 30.0, 100.0, 300.0, 1000.0, 3000.0})
+    configs.push_back(Config{{"centering", "damped_user_mean"}, {"user_damping", b}});
+  const std::vector<std::pair<double, double>> baseline{
+      {3, 10},   {3, 25},    {3, 100},   {10, 10},   {10, 25},   {10, 100},   {30, 10},    {30, 25},
+      {30, 100}, {100, 10},  {100, 25},  {100, 100}, {100, 300}, {100, 1000}, {100, 3000}, {300, 100},
+      {300, 300}, {300, 1000}, {300, 3000}, {1000, 100}, {1000, 300}, {1000, 1000}, {1000, 3000}};
+  for (const auto& [bu, bi] : baseline)
+    configs.push_back(Config{{"centering", "baseline"}, {"user_damping", bu}, {"item_damping", bi}});
+  configs.push_back(Config::object());  // the default
+  for (const auto& cfg : configs) {
+    const auto results = one_genre_user(cfg, false);
+    std::string line;
+    long passing = 0, at_ceiling = 0;
+    for (const auto& r : results) {
+      line += std::to_string(r.in_genre) + "/" + std::to_string(r.unrated) + " ";
+      if (r.in_genre >= 7) ++passing;
+      else if (static_cast<std::size_t>(r.in_genre) == r.unrated) ++at_ceiling;
+    }
+    std::cout << cfg.dump() << ": " << passing << "/" << results.size() << " seeds reach 7, " << at_ceiling
+              << " more recommend every unrated comedy | in-genre/unrated comedies: " << line << "\n";
+  }
+}
+
+// NOT the spec gate (see the gate above). A narrower behaviour: a user whose ratings rise with
+// how purely a movie belongs to one genre (straight comedies 4.5-5, comedy hybrids 2-3) gets
+// mostly that genre. It was written for the user-mean centering, under which it passes only
+// because the ratings correlate with the genre's weight in each vector (with the ratings swapped,
+// or random, it does not). It runs with the default centering, which also passes it.
 TEST_CASE("Content: a user who prefers pure-genre over hybrid movies gets mostly that genre",
           "[content][behaviour]") {
   recs::testing::for_seeds(20, 2026, [](Rng& rng, std::uint64_t) {
@@ -171,15 +249,15 @@ TEST_CASE("Content: a user who prefers pure-genre over hybrid movies gets mostly
   });
 }
 
-// The cancellation behind the open gate, stated directly.
-TEST_CASE("Content: mean-centering cancels features every rated movie shares", "[content][behaviour]") {
+// Why the user-mean centering fails the one-genre gate, stated directly, and what the default does.
+TEST_CASE("Content: user-mean centering cancels features every rated movie shares", "[content][behaviour]") {
   // Five comedies and one drama, each with one tag ("witty" or "slapstick", df 3 each, N 6).
   const auto ds = catalog({movie(1, {"Comedy"}), movie(2, {"Comedy"}), movie(3, {"Comedy"}), movie(4, {"Comedy"}),
                            movie(5, {"Drama"}), movie(6, {"Comedy"})},
                           {tag(1, 0, "witty"), tag(1, 1, "slapstick"), tag(1, 2, "witty"), tag(1, 3, "slapstick"),
                            tag(1, 4, "witty"), tag(1, 5, "slapstick")});
   auto model = make_content();
-  model->fit(ds, Config::object(), TrainContext{});
+  model->fit(ds, Config{{"centering", "user_mean"}}, TrainContext{});
   // Features: "slapstick", "witty", then genres "Comedy", "Drama". Items 0-3 are
   // (tag + Comedy) / sqrt 2, so every rated movie has Comedy weight exactly 1/sqrt 2.
 
@@ -204,42 +282,61 @@ TEST_CASE("Content: mean-centering cancels features every rated movie shares", "
     const auto scores = scores_of(*model, state);
     CHECK(scores[4] > scores[5]);
   }
+  SECTION("the default (baseline residual) keeps the shared Comedy feature") {
+    // The training ratings (catalog(): 1 + (u + i) % 5, 2 users x 6 items) average 33/12 = 2.75,
+    // so ratings 5, 4, 3, 2 are mostly above what is expected and Comedy gets a clearly positive
+    // weight.
+    auto baseline = make_content();
+    baseline->fit(ds, Config::object(), TrainContext{});
+    const auto state = baseline->fold_in(std::vector<Rating>{{0, 5.0f, 1}, {1, 4.0f, 1}, {2, 3.0f, 1}, {3, 2.0f, 1}});
+    REQUIRE(state.vec.size() == 4);
+    CHECK(state.vec[2] > 0.5f);   // Comedy
+    CHECK(state.vec[3] == 0.0f);  // Drama
+    const auto scores = scores_of(*baseline, state);
+    CHECK(scores[5] > scores[4]);  // the unrated comedy now outranks the Drama movie
+  }
 }
 
 TEST_CASE("Content gate: fold_in + score equals the batch path bit for bit (tiny fixture)",
           "[content][gate][phase1]") {
   const Dataset ds = load_movielens(recs::testing::tiny_dir(), "tiny");
-  auto model = make_content();
-  model->fit(ds, Config::object(), TrainContext{});
-  REQUIRE(model->supports_trained_scoring());
-  std::size_t finite_users = 0;
-  for (UserIdx u = 0; u < ds.n_users(); ++u) {
-    INFO("user " << u);
-    const auto ratings = user_ratings(ds, u);
-    const auto via_fold_in = scores_of(*model, model->fold_in(ratings));
-    std::vector<float> batch(model->n_items());
-    model->score_trained_user(u, batch);
-    CHECK(bitwise_equal(via_fold_in, batch));
-    if (std::any_of(batch.begin(), batch.end(), [](float s) { return std::isfinite(s); })) ++finite_users;
+  for (const auto& cfg : all_centerings()) {
+    INFO("config " << cfg.dump());
+    auto model = make_content();
+    model->fit(ds, cfg, TrainContext{});
+    REQUIRE(model->supports_trained_scoring());
+    std::size_t finite_users = 0;
+    for (UserIdx u = 0; u < ds.n_users(); ++u) {
+      INFO("user " << u);
+      const auto ratings = user_ratings(ds, u);
+      const auto via_fold_in = scores_of(*model, model->fold_in(ratings));
+      std::vector<float> batch(model->n_items());
+      model->score_trained_user(u, batch);
+      CHECK(bitwise_equal(via_fold_in, batch));
+      if (std::any_of(batch.begin(), batch.end(), [](float s) { return std::isfinite(s); })) ++finite_users;
+    }
+    CHECK(finite_users > 0);  // the comparison was not between two all -infinity vectors
   }
-  CHECK(finite_users > 0);  // the comparison was not between two all -infinity vectors
 }
 
 TEST_CASE("Content gate: fold_in + score equals the batch path bit for bit (random data, any order)",
           "[content][gate][phase1][property]") {
   recs::testing::for_seeds(10, 77, [](Rng& rng, std::uint64_t) {
     const Dataset ds = random_dataset(rng, 30, 60, 0.25);
-    auto model = make_content();
-    model->fit(ds, Config::object(), TrainContext{});
-    for (UserIdx u = 0; u < ds.n_users(); ++u) {
-      INFO("user " << u);
-      auto ratings = user_ratings(ds, u);
-      rng.shuffle(ratings.begin(), ratings.end());  // the website sends ratings in any order
-      const auto via_fold_in = scores_of(*model, model->fold_in(ratings));
-      std::vector<float> batch(model->n_items());
-      model->score_trained_user(u, batch);
-      CHECK(bitwise_equal(via_fold_in, batch));
-      CHECK(std::none_of(batch.begin(), batch.end(), [](float s) { return std::isnan(s); }));
+    for (const auto& cfg : all_centerings()) {
+      INFO("config " << cfg.dump());
+      auto model = make_content();
+      model->fit(ds, cfg, TrainContext{});
+      for (UserIdx u = 0; u < ds.n_users(); ++u) {
+        INFO("user " << u);
+        auto ratings = user_ratings(ds, u);
+        rng.shuffle(ratings.begin(), ratings.end());  // the website sends ratings in any order
+        const auto via_fold_in = scores_of(*model, model->fold_in(ratings));
+        std::vector<float> batch(model->n_items());
+        model->score_trained_user(u, batch);
+        CHECK(bitwise_equal(via_fold_in, batch));
+        CHECK(std::none_of(batch.begin(), batch.end(), [](float s) { return std::isnan(s); }));
+      }
     }
   });
 }
@@ -247,29 +344,32 @@ TEST_CASE("Content gate: fold_in + score equals the batch path bit for bit (rand
 TEST_CASE("Content gate: explanations only cite movies the user rated", "[content][gate][phase1][property]") {
   recs::testing::for_seeds(10, 91, [](Rng& rng, std::uint64_t) {
     const Dataset ds = random_dataset(rng, 25, 50, 0.3);
-    auto model = make_content();
-    model->fit(ds, Config::object(), TrainContext{});
-    std::size_t non_empty = 0;
-    for (UserIdx u = 0; u < ds.n_users(); ++u) {
-      // A random subset of the user's ratings, as the website might send.
-      auto ratings = user_ratings(ds, u);
-      rng.shuffle(ratings.begin(), ratings.end());
-      ratings.resize(rng.uniform(ratings.size() + 1));
-      const auto state = model->fold_in(ratings);
-      std::set<ItemIdx> rated;
-      for (const auto& r : ratings) rated.insert(r.item);
-      for (ItemIdx i = 0; i < ds.n_items(); ++i) {
-        INFO("user " << u << " item " << i);
-        const auto e = model->explain(state, i);
-        CHECK(e.because.size() <= 3);
-        for (std::size_t k = 0; k < e.because.size(); ++k) {
-          CHECK(rated.count(e.because[k].item) == 1);
-          CHECK(e.because[k].weight > 0.0f);
-          if (k > 0) CHECK(e.because[k - 1].weight >= e.because[k].weight);
+    for (const auto& cfg : all_centerings()) {
+      INFO("config " << cfg.dump());
+      auto model = make_content();
+      model->fit(ds, cfg, TrainContext{});
+      std::size_t non_empty = 0;
+      for (UserIdx u = 0; u < ds.n_users(); ++u) {
+        // A random subset of the user's ratings, as the website might send.
+        auto ratings = user_ratings(ds, u);
+        rng.shuffle(ratings.begin(), ratings.end());
+        ratings.resize(rng.uniform(ratings.size() + 1));
+        const auto state = model->fold_in(ratings);
+        std::set<ItemIdx> rated;
+        for (const auto& r : ratings) rated.insert(r.item);
+        for (ItemIdx i = 0; i < ds.n_items(); ++i) {
+          INFO("user " << u << " item " << i);
+          const auto e = model->explain(state, i);
+          CHECK(e.because.size() <= 3);
+          for (std::size_t k = 0; k < e.because.size(); ++k) {
+            CHECK(rated.count(e.because[k].item) == 1);
+            CHECK(e.because[k].weight > 0.0f);
+            if (k > 0) CHECK(e.because[k - 1].weight >= e.because[k].weight);
+          }
+          if (!e.because.empty()) ++non_empty;
         }
-        if (!e.because.empty()) ++non_empty;
       }
+      CHECK(non_empty > 0);
     }
-    CHECK(non_empty > 0);
   });
 }

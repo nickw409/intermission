@@ -393,6 +393,91 @@ TEST_CASE("MF epoch order is a fresh seeded permutation every epoch", "[mf]") {
   }
 }
 
+TEST_CASE("MF record shuffle applies exactly the EpochShuffler order", "[mf]") {
+  // fit() shuffles the records in place; after every epoch, record j must be rating order[j].
+  const std::size_t n = 1000;
+  std::vector<recs::mf_detail::SgdRating> ratings(n);
+  for (std::uint32_t j = 0; j < n; ++j) ratings[j] = {j % 37, j, static_cast<float>(j)};
+  for (const std::uint64_t seed : {1u, 42u, 9001u}) {
+    INFO("seed " << seed);
+    recs::mf_detail::EpochShuffler reference(n, seed);
+    recs::mf_detail::RecordShuffler shuffler(seed);
+    auto records = ratings;
+    for (int e = 0; e < 5; ++e) {
+      const auto& order = reference.next();
+      shuffler.next(records);
+      bool same = true;
+      for (std::size_t j = 0; j < n; ++j)
+        same = same && records[j].row == ratings[order[j]].row && records[j].col == ratings[order[j]].col &&
+               records[j].value == ratings[order[j]].value;
+      CHECK(same);
+    }
+  }
+}
+
+TEST_CASE("MF sgd_epoch is bit-identical to sgd_step over the same ratings", "[mf]") {
+  // Prefetching changes memory access only; the parameters must match exactly, for epochs
+  // shorter than, equal to and longer than the prefetch distance, and for an empty one.
+  constexpr std::size_t d = recs::mf_detail::kPrefetchAhead;
+  recs::Rng rng(77);
+  const Params start = random_params(rng, 40, 30, 16);
+  for (const std::size_t n : {std::size_t{0}, std::size_t{1}, d - 1, d, d + 1, std::size_t{500}}) {
+    INFO(n << " ratings");
+    std::vector<recs::Triplet> triplets;
+    std::vector<recs::mf_detail::SgdRating> records;
+    for (std::size_t j = 0; j < n; ++j) {
+      const auto u = static_cast<std::uint32_t>(rng.uniform(40));
+      const auto i = static_cast<std::uint32_t>(rng.uniform(30));
+      const auto v = static_cast<float>(0.5 * (1 + rng.uniform(10)));
+      triplets.push_back({u, i, v, 0});
+      records.push_back({u, i, v});
+    }
+    Params a = start, b = start;
+    for (const auto& t : triplets) recs::mf_detail::sgd_step(a, t, 0.01, 0.05);
+    recs::mf_detail::sgd_epoch(b, records, 0.01, 0.05);
+    CHECK(a.bu == b.bu);
+    CHECK(a.bi == b.bi);
+    CHECK(a.P == b.P);
+    CHECK(a.Q == b.Q);
+  }
+}
+
+TEST_CASE("MF fit reproduces the pre-optimisation training loop bit for bit", "[mf]") {
+  // Golden values recorded from the index-shuffle loop (main at 475d121) with this exact setup:
+  // nonzero init (so the factors train, not only the biases) and no validation set (so the
+  // curve is train RMSE, whose summation order must not follow the shuffle). Any change to the
+  // visiting order, the arithmetic or train_rmse changes these bits. They assume the project's
+  // compiler flags (no -ffast-math or FMA contraction); a deliberate change to the numbers must
+  // re-record them and say so.
+  const auto s = recs::synthetic::low_rank_explicit(60, 50, 3, 0.1, 0.3, 0.0, 5);
+  auto model = recs::make_mf_sgd();
+  recs::TrainContext ctx;
+  ctx.seed = 7;
+  model->fit(s.train,
+             recs::Config{{"k", 8}, {"lambda", 0.05}, {"lr", 0.02}, {"lr_decay", 0.97},
+                          {"max_epochs", 6}, {"patience", 3}, {"init_sd", 0.1}},
+             ctx);
+  const std::vector<std::pair<int, double>> golden_curve{
+      {1, 0x1.dce04310b6cc3p-1}, {2, 0x1.d4e5a05a80625p-1}, {3, 0x1.d04fdfbe2545fp-1},
+      {4, 0x1.cd10a50c932eep-1}, {5, 0x1.ca719766d96b4p-1}, {6, 0x1.c807520888cfcp-1}};
+  CHECK(model->training_curve() == golden_curve);
+  // FNV-1a over the bytes of every trained user's scores (score_trained_user, users ascending).
+  std::uint64_t h = 1469598103934665603ULL;
+  std::vector<float> out(50);
+  for (recs::UserIdx u = 0; u < 60; ++u) {
+    model->score_trained_user(u, out);
+    for (const float x : out) {
+      std::uint32_t bits = 0;
+      std::memcpy(&bits, &x, sizeof bits);
+      for (int b = 0; b < 4; ++b) {
+        h ^= (bits >> (8 * b)) & 0xffu;
+        h *= 1099511628211ULL;
+      }
+    }
+  }
+  CHECK(h == 0x6e836923a1d18b3aULL);
+}
+
 TEST_CASE("MF fit visits ratings in the seeded per-epoch shuffled order", "[mf]") {
   // init_sd = 0 makes the initial parameters independent of the seed (all zero; with zero factors
   // only the biases move), so any dependence of the result on the seed comes from the update

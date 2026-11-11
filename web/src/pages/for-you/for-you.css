@@ -1,0 +1,80 @@
+/* For you: model selector and genre chips. Uses the tokens from styles.css only. */
+
+.for-you-controls {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.for-you-controls__model {
+  max-width: 20rem;
+}
+
+.for-you-controls__model select {
+  font: inherit;
+  max-width: 100%;
+  min-height: 44px;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+}
+
+.genre-chips {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.genre-chips__label {
+  margin: 0 0 var(--space-2);
+  padding: 0;
+  font-weight: 600;
+}
+
+/* Wraps onto several lines, so the row never pushes the page sideways on a phone. */
+.genre-chips__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: 32px;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+
+.chip:hover {
+  border-color: var(--accent);
+}
+
+/* Pressed is shown by colour, a heavier border and a check mark, not by colour alone. The check
+   mark has empty alt text so it is not read as part of the button's name. */
+.chip[aria-pressed='true'] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.chip[aria-pressed='true']::before {
+  content: '✓' / '';
+}
+
+.for-you-summary {
+  margin: 0;
+}

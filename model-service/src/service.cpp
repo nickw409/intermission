@@ -6,7 +6,8 @@
 //   2. match the route and method; /v1/* routes answer 503 model_unavailable without a bundle;
 //   3. validate the input again (recs-api validates too, but this service is the last line):
 //      body size, JSON nesting depth, exact object shapes (unknown fields are rejected, like the
-//      schema's additionalProperties: false), integer ranges, the 0.5 rating grid, list lengths;
+//      schema's additionalProperties: false), integer ranges, the 0.5 rating grid, list lengths,
+//      the genre enum;
 //   4. run the handler, converting ApiError to the contract's Error shape and any other exception
 //      to a 500 `internal` — nothing escapes;
 //   5. record metrics and write one log line. Logs carry the route template, never the raw path,
@@ -32,6 +33,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "genres.hpp"
 #include "onboarding.hpp"
 #include "search.hpp"
 
@@ -294,6 +296,44 @@ std::vector<ItemIdx> parse_exclude(const Bundle& b, const json& obj) {
   return out;
 }
 
+// The optional `genres` filter as a GenreMask; 0 (absent or empty) means no filter. Must be an array
+// of at most 19 distinct names from the contract's Genre enum.
+GenreMask parse_genres(const json& obj) {
+  if (!obj.contains("genres")) return 0;
+  const json& v = obj.at("genres");
+  if (!v.is_array() || v.size() > kGenres.size()) bad_request("genres must be an array of at most 19 distinct genre names");
+  GenreMask mask = 0;
+  for (const auto& g : v) {
+    if (!g.is_string()) bad_request("genres must be an array of at most 19 distinct genre names");
+    const auto& name = g.get_ref<const std::string&>();
+    const auto bit = genre_bit(name);
+    if (!bit) bad_request("unknown genre" + echo_token(name));
+    if (mask & *bit) bad_request("duplicate genre" + echo_token(name));
+    mask |= *bit;
+  }
+  return mask;
+}
+
+// What recommend() must mask for this request: the caller's exclude list plus, under a genre
+// filter, every item with none of the wanted genres. Masking before recommend()'s top-k cut (not
+// filtering its output) means the result is the k best MATCHING items, in the order the unfiltered
+// ranking would put them. Shared by recommend and compare, so every model is filtered the same way
+// and no model needs to know about genres. O(n_items) with one bitwise AND per item.
+// Any future re-ranker (mmr, hybrid) must receive this pre-masked list too, so the genre filter is
+// applied before re-ranking: re-ranking first and filtering after would return fewer than k items
+// and a different order than re-ranking the matching set.
+std::vector<ItemIdx> masked_items(const Bundle& b, std::vector<ItemIdx> exclude, GenreMask wanted) {
+  if (wanted == 0) return exclude;
+  const std::uint32_t n = b.n_items();
+  std::size_t non_matching = 0;
+  for (ItemIdx i = 0; i < n; ++i) non_matching += (b.genre_mask[i] & wanted) == 0;
+  exclude.reserve(exclude.size() + non_matching);
+  for (ItemIdx i = 0; i < n; ++i) {
+    if ((b.genre_mask[i] & wanted) == 0) exclude.push_back(i);
+  }
+  return exclude;
+}
+
 constexpr std::array<std::string_view, 8> kModelNames = {"pop", "pop_count", "knn", "content", "mf", "als", "hybrid", "mmr"};
 
 bool is_contract_model(std::string_view name) {
@@ -380,6 +420,7 @@ class Handler {
   Handler(const Bundle* bundle, Metrics& metrics) : b_(bundle), metrics_(metrics) {}
 
   // Fold-in + top-k + explanations for one model. Every cited item is one the user rated.
+  // `exclude` already carries the genre filter (masked_items), so top-k is taken over matching items.
   json run(const std::string& name, const Model& m, const ParsedRatings& in, std::size_t k,
            const std::vector<ItemIdx>& exclude) {
     const auto t0 = std::chrono::steady_clock::now();
@@ -412,17 +453,17 @@ class Handler {
 
   std::string recommend_route(const Request& req) {
     const json j = parse_object(req.body);
-    check_fields(j, {"model", "ratings", "k", "exclude"}, {"model", "ratings", "k"});
+    check_fields(j, {"model", "ratings", "k", "exclude", "genres"}, {"model", "ratings", "k"});
     const auto [name, model] = resolve_model(*b_, j.at("model"));
     const std::size_t k = get_k(j);
     const ParsedRatings ratings = parse_ratings(*b_, j.at("ratings"));
-    const auto exclude = parse_exclude(*b_, j);
+    const auto exclude = masked_items(*b_, parse_exclude(*b_, j), parse_genres(j));
     return dump(json{{"model", name}, {"items", run(name, *model, ratings, k, exclude)}, {"ignored", ratings.ignored}});
   }
 
   std::string compare_route(const Request& req) {
     const json j = parse_object(req.body);
-    check_fields(j, {"models", "ratings", "k", "exclude"}, {"models", "ratings", "k"});
+    check_fields(j, {"models", "ratings", "k", "exclude", "genres"}, {"models", "ratings", "k"});
     const json& names = j.at("models");
     if (!names.is_array() || names.empty() || names.size() > Limits::kMaxCompareModels) {
       bad_request("models must list 1-5 distinct model names");
@@ -436,7 +477,7 @@ class Handler {
     }
     const std::size_t k = get_k(j);
     const ParsedRatings ratings = parse_ratings(*b_, j.at("ratings"));
-    const auto exclude = parse_exclude(*b_, j);
+    const auto exclude = masked_items(*b_, parse_exclude(*b_, j), parse_genres(j));  // once, for every model
     json results = json::array();
     for (const auto& [name, model] : models) {
       results.push_back({{"model", name}, {"items", run(name, *model, ratings, k, exclude)}});
