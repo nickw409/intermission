@@ -10,19 +10,20 @@
 
 namespace recs::item_knn_detail {
 
-/// Hyperparameters (configs/knn.json). The defaults are the spec's top-N form, with M and lambda
-/// chosen on the ml-latest-small validation split (ml-32m uses configs/knn.ml-32m.tuned.json).
+/// Hyperparameters (configs/knn.json). The defaults are the spec's top-N form, with M, lambda and
+/// mean_damping chosen on the ml-latest-small validation split (ml-32m uses configs/knn.ml-32m.tuned.json).
 struct Params {
   std::uint32_t neighbors = 10;    // M: neighbours kept per item
   double shrinkage = 1000.0;       // lambda in s * n / (n + lambda)
   std::uint32_t min_support = 20;  // minimum training ratings for an item to take part at all
   bool normalize = false;          // true = divide the score by sum |s'| (rating-prediction form)
   bool positive_only = true;       // keep only s' > 0 neighbours (false = rank by |s'|, negatives kept)
+  double mean_damping = 20.0;      // beta: the scoring mean is (sum r + beta * global mean) / (n + beta)
 };
 
 /// Reads a knn config, filling defaults for missing keys. Throws std::invalid_argument on an
 /// unknown key, a wrong type (including a non-bool normalize/positive_only), neighbors == 0,
-/// min_support == 0, or a negative/non-finite shrinkage.
+/// min_support == 0, a negative/non-finite shrinkage, or a mean_damping outside [0, 1e6].
 Params parse_config(const Config& cfg);
 Config to_config(const Params& p);
 

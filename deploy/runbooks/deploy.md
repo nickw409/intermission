@@ -64,6 +64,14 @@ the old recs-model restarts in between, it finds only the format 2 artifact in `
 cannot load it, so recommendations are down until the release. Point `CURRENT` back at the
 previous artifact if the release has to wait.
 
+The KNN model file went to format 3 with `mean_damping` (it stores the damping and the global
+mean). The new recs-model still loads format 2 KNN files (as `mean_damping` 0, the old
+behaviour), so the release itself needs no retrain; the damped mean reaches the site with the
+next artifact trained by the new image. Rollback in the other direction does not work: an older
+recs-model refuses a format 3 `knn/item_knn.bin` ("unsupported format version"). Once a format 3
+artifact is `CURRENT`, rolling the code back to a pre-format-3 SHA also needs `CURRENT` pointed
+at an older artifact (keep the previous artifact until the new one has been live for a while).
+
 Development uses a separate compose project (`intermission-dev`), port 127.0.0.1:8088 and data
 directory `data/dev/` (see `deploy/compose.dev.yaml`), so it never touches production.
 
