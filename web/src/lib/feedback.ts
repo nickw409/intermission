@@ -1,12 +1,9 @@
 // Online feedback on recommendations.
 //
-// PHASE 6 HOOK: "Not interested" currently only hides the card in the page. When phase 6 adds the
-// feedback endpoint, make notInterested send it:
-//
-//   await api.post('/api/feedback', { body: { movieId, model, action: 'not_interested' } });
-//
-// Pages call feedbackHook.notInterested(...) already, so that is the only change needed.
-import type { Schemas } from '../api/client';
+// "Not interested" is saved through POST /api/feedback: the movie is left out of the user's
+// recommendations from then on, for every model. (Impressions and clicks, the rest of phase 6's
+// online signals, go through the same endpoint when that phase adds them.)
+import { api, type Schemas } from '../api/client';
 
 export interface NotInterested {
   movieId: number;
@@ -14,8 +11,8 @@ export interface NotInterested {
 }
 
 export const feedbackHook = {
-  notInterested(event: NotInterested): void {
-    // Intentionally nothing yet (see PHASE 6 HOOK above).
-    void event;
+  /** Saves "not interested". Rejects with the ApiError if it could not be saved. */
+  async notInterested(event: NotInterested): Promise<void> {
+    await api.post('/api/feedback', { body: { movieId: event.movieId, model: event.model, action: 'not_interested' } });
   },
 };

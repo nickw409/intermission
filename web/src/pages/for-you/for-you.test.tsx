@@ -111,19 +111,63 @@ describe('For you page', () => {
     expect(await screen.findByText(/No recommendations right now/)).toBeInTheDocument();
   });
 
-  it('"Not interested" hides the card locally and goes through the feedback hook, sending nothing yet', async () => {
+  it('"Not interested" hides the card and saves it through the feedback endpoint', async () => {
     const user = userEvent.setup();
     const spy = vi.spyOn(feedbackHook, 'notInterested');
     await openPage();
-    const sent = recordRequests('/api/feedback');
+    const sent = recordRequests('/api/feedback', 'POST');
+    // Hold the save open: the card must be gone before the server answers.
+    const { wait, release } = gate();
+    server.use(
+      http.post('/api/feedback', async () => {
+        await wait;
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
     await user.click(within(card(LOTR)).getByRole('button', { name: `Not interested in ${LOTR}` }));
     expect(screen.queryByRole('heading', { level: 2, name: LOTR })).not.toBeInTheDocument();
     expect(screen.getAllByRole('article')).toHaveLength(2);
     expect(spy).toHaveBeenCalledWith({ movieId: 4993, model: 'als' });
-    expect(sent).toHaveLength(0);
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(await sent[0]!.json()).toEqual({ movieId: 4993, model: 'als', action: 'not_interested' });
+    expect(sent[0]!.headers.get('X-Requested-With')).toBe('recs');
     // Focus does not get lost when the card disappears.
     expect(document.activeElement).not.toBe(document.body);
+    // Saved: once the request has finished, the card stays hidden and no error appears.
+    release();
+    await act(async () => {
+      await spy.mock.results[0]!.value;
+    });
+    expect(screen.queryByRole('heading', { level: 2, name: LOTR })).not.toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     spy.mockRestore();
+  });
+
+  it('brings the card back with an error when "Not interested" cannot be saved', async () => {
+    const user = userEvent.setup();
+    server.use(http.post('/api/feedback', () => errorBody('internal', 500)));
+    await openPage();
+    await user.click(within(card(LOTR)).getByRole('button', { name: `Not interested in ${LOTR}` }));
+    const back = await screen.findByRole('heading', { level: 2, name: LOTR });
+    expect(within(back.closest('article')!).getByRole('alert')).toHaveTextContent(/Couldn't save "Not interested"/);
+    expect(screen.getAllByRole('article')).toHaveLength(3);
+
+    // A retry that works hides it again and clears the error.
+    server.resetHandlers();
+    await user.click(within(card(LOTR)).getByRole('button', { name: `Not interested in ${LOTR}` }));
+    expect(screen.queryByRole('heading', { level: 2, name: LOTR })).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getAllByRole('article')).toHaveLength(2));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('drops a "Not interested" error when the model changes', async () => {
+    const user = userEvent.setup();
+    server.use(http.post('/api/feedback', () => errorBody('internal', 500)));
+    await openPage();
+    await user.click(within(card(LOTR)).getByRole('button', { name: `Not interested in ${LOTR}` }));
+    await screen.findByRole('alert');
+    await user.selectOptions(screen.getByRole('combobox', { name: /model/i }), 'knn');
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
   });
 
   it('updates a rating optimistically and sends it', async () => {

@@ -55,6 +55,31 @@ export function RecommendationList({
   const { state, reload } = useRecommendations(model, genresKey);
   const ratings = useOptimisticRatings();
   const [hidden, setHidden] = useState<ReadonlySet<number>>(new Set());
+  // Movies whose "Not interested" could not be saved: shown again, with an error. The error
+  // belongs to the list it happened on, so a new model or filter starts without it.
+  const [failed, setFailed] = useState<ReadonlySet<number>>(new Set());
+  const listKey = `${model}?${genresKey}`;
+  const [failedFor, setFailedFor] = useState(listKey);
+  if (failedFor !== listKey) {
+    setFailedFor(listKey);
+    setFailed(new Set());
+  }
+  const hide = (movieId: number) => {
+    setHidden((current) => new Set(current).add(movieId));
+    setFailed((current) => {
+      const next = new Set(current);
+      next.delete(movieId);
+      return next;
+    });
+  };
+  const unhide = (movieId: number) => {
+    setHidden((current) => {
+      const next = new Set(current);
+      next.delete(movieId);
+      return next;
+    });
+    setFailed((current) => new Set(current).add(movieId));
+  };
   useRefetchAfterRating(() => reload({ quiet: true }));
 
   const phrase = genrePhrase(parseGenres(genresKey));
@@ -76,7 +101,9 @@ export function RecommendationList({
         phrase={phrase}
         ratings={ratings}
         onClearGenres={onClearGenres}
-        onHide={(movieId) => setHidden((current) => new Set(current).add(movieId))}
+        failed={failed}
+        onHide={hide}
+        onHideFailed={unhide}
       />
     );
   }
@@ -97,7 +124,9 @@ function Results({
   phrase,
   ratings,
   onClearGenres,
+  failed,
   onHide,
+  onHideFailed,
 }: {
   data: RecommendResponse;
   items: RecItem[];
@@ -106,7 +135,9 @@ function Results({
   phrase: string;
   ratings: OptimisticRatings;
   onClearGenres: () => void;
+  failed: ReadonlySet<number>;
   onHide: (movieId: number) => void;
+  onHideFailed: (movieId: number) => void;
 }) {
   return (
     <>
@@ -133,7 +164,14 @@ function Results({
         <ul className="card-grid" aria-busy={busy || undefined} aria-label="Recommendations">
           {items.map((item) => (
             <li key={item.movieId}>
-              <RecommendationCard item={item} model={data.model} ratings={ratings} onHide={onHide} />
+              <RecommendationCard
+                item={item}
+                model={data.model}
+                ratings={ratings}
+                hideFailed={failed.has(item.movieId)}
+                onHide={onHide}
+                onHideFailed={onHideFailed}
+              />
             </li>
           ))}
         </ul>
@@ -169,12 +207,17 @@ function RecommendationCard({
   item,
   model,
   ratings,
+  hideFailed,
   onHide,
+  onHideFailed,
 }: {
   item: RecItem;
   model: ModelName;
   ratings: OptimisticRatings;
+  /** The last "Not interested" for this movie could not be saved. */
+  hideFailed: boolean;
   onHide: (movieId: number) => void;
+  onHideFailed: (movieId: number) => void;
 }) {
   const notInterested = (event: MouseEvent<HTMLButtonElement>) => {
     // Move focus to a neighbouring card before this one disappears.
@@ -183,8 +226,9 @@ function RecommendationCard({
     const target = neighbour?.querySelector<HTMLElement>('a');
     if (target) target.focus();
     else document.querySelector<HTMLElement>('main h1')?.focus();
-    feedbackHook.notInterested({ movieId: item.movieId, model });
+    // Hide at once; if the server could not save it, the card comes back with an error.
     onHide(item.movieId);
+    feedbackHook.notInterested({ movieId: item.movieId, model }).catch(() => onHideFailed(item.movieId));
   };
   return (
     <MovieCard movieId={item.movieId} title={item.title} year={item.year}>
@@ -205,6 +249,11 @@ function RecommendationCard({
       >
         Not interested
       </button>
+      {hideFailed && (
+        <p role="alert" className="field__error">
+          Couldn't save &quot;Not interested&quot;. Try again.
+        </p>
+      )}
     </MovieCard>
   );
 }

@@ -186,7 +186,7 @@ type userRatings struct {
 	version int64                  // users.ratings_version
 	created int64                  // users.created_at, fixed for the account's life
 	ratings []modelclient.RatingIn // newest first
-	ids     []int64                // the rated movie IDs, same order (exclude list)
+	ids     []int64                // exclude list: the rated movie IDs (same order), then the "not interested" ones
 }
 
 // recommend serves GET /api/recommend.
@@ -540,7 +540,27 @@ func (h *handler) loadRatings(ctx context.Context, uid int64) (userRatings, erro
 		u.ratings = append(u.ratings, ri)
 		u.ids = append(u.ids, ri.MovieID)
 	}
-	return u, rows.Err()
+	if err := rows.Err(); err != nil {
+		return u, err
+	}
+	// Movies marked "not interested" (POST /api/feedback) are never
+	// recommended again. That write bumps ratings_version, so the version read
+	// above covers these rows too. A movie both rated and dismissed is listed
+	// once.
+	rated := make(map[int64]bool, len(u.ids))
+	for _, id := range u.ids {
+		rated[id] = true
+	}
+	dismissed, err := db.NotInterestedMovies(ctx, tx, uid)
+	if err != nil {
+		return u, err
+	}
+	for _, id := range dismissed {
+		if !rated[id] {
+			u.ids = append(u.ids, id)
+		}
+	}
+	return u, nil
 }
 
 func joinModels(models []modelclient.ModelName) string {
