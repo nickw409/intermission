@@ -355,9 +355,10 @@ func parseFilter(q map[string][]string) (filter, error) {
 // parseYears validates the optional year_from and year_to parameters
 // (public.yaml parameters.YearFrom and YearTo): each, when present, is one
 // value of ASCII digits only, a whole year in [1800, 2100]; when both are
-// present year_from must not exceed year_to. An absent bound is nil
-// (unbounded). Anything else, an empty value included, is bad_request with
-// one fixed message that never echoes the input.
+// present year_from must not exceed year_to. An absent or empty bound is nil
+// (unbounded), as an empty genres is no filter. Anything else, a repeated
+// parameter included, is bad_request with one fixed message that never
+// echoes the input.
 func parseYears(q map[string][]string) (from, to *int, err error) {
 	from, ok := yearParam(q, "year_from")
 	if !ok {
@@ -373,14 +374,17 @@ func parseYears(q map[string][]string) (from, to *int, err error) {
 	return from, to, nil
 }
 
-// yearParam parses one year parameter. An absent parameter is (nil, true).
+// yearParam parses one year parameter. An absent or empty one is (nil, true).
 func yearParam(q map[string][]string, name string) (*int, bool) {
 	vals, present := q[name]
 	if !present {
 		return nil, true
 	}
-	if len(vals) != 1 || vals[0] == "" || len(vals[0]) > maxYearParam {
+	if len(vals) != 1 || len(vals[0]) > maxYearParam {
 		return nil, false
+	}
+	if vals[0] == "" {
+		return nil, true // year_from= means unbounded
 	}
 	for i := 0; i < len(vals[0]); i++ {
 		if vals[0][i] < '0' || vals[0][i] > '9' {

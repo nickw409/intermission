@@ -119,13 +119,14 @@ func replay(t *testing.T, e *cachetest.Env, c cachetest.Case, token string) *htt
 func TestContractFixtures(t *testing.T) {
 	// The model fixture case that must answer each public case's model call.
 	wantModelCase := map[string]string{
-		"recommend/ok":            "ok",
-		"recommend/ok_cold_start": "ok_cold_start_pop",
-		"compare/ok":              "ok",
-		"recommend/ok_genres":     "ok_genres",
-		"compare/ok_genres":       "ok_genres",
-		"recommend/ok_years":      "ok_years",
-		"compare/ok_years":        "ok_years",
+		"recommend/ok":             "ok",
+		"recommend/ok_cold_start":  "ok_cold_start_pop",
+		"compare/ok":               "ok",
+		"recommend/ok_genres":      "ok_genres",
+		"compare/ok_genres":        "ok_genres",
+		"recommend/ok_years":       "ok_years",
+		"compare/ok_years":         "ok_years",
+		"recommend/ok_years_empty": "ok", // empty year_from= and year_to= mean no filter
 	}
 	for _, op := range []string{"recommend", "compare"} {
 		for _, c := range cachetest.PublicCases(t, op) {

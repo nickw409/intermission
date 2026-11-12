@@ -336,12 +336,14 @@ components:
     YearFrom:
       name: year_from
       in: query
-      description: Inclusive lower bound on the release year (the trailing "(YYYY)" of the MovieLens title). When year_from or year_to is given, movies without a year are not returned; fewer than k items may come back. Combines with genres (both must match). Cold-start popularity results are filtered too. Absent means unbounded. A value that is not a plain integer in range, or a year_from greater than year_to, is 400 bad_request.
+      description: Inclusive lower bound on the release year (the trailing "(YYYY)" of the MovieLens title). When year_from or year_to is given, movies without a year are not returned; fewer than k items may come back. Combines with genres (both must match). Cold-start popularity results are filtered too. Absent or empty (year_from=) means unbounded, as an empty genres means no filter. A value that is not a plain integer in range, a repeated parameter, or a year_from greater than year_to, is 400 bad_request.
+      allowEmptyValue: true
       schema: { type: integer, minimum: 1800, maximum: 2100, examples: [1990] }
     YearTo:
       name: year_to
       in: query
-      description: Inclusive upper bound on the release year; as year_from.
+      description: Inclusive upper bound on the release year; as year_from (empty means unbounded).
+      allowEmptyValue: true
       schema: { type: integer, minimum: 1800, maximum: 2100, examples: [1999] }
     XRequestedWith: { name: X-Requested-With, in: header, required: true, schema: { type: string, const: recs } }
   headers:

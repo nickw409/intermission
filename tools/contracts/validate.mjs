@@ -197,6 +197,7 @@ function validateCase(kind, file, doc, opInfo, c, where) {
       }
       const v = values[p.in]?.[p.name];
       if (v === undefined) { if (p.required) fail(where, `missing required ${p.in} parameter ${p.name}`); continue; }
+      if (v === '' && p.allowEmptyValue) continue; // an empty value the contract allows (it means "not set")
       const validate = validatorAt(file, p.schemaPointer, true);
       if (!validate({ v })) fail(where, `${p.in} parameter ${p.name}=${v}: ${fmtErrors(validate.errors)}`);
     }

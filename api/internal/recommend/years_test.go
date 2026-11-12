@@ -82,8 +82,9 @@ func fmtYear(p *int) string {
 	return strconv.Itoa(*p)
 }
 
-// A valid bound goes to recs-model as a JSON integer; an absent one is left
-// out of the body entirely. Either bound may be given alone.
+// A valid bound goes to recs-model as a JSON integer; an absent or empty one
+// is left out of the body entirely (empty means no filter, as for genres).
+// Either bound may be given alone.
 func TestYearsForwarded(t *testing.T) {
 	cases := []struct {
 		query    string
@@ -98,6 +99,10 @@ func TestYearsForwarded(t *testing.T) {
 		{"&year_to=1800", nil, ip(1800)},
 		{"&year_from=2100", ip(2100), nil},
 		{"&year_to=2010&year_from=2000", ip(2000), ip(2010)},
+		{"&year_from=", nil, nil},
+		{"&year_from=&year_to=", nil, nil},
+		{"&year_from=&year_to=1999", nil, ip(1999)},
+		{"&year_from=1990&year_to=", ip(1990), nil},
 	}
 	for _, c := range cases {
 		for _, base := range []string{"/api/recommend?model=als&k=3", "/api/recommend/compare?models=pop,knn,als&k=3"} {
@@ -146,7 +151,6 @@ func TestYearsWithGenres(t *testing.T) {
 // message, on both routes, and recs-model is never asked.
 func TestYearsValidation(t *testing.T) {
 	badValues := []string{
-		"",                           // empty
 		"abc",                        // not a number
 		"199a",                       // trailing letter
 		"-1990",                      // sign
