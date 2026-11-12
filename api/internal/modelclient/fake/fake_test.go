@@ -535,3 +535,156 @@ func TestMoviesBatchCatalogFallback(t *testing.T) {
 		t.Fatalf("answered by %q", calls[len(calls)-1].Case)
 	}
 }
+
+// A movies/batch request no case matches is checked as recs-model checks it
+// (model-service batch_route, contracts/model.yaml BatchRequest): 1-200 IDs,
+// each in [1, 2147483647], else 400.
+func TestMoviesBatchFallbackRejectsInvalid(t *testing.T) {
+	f, err := NewFromDir(realFixtureDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tooMany := make([]int64, modelclient.MaxBatchIDs+1)
+	for i := range tooMany {
+		tooMany[i] = int64(i + 1)
+	}
+	for _, tc := range []struct {
+		name string
+		ids  []int64
+		msg  string
+	}{
+		{"zero", []int64{260, 0}, "movie_id must be an integer between 1 and 2147483647"},
+		{"negative", []int64{-5}, "movie_id must be an integer between 1 and 2147483647"},
+		{"above int32", []int64{260, 2147483648}, "movie_id must be an integer between 1 and 2147483647"},
+		{"over 200", tooMany, "ids must contain 1-200 movie ids"},
+		{"nil", nil, "ids must contain 1-200 movie ids"},
+	} {
+		_, _, err := f.MoviesBatch(context.Background(), tc.ids)
+		var se *modelclient.StatusError
+		if !errors.As(err, &se) || se.Status != 400 || se.Code != "bad_request" || se.Message != tc.msg {
+			t.Errorf("%s: err %v, want 400 bad_request %q", tc.name, err, tc.msg)
+		}
+	}
+	// Exactly 200 valid IDs is fine (all unknown to the fixtures but one).
+	ok := make([]int64, modelclient.MaxBatchIDs)
+	for i := range ok {
+		ok[i] = int64(i + 1)
+	}
+	resp, _, err := f.MoviesBatch(context.Background(), ok)
+	if err != nil || len(resp.Movies)+len(resp.Missing) != modelclient.MaxBatchIDs {
+		t.Fatalf("200 IDs: %v, %d movies, %d missing", err, len(resp.Movies), len(resp.Missing))
+	}
+	if _, _, err := f.MoviesBatch(context.Background(), []int64{2147483647}); err != nil {
+		t.Fatalf("max ID: %v", err)
+	}
+
+	// Over HTTP, including bodies the typed client cannot send.
+	srv := NewServerFor(f)
+	defer srv.Close()
+	const (
+		badJSON  = "request body is not valid JSON"
+		badCount = "ids must contain 1-200 movie ids"
+		badID    = "movie_id must be an integer between 1 and 2147483647"
+	)
+	longKey := strings.Repeat("k", 41)
+	for _, tc := range []struct{ body, code, msg string }{
+		{`{"ids":[-5]}`, "bad_request", badID},
+		{`{"ids":[2147483648]}`, "bad_request", badID},
+		{`{"ids":[260,0]}`, "bad_request", badID},
+		{`{"ids":[1.5]}`, "bad_request", badID},
+		{`{"ids":["260"]}`, "bad_request", badID},
+		{`{"ids":[[[[[[[1]]]]]]]}`, "bad_request", badID}, // depth 8: parsed, then rejected
+		{`{"ids":null}`, "bad_request", badCount},
+		{`{"ids":260}`, "bad_request", badCount},
+		{`{"ids":[]}`, "bad_request", badCount}, // the empty_ids case
+		{`{}`, "bad_request", `missing field "ids"`},
+		{`{"ids":[260],"extra":1}`, "bad_request", `unexpected field "extra"`},
+		{`{"zz":1,"ids":[260],"aa":1}`, "bad_request", `unexpected field "aa"`},
+		{`{"ids":[260],"` + longKey + `":1}`, "bad_request", "unexpected field"},
+		{`{"ids":[260],"caf\u00e9":1}`, "bad_request", "unexpected field"},
+		{`[260]`, "bad_request", "request body must be a JSON object"},
+		{`{"ids":[260]`, "invalid_json", badJSON},
+		{`{"ids":[260]} {}`, "invalid_json", badJSON},
+		{"{\"ids\":[260],\"\xff\":1}", "invalid_json", badJSON},
+		{`{"ids":[[[[[[[[1]]]]]]]]}`, "invalid_json", badJSON}, // depth 9
+		{`]{"ids":[260]}`, "invalid_json", badJSON},
+	} {
+		resp, err := http.Post(srv.URL+"/v1/movies/batch", "application/json", strings.NewReader(tc.body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		var eb modelclient.ErrorBody
+		if resp.StatusCode != 400 || json.Unmarshal(b, &eb) != nil || eb.Error.Code != tc.code || eb.Error.Message != tc.msg {
+			t.Errorf("%q: %d %s, want 400 %s %q", tc.body, resp.StatusCode, b, tc.code, tc.msg)
+		}
+	}
+
+	// An integral float is an integer, as in JSON Schema and recs-model.
+	hr, err := http.Post(srv.URL+"/v1/movies/batch", "application/json", strings.NewReader(`{"ids":[260.0, 999999998]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(hr.Body)
+	hr.Body.Close()
+	var br modelclient.BatchResponse
+	if hr.StatusCode != 200 || json.Unmarshal(b, &br) != nil || len(br.Movies) != 1 || br.Movies[0].MovieID != 260 ||
+		!slices.Equal(br.Missing, []int64{999999998}) {
+		t.Errorf("260.0: %d %s", hr.StatusCode, b)
+	}
+}
+
+// The catalog fallback merges every 2xx moviesBatch case, so the cases must
+// agree on each movie's metadata, and no case may list a known movie as
+// missing.
+func TestMoviesBatchFixturesAgreePerMovie(t *testing.T) {
+	fx, err := LoadDir(realFixtureDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch, ok := fx[OpMoviesBatch]
+	if !ok {
+		t.Fatal("no moviesBatch fixture")
+	}
+	type seen struct {
+		meta json.RawMessage
+		in   string
+	}
+	known := map[int64]seen{}
+	missing := map[int64]string{}
+	for _, c := range batch.Cases {
+		if !c.Response.Success() {
+			continue
+		}
+		var resp struct {
+			Movies  []json.RawMessage `json:"movies"`
+			Missing []int64           `json:"missing"`
+		}
+		if err := json.Unmarshal(c.Response.Body, &resp); err != nil {
+			t.Fatalf("%s: %v", c.Name, err)
+		}
+		for _, raw := range resp.Movies {
+			var m modelclient.MovieMeta
+			if err := decodeStrict(raw, &m); err != nil {
+				t.Fatalf("%s: %v", c.Name, err)
+			}
+			if prev, dup := known[m.MovieID]; dup && !jsonEqual(prev.meta, raw) {
+				t.Errorf("movie %d: %s says %s, %s says %s", m.MovieID, prev.in, prev.meta, c.Name, raw)
+			} else if !dup {
+				known[m.MovieID] = seen{raw, c.Name}
+			}
+		}
+		for _, id := range resp.Missing {
+			missing[id] = c.Name
+		}
+	}
+	if len(known) == 0 {
+		t.Fatal("no movies in the moviesBatch fixture")
+	}
+	for id, name := range missing {
+		if k, ok := known[id]; ok {
+			t.Errorf("movie %d: missing in %s but known in %s", id, name, k.in)
+		}
+	}
+}

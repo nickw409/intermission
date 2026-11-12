@@ -11,7 +11,6 @@ import { RequireSession } from '../../components/RequireSession';
 import { Loading } from '../../components/Status';
 import { pickDefaultModel, type ModelName, type ModelsResponse } from '../../lib/models';
 import { useAsync } from '../../lib/useAsync';
-import { useDebouncedValue } from '../../lib/useDebouncedValue';
 import {
   filterParams,
   fromSearchParams,
@@ -27,12 +26,9 @@ import {
 } from './choice';
 import { GenreChips, ModelSelect, YearRangeInputs } from './Controls';
 import { RecommendationList } from './RecommendationList';
+import { useSettledView } from './settledView';
 import '../../components/components.css';
 import './for-you.css';
-
-/** Chip toggles and year typing settle this long before the list is fetched (recommend calls are
- * rate limited). */
-const FILTER_DEBOUNCE_MS = 350;
 
 export default function ForYouPage() {
   return (
@@ -63,8 +59,9 @@ function ForYou({ models }: { models: ModelsResponse | null }) {
   const [stored, setStored] = useState(readStored);
   const choice = resolveChoice(fromSearchParams(params), stored, models, pickDefaultModel(models));
   // The controls and URL change at once; the request waits for the chips and typing to settle. The
-  // filter is debounced as one string (its query form) so a change to both sends one request.
-  const filterKey = useDebouncedValue(filterParams(choice).toString(), FILTER_DEBOUNCE_MS);
+  // filter is debounced as one string (its query form) so a change to both sends one request, and a
+  // model change sends the pending filter with it at once (useSettledView).
+  const view = useSettledView(choice.model, filterParams(choice).toString());
 
   const show = (next: Choice) =>
     // Without a model list the model is a guess, so it stays out of the URL.
@@ -107,8 +104,8 @@ function ForYou({ models }: { models: ModelsResponse | null }) {
         <YearRangeInputs value={choice.years} onChange={chooseYears} onClear={clearYears} fromInput={fromYear} />
       </div>
       <RecommendationList
-        model={choice.model}
-        filterKey={filterKey}
+        model={view.model}
+        filterKey={view.filterKey}
         onClearGenres={clearGenres}
         onClearYears={clearYears}
       />

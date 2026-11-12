@@ -161,6 +161,7 @@ func TestPublicContract(t *testing.T) {
 	anon.expect("listRatings", "ratings no session", "GET", "/api/ratings", nil, 401, "unauthorized")
 	anon.expect("putRating", "put rating no session", "PUT", "/api/ratings/1", `{"rating":4}`, 401, "unauthorized")
 	anon.expect("deleteRating", "delete rating no session", "DELETE", "/api/ratings/1", nil, 401, "unauthorized")
+	anon.expect("postFeedback", "feedback no session", "POST", "/api/feedback", `{"movieId":5,"model":"knn","action":"not_interested"}`, 401, "unauthorized")
 	anon.expect("listNotInterested", "not interested list no session", "GET", "/api/feedback/not-interested", nil, 401, "unauthorized")
 	anon.expect("deleteNotInterested", "undo not interested no session", "DELETE", "/api/feedback/not-interested/1", nil, 401, "unauthorized")
 	anon.expect("recommend", "recommend no session", "GET", "/api/recommend", nil, 401, "unauthorized")
@@ -238,6 +239,14 @@ func TestPublicContract(t *testing.T) {
 
 	// ---- not interested: mark, list, undo ----
 	alice.expect("postFeedback", "not interested 5", "POST", "/api/feedback", `{"movieId":5,"model":"knn","action":"not_interested"}`, 204, "")
+	alice.expect("postFeedback", "not interested 5 again", "POST", "/api/feedback", `{"movieId":5,"model":"knn","action":"not_interested"}`, 204, "")
+	alice.expect("postFeedback", "feedback impression", "POST", "/api/feedback", `{"movieId":1,"model":"pop","action":"impression"}`, 204, "")
+	alice.expect("postFeedback", "feedback bad action", "POST", "/api/feedback", `{"movieId":5,"model":"knn","action":"love"}`, 400, "bad_request")
+	alice.expect("postFeedback", "feedback movie id 0", "POST", "/api/feedback", `{"movieId":0,"model":"knn","action":"not_interested"}`, 400, "bad_request")
+	alice.expect("postFeedback", "feedback unknown model", "POST", "/api/feedback", `{"movieId":5,"model":"bogus","action":"not_interested"}`, 400, "bad_request")
+	alice.expect("postFeedback", "feedback malformed", "POST", "/api/feedback", `{"movieId":`, 400, "invalid_json")
+	alice.expect("postFeedback", "feedback 70 KB body", "POST", "/api/feedback", big, 413, "body_too_large")
+	checkResp(t, "feedback no csrf", alice.call("postFeedback", "feedback no csrf", "POST", "/api/feedback", `{"movieId":5,"model":"knn","action":"not_interested"}`, true), 403, "csrf_rejected")
 	r = alice.expect("listNotInterested", "not interested list", "GET", "/api/feedback/not-interested", nil, 200, "")
 	var hidden struct {
 		Items []struct {
@@ -352,6 +361,27 @@ func TestPublicContract(t *testing.T) {
 		if deleteLimited.Header.Get("Retry-After") == "" {
 			t.Errorf("%s: 429 without Retry-After", d.op)
 		}
+	}
+	// Feedback limit: 60 POST /api/feedback per minute per session and per
+	// user. Same shape as the DELETE limits above; impressions are accepted
+	// but not stored, so the loop writes nothing.
+	var feedbackLimited response
+	for i := 0; i < 120; i++ {
+		resp := bob.call("postFeedback", fmt.Sprintf("feedback until limited %d", i), "POST", "/api/feedback", `{"movieId":1,"model":"knn","action":"impression"}`, false)
+		if resp.Status == http.StatusTooManyRequests {
+			if i < 60 {
+				t.Errorf("postFeedback: 429 on call %d, want the first 60 to succeed", i+1)
+			}
+			feedbackLimited = resp
+			break
+		}
+		if resp.Status != http.StatusNoContent {
+			t.Errorf("postFeedback call %d: status %d, want 204", i+1, resp.Status)
+		}
+	}
+	checkResp(t, "postFeedback rate limited", feedbackLimited, 429, "rate_limited")
+	if feedbackLimited.Header.Get("Retry-After") == "" {
+		t.Error("postFeedback: 429 without Retry-After")
 	}
 	bob.expect("logout", "logout bob", "POST", "/api/auth/logout", nil, 204, "")
 	bob.expect("getMe", "me after logout", "GET", "/api/me", nil, 401, "unauthorized")
