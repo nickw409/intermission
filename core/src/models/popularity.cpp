@@ -126,7 +126,8 @@ class Popularity final : public Model {
     for (auto& v : counts) v = r.u32();
     for (auto& v : scores) {
       v = r.f32();
-      if (std::isnan(v)) throw ArtifactError(std::string(name()) + ": NaN score in scores.bin");
+      // fit() only writes finite scores; ±inf (or NaN) means the file is corrupt.
+      if (!std::isfinite(v)) throw ArtifactError(std::string(name()) + ": non-finite score in scores.bin");
     }
     r.finish();
     m_ = m;
