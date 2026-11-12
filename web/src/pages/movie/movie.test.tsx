@@ -180,6 +180,24 @@ describe('Movie page', () => {
     expect(screen.queryByRole('heading', { name: 'Plot' })).not.toBeInTheDocument();
   });
 
+  it('lists several directors under a plural label', async () => {
+    const ok = fixtureFor('getMovieDetails').cases.find((c) => c.name === 'ok')!.response.body as Record<string, unknown>;
+    server.use(http.get('/api/movies/:movieId/details', () => HttpResponse.json({ ...ok, directors: ['Lana Wachowski', 'Lilly Wachowski'] })));
+    await openMovie();
+    expect(await screen.findByText('Lana Wachowski, Lilly Wachowski')).toBeInTheDocument();
+    expect(screen.getByRole('main')).toHaveTextContent(/Directors\s*Lana Wachowski, Lilly Wachowski/);
+  });
+
+  it('retries the TMDB details too when the page is retried', async () => {
+    modelServiceDown();
+    server.use(http.get('/api/movies/:movieId/details', () => HttpResponse.error()));
+    renderApp('/movies/4993');
+    const retry = await screen.findByRole('button', { name: /try again|retry/i });
+    server.use(handlerFor('getMovie', 'ok'), handlerFor('getMovieDetails', 'ok'));
+    await userEvent.setup().click(retry);
+    expect(await screen.findByRole('heading', { level: 2, name: 'Plot' })).toBeInTheDocument();
+  });
+
   it('renders TMDB text as plain text, never as markup', async () => {
     const ok = fixtureFor('getMovieDetails').cases.find((c) => c.name === 'ok')!.response.body as Record<string, unknown>;
     server.use(

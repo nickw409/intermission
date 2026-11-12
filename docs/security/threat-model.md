@@ -32,7 +32,7 @@ Written 2026-11-10 before the Wave 3b audit; the audit passes (SA1–SA6) test a
 3. recs-api → recs-model: recs-model re-validates everything (defense in depth) and never sees identities.
 4. recs-train → artifacts → recs-model: artifacts are hash-verified before use; CURRENT may not escape the root.
 5. recs-api → exports → recs-train: the export format is the only interface; no usernames cross it.
-6. recs-api → TMDB: response sizes and hosts constrained; the key never leaves recs-api. Movie details text (overview, names) is untrusted: cleaned server-side and rendered as plain text.
+6. recs-api → TMDB: response sizes and hosts constrained; the key never leaves recs-api. Movie details text (overview, names) is untrusted: cleaned server-side and rendered as plain text. Accepted (LOW, 2026-11-12 delta audit): until per-IP limits exist, one crawler can spend the shared poster+details TMDB budget and churn the 64 MiB details cache; empty answers caused by our own limiter are sent no-store so they don't linger in browsers.
 
 ## Attacker goals and the controls that address them (verified in 3b)
 | Goal | Primary controls | Audit pass |

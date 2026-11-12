@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { displayTitle, formatReleaseDate, formatRuntime, joinTitles, titleWithYear } from './format';
 
 describe('displayTitle', () => {
@@ -49,6 +49,22 @@ describe('formatReleaseDate', () => {
     expect(shown).toContain('18');
     expect(shown).not.toContain('17');
     expect(formatReleaseDate('2001-01-01')).toContain('2001');
+  });
+
+  it.each(['America/Los_Angeles', 'Pacific/Kiritimati'])('keeps the calendar day in %s', async (zone) => {
+    // The formatter is built at import, so import a fresh copy under the zone.
+    vi.stubEnv('TZ', zone);
+    vi.resetModules();
+    try {
+      const { formatReleaseDate: format } = await import('./format');
+      expect(format('2001-12-18')).toMatch(/\b18\b/);
+      expect(format('2001-01-01')).toMatch(/\b1\b/);
+      expect(format('2001-01-01')).toContain('2001');
+      expect(format('2001-12-31')).toContain('2001');
+    } finally {
+      vi.unstubAllEnvs();
+      vi.resetModules();
+    }
   });
 
   it('returns anything that is not YYYY-MM-DD unchanged', () => {

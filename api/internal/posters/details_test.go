@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -198,7 +199,13 @@ func TestDetailsCorruptCacheFileRefetched(t *testing.T) {
 	e := detailsEnv(t, setup{key: testKey}, fellowship)
 	decodeDetails(t, e.details("7"))
 	path := filepath.Join(e.dir, "details", "7.json")
-	for _, junk := range []string{"not json", `{"movieId":8,"overview":null,"tagline":null,"runtime_minutes":null,"release_date":null,"directors":[],"cast":[]}`} {
+	fresh := time.Now().Unix()
+	for _, junk := range []string{
+		"not json",
+		fmt.Sprintf(`{"fetched_at":%d,"details":{"movieId":8,"overview":"Other","tagline":null,"runtime_minutes":null,"release_date":null,"directors":[],"cast":[]}}`, fresh),
+		`{"fetched_at":0,"details":{"movieId":7,"overview":"No time","tagline":null,"runtime_minutes":null,"release_date":null,"directors":[],"cast":[]}}`,
+		fmt.Sprintf(`{"fetched_at":%d,"details":{"movieId":7,"overview":"Future","tagline":null,"runtime_minutes":null,"release_date":null,"directors":[],"cast":[]}}`, fresh+86400),
+	} {
 		if err := os.WriteFile(path, []byte(junk), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -321,7 +328,6 @@ func TestDetailsNoTMDBIDOrUnknownMovie(t *testing.T) {
 
 func TestDetailsUpstreamFailures(t *testing.T) {
 	cases := map[string]http.HandlerFunc{
-		"500":      func(w http.ResponseWriter, r *http.Request) { http.Error(w, "x", 500) },
 		"404":      func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) },
 		"not json": func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "<html>") },
 		"too big": func(w http.ResponseWriter, r *http.Request) {
@@ -408,4 +414,191 @@ func deref(s *string) string {
 		return "<nil>"
 	}
 	return *s
+}
+
+// ---------------------------------------------------------------- review follow-ups
+
+// A cache file is cleaned again when read: one written by hand (or by an
+// older, laxer version) can't put dirty text on the page.
+func TestDetailsCachedFileCleanedAgain(t *testing.T) {
+	e := detailsEnv(t, setup{key: testKey}, fellowship)
+	decodeDetails(t, e.details("7")) // creates the details directory
+	var cast []string
+	for i := range 12 {
+		cast = append(cast, fmt.Sprintf(`{"name":"A%d","character":null}`, i))
+	}
+	dirty := fmt.Sprintf(`{"fetched_at":%d,"details":{"movieId":7,"overview":"x\u202ey\u200bz","tagline":null,"runtime_minutes":0,`+
+		`"release_date":"2001-13-45","directors":["D","D","E","F","G"],"cast":[%s]}}`, time.Now().Unix(), strings.Join(cast, ","))
+	if err := os.WriteFile(filepath.Join(e.dir, "details", "7.json"), []byte(dirty), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hits := e.tmdb.apiHits.Load()
+	d := decodeDetails(t, e.details("7"))
+	if e.tmdb.apiHits.Load() != hits {
+		t.Fatal("a fresh cache file was refetched instead of served")
+	}
+	if deref(d.Overview) != "xyz" || d.RuntimeMinutes != nil || d.ReleaseDate != nil {
+		t.Fatalf("cache file not cleaned: %+v", d)
+	}
+	if len(d.Cast) != maxCast || !slices.Equal(d.Directors, []string{"D", "E", "F"}) {
+		t.Fatalf("caps not applied to cache file: cast %d, directors %v", len(d.Cast), d.Directors)
+	}
+}
+
+func TestDetailsStaleCacheRefetched(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	e := detailsEnv(t, setup{key: testKey, now: func() time.Time { return now }}, fellowship)
+	decodeDetails(t, e.details("7"))
+	hits := e.tmdb.apiHits.Load()
+	now = now.Add(detailsTTL - time.Minute)
+	decodeDetails(t, e.details("7"))
+	if e.tmdb.apiHits.Load() != hits {
+		t.Fatal("refetched before the TTL")
+	}
+	e.tmdb.setAPI(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"overview":"Updated.","credits":{"cast":[],"crew":[]}}`)
+	})
+	now = now.Add(2 * time.Minute)
+	if d := decodeDetails(t, e.details("7")); deref(d.Overview) != "Updated." {
+		t.Fatalf("stale entry served after the TTL: %q", deref(d.Overview))
+	}
+}
+
+// TMDB answering with nothing usable is not written to disk (it would stick
+// until evicted); it is remembered briefly like "no TMDB id".
+func TestDetailsEmptyTMDBAnswerNotCached(t *testing.T) {
+	e := detailsEnv(t, setup{key: testKey}, func(string) string {
+		return `{"overview":"","tagline":"  ","credits":{"cast":[],"crew":[{"name":"X","job":"Writer"}]}}`
+	})
+	rec := e.details("7")
+	if !isEmptyDetails(decodeDetails(t, rec), 7) {
+		t.Fatal(rec.Body.String())
+	}
+	if got := rec.Header().Get("Cache-Control"); got != emptyMaxAge {
+		t.Errorf("Cache-Control %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(e.dir, "details", "7.json")); err == nil {
+		t.Fatal("empty details written to disk")
+	}
+	hits := e.tmdb.apiHits.Load()
+	decodeDetails(t, e.details("7"))
+	if e.tmdb.apiHits.Load() != hits {
+		t.Fatal("empty answer not remembered")
+	}
+}
+
+// TMDB rate limiting or failing is not remembered: the next view retries.
+func TestDetailsTMDBBusyNotRemembered(t *testing.T) {
+	for _, status := range []int{429, 500, 503} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			e := detailsEnv(t, setup{key: testKey}, fellowship)
+			e.tmdb.setAPI(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "busy", status) })
+			if d := decodeDetails(t, e.details("7")); !isEmptyDetails(d, 7) {
+				t.Fatalf("%+v", d)
+			}
+			e.tmdb.setAPI(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, fellowship("1007")) })
+			if d := decodeDetails(t, e.details("7")); deref(d.Overview) != "Movie 1007." {
+				t.Fatalf("after TMDB %d the movie stayed empty", status)
+			}
+			if strings.Contains(e.Logs.String(), testKey) {
+				t.Fatal("TMDB key in logs")
+			}
+		})
+	}
+}
+
+// Our own budget running out gives a no-store empty answer that isn't
+// remembered: the next request, once a token is back, gets the details.
+func TestDetailsLimitedNotRemembered(t *testing.T) {
+	lim := ratelimit.NewGlobal(ratelimit.Config{Every: 100 * time.Millisecond, Burst: 1})
+	e := detailsEnv(t, setup{key: testKey, limiter: lim}, fellowship)
+	if rec := e.poster("7"); !isPoster(rec, 7) {
+		t.Fatal("poster")
+	}
+	rec := e.details("8")
+	if !isEmptyDetails(decodeDetails(t, rec), 8) {
+		t.Fatal("over budget but fetched")
+	}
+	if got := rec.Header().Get("Cache-Control"); got != noStore {
+		t.Errorf("rate-limited empty answer Cache-Control %q, want %q", got, noStore)
+	}
+	time.Sleep(150 * time.Millisecond)
+	if d := decodeDetails(t, e.details("8")); deref(d.Overview) != "Movie 1008." {
+		t.Fatalf("limited answer was remembered: %+v", d)
+	}
+}
+
+func TestDetailsLookupLimiter(t *testing.T) {
+	// Two lookups allowed. Movie 60 (no TMDB id) uses one and is then
+	// remembered, so asking again costs nothing and movie 7 still gets the
+	// second; movie 8 then finds none left.
+	lookup := ratelimit.NewGlobal(ratelimit.Config{Every: time.Hour, Burst: 2})
+	e := detailsEnv(t, setup{key: testKey, lookup: lookup}, fellowship)
+	decodeDetails(t, e.details("60"))
+	decodeDetails(t, e.details("60"))
+	if d := decodeDetails(t, e.details("7")); deref(d.Overview) != "Movie 1007." {
+		t.Fatalf("no lookup left for movie 7: \"no TMDB id\" not remembered? %+v", d)
+	}
+	if d := decodeDetails(t, e.details("8")); !isEmptyDetails(d, 8) {
+		t.Fatalf("lookup limiter not applied: %+v", d)
+	}
+	if n := e.tmdb.apiHits.Load(); n != 1 {
+		t.Fatalf("TMDB hits %d, want 1", n)
+	}
+}
+
+func TestDetailsCleaningEdgeCases(t *testing.T) {
+	zalgo := "Z" + strings.Repeat("\u0301", 30)
+	raw := `{
+	  "overview": "a\r\nb\tc \u200b\ufeffd e\u00adf \ud83d\udc68\u200d\ud83d\udc69 ` + zalgo + `",
+	  "tagline": "\ufffdTag",
+	  "runtime": 1501,
+	  "release_date": "0050-01-01",
+	  "credits": {
+	    "cast": [
+	      {"name": "No order", "character": "x"},
+	      {"name": "\u200b\u200b", "character": "Blank", "order": 0},
+	      {"name": "Second", "character": "y", "order": 2},
+	      {"name": "First", "character": "z", "order": 1}
+	    ],
+	    "crew": [
+	      {"name": "D1", "job": "Director"}, {"name": "D1", "job": "Director"},
+	      {"name": "D2", "job": "Director"}, {"name": "\u200b", "job": "Director"},
+	      {"name": "D3", "job": "Director"}, {"name": "D4", "job": "Director"}
+	    ]
+	  }
+	}`
+	e := detailsEnv(t, setup{key: testKey}, func(string) string { return raw })
+	d := decodeDetails(t, e.details("7"))
+	want := "a\nb c d ef \U0001F468\u200d\U0001F469 Z" + strings.Repeat("\u0301", maxCombiningRun)
+	if deref(d.Overview) != want {
+		t.Errorf("overview %+q\nwant     %+q", deref(d.Overview), want)
+	}
+	if deref(d.Tagline) != "Tag" {
+		t.Errorf("tagline %+q: U+FFFD should go", deref(d.Tagline))
+	}
+	if d.RuntimeMinutes != nil {
+		t.Errorf("runtime over %d kept: %d", maxRuntime, *d.RuntimeMinutes)
+	}
+	if d.ReleaseDate != nil {
+		t.Errorf("year 50 kept: %s", *d.ReleaseDate)
+	}
+	var names []string
+	for _, c := range d.Cast {
+		names = append(names, c.Name)
+	}
+	if !slices.Equal(names, []string{"First", "Second", "No order"}) {
+		t.Errorf("cast %v: billing order, missing order last, blank names dropped", names)
+	}
+	if !slices.Equal(d.Directors, []string{"D1", "D2", "D3"}) {
+		t.Errorf("directors %v: distinct, blank dropped, first three", d.Directors)
+	}
+
+	e2 := detailsEnv(t, setup{key: testKey}, func(string) string {
+		return `{"runtime":1500,"release_date":"1800-01-01","credits":{"cast":[],"crew":[]}}`
+	})
+	d2 := decodeDetails(t, e2.details("7"))
+	if d2.RuntimeMinutes == nil || *d2.RuntimeMinutes != maxRuntime || deref(d2.ReleaseDate) != "1800-01-01" {
+		t.Errorf("boundary values dropped: %+v", d2)
+	}
 }

@@ -17,6 +17,7 @@ import (
 
 	"github.com/nickw409/intermission/api/internal/apperr"
 	"github.com/nickw409/intermission/api/internal/moviecache"
+	"github.com/nickw409/intermission/api/internal/reqid"
 )
 
 // How movie details are served (GET /api/movies/{movieId}/details):
@@ -35,11 +36,16 @@ import (
 //     share one TMDB budget.
 //  4. The TMDB response is size-capped, decoded into only the fields we
 //     use, and cleaned (see clean): TMDB text is untrusted.
-//  5. The cleaned MovieDetails is stored as JSON and served.
+//  5. The cleaned MovieDetails is stored as JSON with its fetch time and
+//     served. A cached entry older than detailsTTL is refetched, so details
+//     TMDB fills in later (new releases often lack cast) do show up.
 //
 // Any failure serves the empty MovieDetails (all null, no directors, no
-// cast) with 200 and a short Cache-Control, so the movie page just shows
-// less. Nothing here ever answers 5xx.
+// cast) with 200, so the movie page just shows less. Nothing here ever
+// answers 5xx. A TMDB answer with nothing usable is treated like "no
+// details" (remembered for negativeTTL, never written to disk). A TMDB 429
+// or 5xx is not remembered, and an empty answer caused by our own upstream
+// budget is sent no-store, so neither outlives the moment.
 
 // Limits on details.
 const (
@@ -60,8 +66,18 @@ const (
 	maxDirectors     = 3
 	maxRuntime       = 1500
 
+	// maxCombiningRun caps a run of combining marks on one base character
+	// (real scripts need a few; "Zalgo" text stacks dozens).
+	maxCombiningRun = 4
+	// minReleaseYear rejects placeholder dates such as 0001-01-01.
+	minReleaseYear = 1800
+
+	// detailsTTL is how long a cached entry is served before a refetch.
+	detailsTTL = 30 * 24 * time.Hour
+
 	detailsMaxAge = "public, max-age=86400"
 	emptyMaxAge   = "public, max-age=300"
+	noStore       = "no-store"
 )
 
 // MovieDetails is the MovieDetails schema (contracts/public.yaml).
@@ -85,7 +101,18 @@ func emptyDetails(id int64) MovieDetails {
 	return MovieDetails{MovieID: id, Directors: []string{}, Cast: []CastMember{}}
 }
 
-// detailsFiles are cleaned MovieDetails as JSON.
+func (d MovieDetails) isEmpty() bool {
+	return d.Overview == nil && d.Tagline == nil && d.RuntimeMinutes == nil && d.ReleaseDate == nil &&
+		len(d.Directors) == 0 && len(d.Cast) == 0
+}
+
+// cachedDetails is what a details cache file holds.
+type cachedDetails struct {
+	FetchedAt int64        `json:"fetched_at"` // Unix seconds
+	Details   MovieDetails `json:"details"`
+}
+
+// detailsFiles are cachedDetails as JSON.
 var detailsFiles = fileKind{ext: ".json", maxFile: maxDetailsFile, valid: json.Valid}
 
 var errNoDetails = errors.New("no details")
@@ -98,9 +125,9 @@ func (h *handler) serveDetails(w http.ResponseWriter, r *http.Request) {
 	}
 	if b, ok := h.details.get(id); ok {
 		// Decoded and cleaned again: a file on disk is trusted no more than
-		// TMDB. A file for another movie or one that doesn't decode is a
-		// miss and is refetched (and overwritten).
-		if d, ok := decodeCached(b, id); ok {
+		// TMDB. A file for another movie, one that doesn't decode, or one
+		// older than detailsTTL is a miss and is refetched (and overwritten).
+		if d, ok := decodeCached(b, id, h.now()); ok {
 			writeDetails(w, d, detailsMaxAge)
 			return
 		}
@@ -119,10 +146,15 @@ func (h *handler) serveDetails(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if call.err != nil {
-		writeDetails(w, emptyDetails(id), emptyMaxAge)
+		cc := emptyMaxAge
+		if errors.Is(call.err, errLimited) {
+			// Our own budget ran out: ask again on the next view.
+			cc = noStore
+		}
+		writeDetails(w, emptyDetails(id), cc)
 		return
 	}
-	d, ok := decodeCached(call.img, id)
+	d, ok := decodeCached(call.img, id, h.now())
 	if !ok {
 		writeDetails(w, emptyDetails(id), emptyMaxAge)
 		return
@@ -134,11 +166,22 @@ func (h *handler) serveDetails(w http.ResponseWriter, r *http.Request) {
 // details disk cache or negative cache. It returns the cleaned JSON.
 func (h *handler) fetchDetailsAndRecord(ctx context.Context, id int64) ([]byte, error) {
 	d, err := h.fetchDetails(ctx, id)
+	if err == nil && d.isEmpty() {
+		err = errNoDetails
+	}
 	if err != nil {
+		var se statusError
+		if errors.As(err, &se) && (se.code == http.StatusTooManyRequests || se.code >= 500) {
+			// TMDB is busy or failing: worth asking again soon, so logged
+			// but not remembered.
+			h.logger.WarnContext(ctx, "details: TMDB unavailable", "request_id", reqid.FromContext(ctx),
+				"movie_id", id, "status", se.code)
+			return nil, err
+		}
 		h.noteFailure(ctx, "details", id, err, h.detailsNegative)
 		return nil, err
 	}
-	b, err := json.Marshal(d)
+	b, err := json.Marshal(cachedDetails{FetchedAt: h.now().Unix(), Details: d})
 	if err != nil {
 		return nil, err
 	}
@@ -200,7 +243,7 @@ type tmdbDetails struct {
 type tmdbCast struct {
 	Name      *string `json:"name"`
 	Character *string `json:"character"`
-	Order     int     `json:"order"` // billing order, 0 first
+	Order     *int    `json:"order"` // billing order, 0 first
 }
 
 type tmdbCrew struct {
@@ -222,19 +265,30 @@ func clean(id int64, raw tmdbDetails) MovieDetails {
 		d.RuntimeMinutes = &rt
 	}
 	if raw.ReleaseDate != nil && len(*raw.ReleaseDate) == len(time.DateOnly) {
-		if _, err := time.Parse(time.DateOnly, *raw.ReleaseDate); err == nil {
+		if t, err := time.Parse(time.DateOnly, *raw.ReleaseDate); err == nil && t.Year() >= minReleaseYear {
 			rd := *raw.ReleaseDate
 			d.ReleaseDate = &rd
 		}
 	}
 
 	cast := slices.Clone(raw.Credits.Cast)
-	slices.SortStableFunc(cast, func(a, b tmdbCast) int { return cmp.Compare(a.Order, b.Order) })
+	// Billing order; an entry without one goes after every entry with one.
+	slices.SortStableFunc(cast, func(a, b tmdbCast) int {
+		switch {
+		case a.Order == nil && b.Order == nil:
+			return 0
+		case a.Order == nil:
+			return 1
+		case b.Order == nil:
+			return -1
+		}
+		return cmp.Compare(*a.Order, *b.Order)
+	})
 	for _, c := range cast {
 		if len(d.Cast) == maxCast {
 			break
 		}
-		name := cleanText(c.Name, maxNameRunes, false)
+		name := cleanName(c.Name)
 		if name == nil {
 			continue
 		}
@@ -248,7 +302,7 @@ func clean(id int64, raw tmdbDetails) MovieDetails {
 		if c.Job == nil || *c.Job != "Director" {
 			continue
 		}
-		if name := cleanText(c.Name, maxNameRunes, false); name != nil && !slices.Contains(d.Directors, *name) {
+		if name := cleanName(c.Name); name != nil && !slices.Contains(d.Directors, *name) {
 			d.Directors = append(d.Directors, *name)
 		}
 	}
@@ -256,15 +310,26 @@ func clean(id int64, raw tmdbDetails) MovieDetails {
 }
 
 // cleanText returns s made safe to show as plain text, or nil if nothing is
-// left. Invalid UTF-8, control characters and bidi controls are dropped;
-// tabs become spaces; newlines are kept (as \n) only if multiline. Text
+// left. Invalid UTF-8, control characters and invisible format characters
+// (bidi controls, zero-width spaces, BOMs, tags; Unicode category Cf) are
+// dropped, except the zero-width joiner and non-joiner that some scripts
+// and emoji need. Runs of combining marks are capped at maxCombiningRun.
+// Tabs become spaces; newlines are kept (as \n) only if multiline. Text
 // longer than max runes is cut to max runes, the last being an ellipsis.
 func cleanText(s *string, max int, multiline bool) *string {
 	if s == nil {
 		return nil
 	}
 	var b strings.Builder
+	marks := 0 // combining marks since the last base character
 	for _, r := range strings.ToValidUTF8(*s, "") {
+		if unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r) {
+			if marks++; marks > maxCombiningRun {
+				continue
+			}
+		} else {
+			marks = 0
+		}
 		switch {
 		case r == '\n' || r == '\t':
 			if multiline && r == '\n' {
@@ -272,7 +337,9 @@ func cleanText(s *string, max int, multiline bool) *string {
 			} else {
 				b.WriteRune(' ')
 			}
-		case unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r) || r == utf8.RuneError:
+		case r == zwnj || r == zwj:
+			b.WriteRune(r)
+		case unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == utf8.RuneError:
 			// dropped (\r included, so CRLF becomes \n)
 		default:
 			b.WriteRune(r)
@@ -289,16 +356,39 @@ func cleanText(s *string, max int, multiline bool) *string {
 	return &out
 }
 
-// decodeCached decodes cached details for id and cleans them again.
-func decodeCached(b []byte, id int64) (MovieDetails, bool) {
-	var d MovieDetails
-	if err := json.Unmarshal(b, &d); err != nil || d.MovieID != id {
+const (
+	zwnj = '\u200C' // zero-width non-joiner
+	zwj  = '\u200D' // zero-width joiner
+)
+
+// cleanName is cleanText for a person's name, which must also contain at
+// least one letter or digit (so it can't render as blank).
+func cleanName(s *string) *string {
+	name := cleanText(s, maxNameRunes, false)
+	if name == nil || !strings.ContainsFunc(*name, func(r rune) bool { return unicode.IsLetter(r) || unicode.IsNumber(r) }) {
+		return nil
+	}
+	return name
+}
+
+// decodeCached decodes a details cache file for id and cleans it again. It
+// fails for another movie's file, a file that doesn't decode, and one
+// fetched more than detailsTTL before now (or in the future).
+func decodeCached(b []byte, id int64, now time.Time) (MovieDetails, bool) {
+	var c cachedDetails
+	if err := json.Unmarshal(b, &c); err != nil || c.Details.MovieID != id {
 		return MovieDetails{}, false
 	}
+	fetched := time.Unix(c.FetchedAt, 0)
+	if c.FetchedAt <= 0 || now.Sub(fetched) > detailsTTL || fetched.After(now.Add(time.Hour)) {
+		return MovieDetails{}, false
+	}
+	d := c.Details
 	raw := tmdbDetails{Overview: d.Overview, Tagline: d.Tagline, Runtime: d.RuntimeMinutes, ReleaseDate: d.ReleaseDate}
 	for i, c := range d.Cast {
 		name := c.Name
-		raw.Credits.Cast = append(raw.Credits.Cast, tmdbCast{Name: &name, Character: c.Character, Order: i})
+		order := i
+		raw.Credits.Cast = append(raw.Credits.Cast, tmdbCast{Name: &name, Character: c.Character, Order: &order})
 	}
 	director := "Director"
 	for _, n := range d.Directors {

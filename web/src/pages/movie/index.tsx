@@ -51,7 +51,7 @@ function NotFound() {
 function MovieDetails({ movieId }: { movieId: number }) {
   const load = useCallback((signal: AbortSignal) => api.get('/api/movies/{movieId}', { path: { movieId }, signal }), [movieId]);
   const { state, reload } = useAsync(load);
-  const details = useMovieDetails(movieId);
+  const { details, reload: reloadDetails } = useMovieDetails(movieId);
 
   if (state.status === 'error' && state.error instanceof ApiError && state.error.status === 404) return <NotFound />;
   if (state.status !== 'ready') {
@@ -61,7 +61,13 @@ function MovieDetails({ movieId }: { movieId: number }) {
         {state.status === 'loading' ? (
           <Loading>Loading movie…</Loading>
         ) : (
-          <ErrorMessage message={state.message} onRetry={() => reload()} />
+          <ErrorMessage
+            message={state.message}
+            onRetry={() => {
+              reload();
+              if (!details) reloadDetails();
+            }}
+          />
         )}
       </div>
     );
@@ -128,13 +134,13 @@ function MovieDetails({ movieId }: { movieId: number }) {
  * shown: the page already has the essentials, and recs-api answers empty details rather than an
  * error whenever TMDB is unavailable.
  */
-function useMovieDetails(movieId: number): Details | null {
+function useMovieDetails(movieId: number): { details: Details | null; reload: () => void } {
   const load = useCallback(
     (signal: AbortSignal) => api.get('/api/movies/{movieId}/details', { path: { movieId }, signal }),
     [movieId],
   );
-  const { state } = useAsync(load);
-  return state.status === 'ready' ? state.data : null;
+  const { state, reload } = useAsync(load);
+  return { details: state.status === 'ready' ? state.data : null, reload };
 }
 
 function Overview({ text }: { text: string }) {
