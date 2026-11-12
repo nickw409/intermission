@@ -590,36 +590,124 @@ func TestDetailsCleaningEdgeCases(t *testing.T) {
 // Text over the cap is cut at a grapheme cluster boundary (UAX #29), so
 // the "…" never lands inside an emoji sequence, a flag or a letter with
 // its accent. Each case puts a multi-rune cluster across the point where
-// a cut at max-1 runes would fall.
+// a cut at max-1 runes would fall. want "" means cleanText returns nil.
+var graphemeCutCases = []struct {
+	name, in  string
+	multiline bool
+	want      string
+}{
+	{"plain ASCII", "abcdefgh", false, "abcde…"},
+	{"ZWJ family emoji split", "abc\U0001F468\u200d\U0001F469\u200d\U0001F467xyz", false, "abc…"},
+	{"flag split", "abcd\U0001F1FA\U0001F1F8xyz", false, "abcd…"},
+	{"flag fits", "abc\U0001F1FA\U0001F1F8xyz", false, "abc\U0001F1FA\U0001F1F8…"},
+	{"skin tone split", "abcd\U0001F44D\U0001F3FDxyz", false, "abcd…"},
+	{"variation selector split", "abcd\u2764\ufe0fxyz", false, "abcd…"},
+	{"combining accent split", "abcde\u0301xyz", false, "abcd…"},
+	{"combining accent fits", "abce\u0301xyz", false, "abce\u0301…"},
+	{"space before the cut trimmed", "ab  e\u0301xyz", false, "ab…"},
+	{"newline before the cut trimmed", "abc\n\ne\u0301xyz", true, "abc…"},
+	{"newline kept inside the prefix", "ab\ncdefg", true, "ab\ncd…"},
+	// A first cluster longer than the cap leaves nothing to show before
+	// the ellipsis, so the field is dropped rather than served as "…".
+	// ZWJ, Hangul jamo and spacing marks (Mc) are not capped the way
+	// combining marks (Mn, Me) are.
+	{"ZWJ cluster longer than the cap", "a" + strings.Repeat("\u200d", 10), false, ""},
+	{"Hangul jamo cluster longer than the cap", strings.Repeat("\u1100", 4) + "\u1161\u11a8" + "xyz", false, ""},
+	{"spacing mark cluster longer than the cap", "\u0915" + strings.Repeat("\u093e", 8), false, ""},
+	{"short text untouched", "e\u0301\U0001F1FA\U0001F1F8", false, "e\u0301\U0001F1FA\U0001F1F8"},
+}
+
+const graphemeCutMax = 6 // keeps at most 5 runes, then the ellipsis
+
 func TestCleanTextTruncatesOnGraphemeBoundaries(t *testing.T) {
-	const max = 6 // keeps at most 5 runes, then the ellipsis
-	tests := []struct {
-		name, in, want string
-	}{
-		{"plain ASCII", "abcdefgh", "abcde…"},
-		{"ZWJ family emoji split", "abc\U0001F468\u200d\U0001F469\u200d\U0001F467xyz", "abc…"},
-		{"flag split", "abcd\U0001F1FA\U0001F1F8xyz", "abcd…"},
-		{"flag fits", "abc\U0001F1FA\U0001F1F8xyz", "abc\U0001F1FA\U0001F1F8…"},
-		{"skin tone split", "abcd\U0001F44D\U0001F3FDxyz", "abcd…"},
-		{"variation selector split", "abcd\u2764\ufe0fxyz", "abcd…"},
-		{"combining accent split", "abcde\u0301xyz", "abcd…"},
-		{"combining accent fits", "abce\u0301xyz", "abce\u0301…"},
-		{"space before the cut trimmed", "ab  e\u0301xyz", "ab…"},
-		// One cluster longer than the cap (ZWJ is not capped like the
-		// combining marks are): nothing fits, so only the ellipsis is left.
-		{"cluster longer than the cap", "a" + strings.Repeat("\u200d", 10), "…"},
-		{"short text untouched", "e\u0301\U0001F1FA\U0001F1F8", "e\u0301\U0001F1FA\U0001F1F8"},
-	}
-	for _, tc := range tests {
+	for _, tc := range graphemeCutCases {
 		t.Run(tc.name, func(t *testing.T) {
 			in := tc.in
-			got := cleanText(&in, max, false)
-			if got == nil || *got != tc.want {
-				t.Fatalf("cleanText(%+q, %d) = %+q, want %+q", tc.in, max, deref(got), tc.want)
+			got := cleanText(&in, graphemeCutMax, tc.multiline)
+			if tc.want == "" {
+				if got != nil {
+					t.Fatalf("cleanText(%+q) = %+q, want nil", tc.in, *got)
+				}
+				return
 			}
-			if n := utf8.RuneCountInString(*got); n > max {
-				t.Errorf("%d runes, over the cap of %d", n, max)
+			if got == nil || *got != tc.want {
+				t.Fatalf("cleanText(%+q, %d) = %+q, want %+q", tc.in, graphemeCutMax, deref(got), tc.want)
+			}
+			if n := utf8.RuneCountInString(*got); n > graphemeCutMax {
+				t.Errorf("%d runes, over the cap of %d", n, graphemeCutMax)
 			}
 		})
+	}
+}
+
+// A name whose first grapheme cluster is longer than the name cap would
+// truncate to a lone "…": the cast member or director is dropped instead.
+func TestDetailsNameThatTruncatesToNothingDropped(t *testing.T) {
+	jamo := strings.Repeat("\u1100", maxNameRunes+50) // one cluster, all letters
+	raw := fmt.Sprintf(`{
+	  "credits": {
+	    "cast": [{"name": %q, "character": %q, "order": 0}, {"name": "Kept", "character": "Role", "order": 1}],
+	    "crew": [{"name": %q, "job": "Director"}, {"name": "D1", "job": "Director"}]
+	  }
+	}`, jamo, jamo, jamo)
+	e := detailsEnv(t, setup{key: testKey}, func(string) string { return raw })
+	d := decodeDetails(t, e.details("7"))
+	if len(d.Cast) != 1 || d.Cast[0].Name != "Kept" {
+		t.Errorf("cast %+v: the over-long name should be dropped", d.Cast)
+	}
+	if !slices.Equal(d.Directors, []string{"D1"}) {
+		t.Errorf("directors %+q: the over-long name should be dropped", d.Directors)
+	}
+}
+
+// FuzzCleanText checks cleanText's invariants on any input: the output is
+// valid UTF-8 within the cap, cleaning it again changes nothing, and text
+// that fits is returned exactly as sanitized (only over-cap text is cut).
+func FuzzCleanText(f *testing.F) {
+	for _, tc := range graphemeCutCases {
+		f.Add(tc.in, graphemeCutMax, tc.multiline)
+	}
+	f.Add("a\r\nb\tc \u200b\ufeffd e\u00adf Z"+strings.Repeat("\u0301", 30), 2000, true)
+	f.Add("e\u0301\u0000\u0301\u0301\u0301\u0301\u0301", 200, false)
+	f.Fuzz(func(t *testing.T, s string, max int, multiline bool) {
+		if max < 1 || max > 4096 {
+			t.Skip()
+		}
+		got := cleanText(&s, max, multiline)
+		clean := sanitizeText(s, multiline)
+		if got == nil {
+			if clean != "" && utf8.RuneCountInString(clean) <= max {
+				t.Fatalf("nil for %+q, which fits as %+q", s, clean)
+			}
+			return
+		}
+		out := *got
+		if !utf8.ValidString(out) || out == "" {
+			t.Fatalf("invalid or empty output %+q", out)
+		}
+		if n := utf8.RuneCountInString(out); n > max {
+			t.Fatalf("%d runes, over the cap of %d: %+q", n, max, out)
+		}
+		if utf8.RuneCountInString(clean) <= max {
+			if out != clean {
+				t.Fatalf("text that fits changed: %+q, want %+q", out, clean)
+			}
+		} else if !strings.HasSuffix(out, "…") {
+			t.Fatalf("cut text %+q has no ellipsis", out)
+		}
+		if again := cleanText(&out, max, multiline); again == nil || *again != out {
+			t.Fatalf("not idempotent: %+q cleans to %+q", out, deref(again))
+		}
+	})
+}
+
+// A dropped control character between two runs of combining marks must
+// not reset the count, or the runs add up past maxCombiningRun.
+func TestCleanTextMarkCapSurvivesDroppedCharacters(t *testing.T) {
+	in := "e" + strings.Repeat("\u0301\u0000", 10)
+	got := cleanText(&in, 200, false)
+	want := "e" + strings.Repeat("\u0301", maxCombiningRun)
+	if deref(got) != want {
+		t.Errorf("cleanText(%+q) = %+q, want %+q", in, deref(got), want)
 	}
 }
