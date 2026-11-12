@@ -1,11 +1,13 @@
 package fake
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"net/url"
 	"os"
 	"strconv"
@@ -175,10 +177,9 @@ func (f *Fake) resolve(ctx context.Context, opID, method, path string, query url
 		}
 	}
 	if opID == OpMoviesBatch {
-		if c, ok := batchFromCatalog(fx, body); ok {
-			call.Case = c.Name
-			return c, nil
-		}
+		c := batchFromCatalog(fx, body)
+		call.Case = c.Name
+		return c, nil
 	}
 	for i := range fx.Cases {
 		if fx.Cases[i].Response.Success() {
@@ -286,15 +287,16 @@ func (f *Fake) Healthz(ctx context.Context) error {
 // CatalogCase names the synthesized movies/batch answer (see batchFromCatalog).
 const CatalogCase = "catalog"
 
-// batchFromCatalog answers a movies/batch request that no case matches from
-// the catalog the fixtures describe: every movie in any 2xx moviesBatch case.
-// Known IDs come back in request order, the rest in missing, as recs-model
-// answers. It reports false for a body that isn't a valid BatchRequest.
-func batchFromCatalog(fx *Fixture, body []byte) (*Case, bool) {
-	var req modelclient.BatchRequest
-	if err := decodeStrict(body, &req); err != nil || len(req.IDs) == 0 || len(req.IDs) > modelclient.MaxBatchIDs {
-		return nil, false
-	}
+// maxMovieID is the largest movie ID recs-model accepts (contracts/model.yaml).
+const maxMovieID = 2147483647
+
+// batchFromCatalog answers a movies/batch request that no case matches. The
+// body is checked as recs-model checks it (model-service batch_route): one to
+// MaxBatchIDs IDs, each an integer in [1, 2147483647], else a 400 case. A valid
+// request is answered from the catalog the fixtures describe: every movie in
+// any 2xx moviesBatch case. Known IDs come back in request order, the rest in
+// missing, as recs-model answers.
+func batchFromCatalog(fx *Fixture, body []byte) *Case {
 	catalog := map[int64]modelclient.MovieMeta{}
 	version := ""
 	for _, c := range fx.Cases {
@@ -312,18 +314,75 @@ func batchFromCatalog(fx *Fixture, body []byte) (*Case, bool) {
 			version = c.Response.Header("X-Model-Version")
 		}
 	}
+	answer := func(status int, v any) *Case {
+		b, _ := json.Marshal(v) // plain structs of strings and numbers: cannot fail
+		return &Case{Name: CatalogCase, Request: Request{Method: "POST", Path: "/v1/movies/batch", Body: body},
+			Response: Response{Status: status, Headers: map[string]string{"X-Model-Version": version}, Body: b}}
+	}
+	ids, code, msg := parseBatchIDs(body)
+	if code != "" {
+		return answer(400, modelclient.ErrorBody{Error: modelclient.ErrorDetail{Code: code, Message: msg}})
+	}
 	out := modelclient.BatchResponse{Movies: []modelclient.MovieMeta{}, Missing: []int64{}}
-	for _, id := range req.IDs {
+	for _, id := range ids {
 		if m, ok := catalog[id]; ok {
 			out.Movies = append(out.Movies, m)
 		} else {
 			out.Missing = append(out.Missing, id)
 		}
 	}
-	b, err := json.Marshal(out)
-	if err != nil {
-		return nil, false
+	return answer(200, out)
+}
+
+// parseBatchIDs validates a movies/batch body the way recs-model does and
+// returns its IDs, or the error code and message recs-model would answer with.
+func parseBatchIDs(body []byte) (ids []int64, code, msg string) {
+	const badJSON, badRequest = "invalid_json", "bad_request"
+	if !json.Valid(body) {
+		return nil, badJSON, "request body is not valid JSON"
 	}
-	return &Case{Name: CatalogCase, Request: Request{Method: "POST", Path: "/v1/movies/batch", Body: body},
-		Response: Response{Status: 200, Headers: map[string]string{"X-Model-Version": version}, Body: b}}, true
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(body, &obj) != nil || obj == nil {
+		return nil, badRequest, "request body must be a JSON object"
+	}
+	for key := range obj {
+		if key != "ids" {
+			return nil, badRequest, "unexpected field"
+		}
+	}
+	raw, ok := obj["ids"]
+	if !ok {
+		return nil, badRequest, `missing field "ids"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var list []any
+	if dec.Decode(&list) != nil || list == nil || len(list) == 0 || len(list) > modelclient.MaxBatchIDs {
+		return nil, badRequest, "ids must contain 1-200 movie ids"
+	}
+	for _, v := range list {
+		id, ok := movieID(v)
+		if !ok {
+			return nil, badRequest, "movie_id must be an integer between 1 and 2147483647"
+		}
+		ids = append(ids, id)
+	}
+	return ids, "", ""
+}
+
+// movieID reports whether v is a JSON integer (3.0 counts, as in JSON Schema)
+// in [1, maxMovieID].
+func movieID(v any) (int64, bool) {
+	n, ok := v.(json.Number)
+	if !ok {
+		return 0, false
+	}
+	if i, err := n.Int64(); err == nil {
+		return i, i >= 1 && i <= maxMovieID
+	}
+	f, err := n.Float64()
+	if err != nil || f != math.Trunc(f) || f < 1 || f > maxMovieID {
+		return 0, false
+	}
+	return int64(f), true
 }

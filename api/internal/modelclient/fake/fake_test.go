@@ -535,3 +535,126 @@ func TestMoviesBatchCatalogFallback(t *testing.T) {
 		t.Fatalf("answered by %q", calls[len(calls)-1].Case)
 	}
 }
+
+// A movies/batch request no case matches is checked as recs-model checks it
+// (model-service batch_route, contracts/model.yaml BatchRequest): 1-200 IDs,
+// each in [1, 2147483647], else 400.
+func TestMoviesBatchFallbackRejectsInvalid(t *testing.T) {
+	f, err := NewFromDir(realFixtureDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tooMany := make([]int64, modelclient.MaxBatchIDs+1)
+	for i := range tooMany {
+		tooMany[i] = int64(i + 1)
+	}
+	for _, tc := range []struct {
+		name string
+		ids  []int64
+		msg  string
+	}{
+		{"zero", []int64{260, 0}, "movie_id must be an integer between 1 and 2147483647"},
+		{"negative", []int64{-5}, "movie_id must be an integer between 1 and 2147483647"},
+		{"above int32", []int64{260, 2147483648}, "movie_id must be an integer between 1 and 2147483647"},
+		{"over 200", tooMany, "ids must contain 1-200 movie ids"},
+		{"nil", nil, "ids must contain 1-200 movie ids"},
+	} {
+		_, _, err := f.MoviesBatch(context.Background(), tc.ids)
+		var se *modelclient.StatusError
+		if !errors.As(err, &se) || se.Status != 400 || se.Code != "bad_request" || se.Message != tc.msg {
+			t.Errorf("%s: err %v, want 400 bad_request %q", tc.name, err, tc.msg)
+		}
+	}
+	// Exactly 200 valid IDs is fine (all unknown to the fixtures but one).
+	ok := make([]int64, modelclient.MaxBatchIDs)
+	for i := range ok {
+		ok[i] = int64(i + 1)
+	}
+	resp, _, err := f.MoviesBatch(context.Background(), ok)
+	if err != nil || len(resp.Movies)+len(resp.Missing) != modelclient.MaxBatchIDs {
+		t.Fatalf("200 IDs: %v, %d movies, %d missing", err, len(resp.Movies), len(resp.Missing))
+	}
+	if _, _, err := f.MoviesBatch(context.Background(), []int64{2147483647}); err != nil {
+		t.Fatalf("max ID: %v", err)
+	}
+
+	// Over HTTP, bodies the typed client cannot send.
+	srv := NewServerFor(f)
+	defer srv.Close()
+	for _, tc := range []struct{ body, code string }{
+		{`{"ids":[1.5]}`, "bad_request"},
+		{`{"ids":["260"]}`, "bad_request"},
+		{`{"ids":null}`, "bad_request"},
+		{`{"ids":260}`, "bad_request"},
+		{`{}`, "bad_request"},
+		{`{"ids":[260],"extra":1}`, "bad_request"},
+		{`[260]`, "bad_request"},
+		{`{"ids":[260]`, "invalid_json"},
+		{`{"ids":[260]} {}`, "invalid_json"},
+	} {
+		resp, err := http.Post(srv.URL+"/v1/movies/batch", "application/json", strings.NewReader(tc.body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		var eb modelclient.ErrorBody
+		if resp.StatusCode != 400 || json.Unmarshal(b, &eb) != nil || eb.Error.Code != tc.code {
+			t.Errorf("%s: %d %s, want 400 %s", tc.body, resp.StatusCode, b, tc.code)
+		}
+	}
+}
+
+// The catalog fallback merges every 2xx moviesBatch case, so the cases must
+// agree on each movie's metadata, and no case may list a known movie as
+// missing.
+func TestMoviesBatchFixturesAgreePerMovie(t *testing.T) {
+	fx, err := LoadDir(realFixtureDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch, ok := fx[OpMoviesBatch]
+	if !ok {
+		t.Fatal("no moviesBatch fixture")
+	}
+	type seen struct {
+		meta json.RawMessage
+		in   string
+	}
+	known := map[int64]seen{}
+	missing := map[int64]string{}
+	for _, c := range batch.Cases {
+		if !c.Response.Success() {
+			continue
+		}
+		var resp struct {
+			Movies  []json.RawMessage `json:"movies"`
+			Missing []int64           `json:"missing"`
+		}
+		if err := json.Unmarshal(c.Response.Body, &resp); err != nil {
+			t.Fatalf("%s: %v", c.Name, err)
+		}
+		for _, raw := range resp.Movies {
+			var m modelclient.MovieMeta
+			if err := decodeStrict(raw, &m); err != nil {
+				t.Fatalf("%s: %v", c.Name, err)
+			}
+			if prev, dup := known[m.MovieID]; dup && !jsonEqual(prev.meta, raw) {
+				t.Errorf("movie %d: %s says %s, %s says %s", m.MovieID, prev.in, prev.meta, c.Name, raw)
+			} else if !dup {
+				known[m.MovieID] = seen{raw, c.Name}
+			}
+		}
+		for _, id := range resp.Missing {
+			missing[id] = c.Name
+		}
+	}
+	if len(known) == 0 {
+		t.Fatal("no movies in the moviesBatch fixture")
+	}
+	for id, name := range missing {
+		if k, ok := known[id]; ok {
+			t.Errorf("movie %d: missing in %s but known in %s", id, name, k.in)
+		}
+	}
+}

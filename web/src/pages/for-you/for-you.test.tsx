@@ -1,4 +1,4 @@
-import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -534,6 +534,7 @@ function stored(): unknown {
 describe('For you: model selector and categories', () => {
   beforeEach(() => localStorage.clear());
   afterEach(() => {
+    vi.useRealTimers();
     localStorage.clear();
     vi.restoreAllMocks();
   });
@@ -574,24 +575,58 @@ describe('For you: model selector and categories', () => {
   });
 
   it('debounces rapid chip toggles into one request, while the buttons and URL update at once', async () => {
-    const user = userEvent.setup();
     server.use(recommendWith(20));
     const { router } = renderApp('/');
     await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
     const recommend = recordRequests('/api/recommend');
-    await user.click(chip('Horror'));
-    await user.click(chip('Action'));
-    await user.click(chip('Comedy'));
-    await user.click(chip('Action'));
+    const user = useFakeClock();
+    user.click(chip('Horror'));
+    user.click(chip('Action'));
+    user.click(chip('Comedy'));
+    user.click(chip('Action'));
     expect(chip('Horror')).toHaveAttribute('aria-pressed', 'true');
     expect(chip('Action')).toHaveAttribute('aria-pressed', 'false');
     expect(new URLSearchParams(router.state.location.search).get('genres')).toBe('Comedy,Horror');
+    await advance(FILTER_DEBOUNCE_MS - 1);
     expect(recommend).toHaveLength(0);
-    await waitFor(() => expect(recommend).toHaveLength(1));
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 700));
-    });
+    await advance(1);
+    await flushUntil(() => recommend.length > 0, 'the request to start');
+    await advance(5000);
     expect(recommend.map(queryOf)).toEqual([{ model: 'als', k: '20', genres: 'Comedy,Horror' }]);
+  });
+
+  it('sends one request when the model changes while a chip toggle is still settling', async () => {
+    server.use(recommendWith(20));
+    const { router } = renderApp('/');
+    await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
+    const recommend = recordRequests('/api/recommend');
+    const user = useFakeClock();
+    user.click(chip('Horror'));
+    await advance(100);
+    user.selectOptions(modelSelect(), 'knn');
+    // The model change applies at once, taking the pending chips with it.
+    await flushUntil(() => recommend.length > 0, 'the request to start');
+    expect(recommend.map(queryOf)).toEqual([{ model: 'knn', k: '20', genres: 'Horror' }]);
+    await advance(5000);
+    expect(recommend).toHaveLength(1);
+    expect(searchOf(router).get('model')).toBe('knn');
+    expect(searchOf(router).get('genres')).toBe('Horror');
+  });
+
+  it('sends one request when a chip is toggled while a model change is loading', async () => {
+    server.use(recommendWith(20));
+    renderApp('/');
+    await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
+    const recommend = recordRequests('/api/recommend');
+    const user = useFakeClock();
+    user.selectOptions(modelSelect(), 'knn');
+    await flushUntil(() => recommend.length > 0, 'the request to start');
+    user.click(chip('Horror'));
+    await advance(5000);
+    expect(recommend.map(queryOf)).toEqual([
+      { model: 'knn', k: '20' },
+      { model: 'knn', k: '20', genres: 'Horror' },
+    ]);
   });
 
   it('remembers genres but not a model the user never picked', async () => {
@@ -868,9 +903,42 @@ async function letDebounceSettle() {
   });
 }
 
+/** The page's filter debounce (index.tsx FILTER_DEBOUNCE_MS). */
+const FILTER_DEBOUNCE_MS = 350;
+
+/** Switches to fake timers (the page must have loaded), so the debounce tests do not depend on how
+ * busy the machine is. Those tests drive the page with fireEvent: user-event (through Testing
+ * Library's async wrapper) waits on a real setTimeout, which a fake clock never fires. */
+function useFakeClock() {
+  vi.useFakeTimers();
+  return {
+    click: (el: HTMLElement) => fireEvent.click(el),
+    selectOptions: (select: HTMLSelectElement, value: string) => fireEvent.change(select, { target: { value } }),
+    /** Types `text` one character at a time, as a person would. */
+    type: (input: HTMLInputElement, text: string) => {
+      for (let i = 1; i <= text.length; i++) fireEvent.change(input, { target: { value: text.slice(0, i) } });
+    },
+  };
+}
+
+/** Moves the fake clock by `ms`, running the timers and promises that come due. */
+async function advance(ms: number) {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(ms);
+  });
+}
+
+/** Runs pending promises (without moving the fake clock) until `until` holds, e.g. a mocked
+ * request has started or finished. */
+async function flushUntil(until: () => boolean, what: string) {
+  for (let i = 0; i < 50 && !until(); i++) await advance(0);
+  if (!until()) throw new Error(`timed out waiting for ${what}`);
+}
+
 describe('For you: release years', () => {
   beforeEach(() => localStorage.clear());
   afterEach(() => {
+    vi.useRealTimers();
     localStorage.clear();
     vi.restoreAllMocks();
   });
@@ -890,20 +958,23 @@ describe('For you: release years', () => {
   });
 
   it('sends a typed range once, debounced, and keeps it in the URL, storage and summary', async () => {
-    const user = userEvent.setup();
     server.use(recommendWith(20));
     const { router } = renderApp('/');
     await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
     const recommend = recordRequests('/api/recommend');
-    await user.type(yearInput('From'), '1990');
-    await user.type(yearInput('To'), '1999');
-    expect(recommend).toHaveLength(0);
+    const user = useFakeClock();
+    user.type(yearInput('From'), '1990');
+    user.type(yearInput('To'), '1999');
     expect(searchOf(router).get('year_from')).toBe('1990');
     expect(searchOf(router).get('year_to')).toBe('1999');
-    await waitFor(() => expect(recommend).toHaveLength(1));
-    await letDebounceSettle();
+    await advance(FILTER_DEBOUNCE_MS - 1);
+    expect(recommend).toHaveLength(0);
+    await advance(1);
+    await flushUntil(() => recommend.length > 0, 'the request to start');
+    await advance(5000);
     expect(recommend.map(queryOf)).toEqual([{ model: 'als', k: '20', year_from: '1990', year_to: '1999' }]);
     expect(stored()).toEqual({ genres: [], year_from: 1990, year_to: 1999 });
+    await flushUntil(() => !screen.getByRole('list', { name: 'Recommendations' }).hasAttribute('aria-busy'), 'the list');
     expect(screen.getByRole('main')).toHaveTextContent('Picks from Implicit ALS · 1990–1999');
     expect(clearYearsButton()).toBeEnabled();
   });
