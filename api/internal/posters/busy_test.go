@@ -172,7 +172,7 @@ func TestRememberedCacheControl(t *testing.T) {
 func TestPosterRememberedNeverOutlastsEntry(t *testing.T) {
 	clk := &testClock{t: time.Unix(1_800_000_000, 0)}
 	e := newEnv(t, setup{key: testKey, now: clk.now})
-	e.tmdb.setAPI(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "busy", 503) })
+	e.tmdb.setAPI(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "busy", http.StatusServiceUnavailable) })
 	e.poster("7")
 	clk.advance(busyTTL - 1500*time.Millisecond)
 	if got := e.poster("7").Header().Get("Cache-Control"); got != "public, max-age=1" {
@@ -196,7 +196,7 @@ func TestPosterRememberedNeverOutlastsEntry(t *testing.T) {
 func TestPosterLastingFailures(t *testing.T) {
 	for name, c := range map[string]struct{ api, img http.HandlerFunc }{
 		"api 404":      {api: func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) }},
-		"api 501":      {api: func(w http.ResponseWriter, r *http.Request) { http.Error(w, "x", 501) }},
+		"api 501":      {api: func(w http.ResponseWriter, r *http.Request) { http.Error(w, "x", http.StatusNotImplemented) }},
 		"api not json": {api: func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "<html>") }},
 		"img not jpeg": {img: func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "<svg/>") }},
 	} {
