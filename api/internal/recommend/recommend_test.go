@@ -124,6 +124,8 @@ func TestContractFixtures(t *testing.T) {
 		"compare/ok":              "ok",
 		"recommend/ok_genres":     "ok_genres",
 		"compare/ok_genres":       "ok_genres",
+		"recommend/ok_years":      "ok_years",
+		"compare/ok_years":        "ok_years",
 	}
 	for _, op := range []string{"recommend", "compare"} {
 		for _, c := range cachetest.PublicCases(t, op) {
