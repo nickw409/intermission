@@ -39,7 +39,7 @@ so it may import `api/internal/modelclient`; see `go.mod`). `TestMain`:
    documented status, response schema (error bodies against `Error`), declared headers,
    `X-Model-Version` on every recs-model response and `X-Request-ID` on every response, and
    coverage: **every documented status of every operation must have been observed** (no
-   waivers; only the phase-6 feedback endpoints are excluded). A request must also route to
+   waivers; only `getFeedbackStats`, which recs-api does not serve yet, is excluded). A request must also route to
    the operation it is labelled with (literal path segments beat parameters), and a response
    whose contract declares no content must have no body. Cookie values are redacted from the
    recorded observations.
