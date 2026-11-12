@@ -43,16 +43,23 @@ release waits at most 2 minutes for it (`RELEASE_LOCK_WAIT`), then stops and nam
 change (Phase 1, `docs/phase-1.md` "Content centering (option b)") has no `content/centering.bin`.
 The new recs-model refuses it ("content artifact predates centering.bin; retrain"), and because an
 artifact loads as one unit, the whole artifact would be rejected. Before deploying that change (or
-any later SHA), run `recs-train retrain` with the new image so `CURRENT` points at an artifact
-that has the file. Production has no such artifact yet, but check `data/artifacts/CURRENT` first.
+any later SHA), train a new artifact with the new image (below) so `CURRENT` points at an
+artifact that has the file. Production has no such artifact yet, but check `data/artifacts/CURRENT` first.
 
 The MF model file went to format 2 with the min_support ranking floor (it now stores each
 movie's training rating count). recs-model refuses a format 1 `mf/item_factors.bin` ("format 1
 has no per-item rating counts (min_support); retrain"), which again rejects the whole artifact.
-Order for that release: `deploy/build.sh <sha>`, then a retrain with the new image,
-`TAG=<sha> docker compose -f deploy/compose.yaml run --rm train retrain` (the running recs-model
-rejects the new artifact and keeps serving the old one), then `deploy/release.sh <sha>`, which
-starts the new recs-model on the new artifact. Run the release straight after the retrain: if
+Order for that release: `deploy/build.sh <sha>`, then a new artifact from the new image (the
+running recs-model keeps serving the artifact it already loaded):
+
+```bash
+TAG=<sha> docker compose -f deploy/compose.yaml run --rm train train --dataset ml-32m \
+  --models pop,pop_count,knn,content,mf,als --default-model knn --set-current --seed 42
+```
+
+then `deploy/release.sh <sha>`, which starts the new recs-model on the new artifact. (`recs-train
+retrain`, the nightly merge-and-train step, is still a stub that exits with "retrain is not
+implemented yet", so use `train` as above.) Run the release straight after the training: if
 the old recs-model restarts in between, it finds only the format 2 artifact in `CURRENT` and
 cannot load it, so recommendations are down until the release. Point `CURRENT` back at the
 previous artifact if the release has to wait.
