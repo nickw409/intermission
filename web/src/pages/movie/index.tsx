@@ -1,6 +1,8 @@
-// Movie page: details (GET /api/movies/{id}), the signed-in user's rating, and a row of similar
-// movies with a toggle between item-KNN ("rated by the same people") and the content model
-// (GET /api/movies/{id}/similar).
+// Movie page: details (GET /api/movies/{id}), the plot summary, tagline, runtime, release date,
+// directors and cast from TMDB (GET /api/movies/{id}/details, loaded alongside and optional: the
+// page shows whatever arrived), the signed-in user's rating, and a row of similar movies with a
+// toggle between item-KNN ("rated by the same people") and the content model
+// (GET /api/movies/{id}/similar). TMDB text is rendered as plain text only.
 import { useCallback, useId, useState } from 'react';
 import { Link, useParams } from 'react-router';
 import { api, ApiError, type Schemas } from '../../api/client';
@@ -9,12 +11,13 @@ import { MovieCard } from '../../components/MovieCard';
 import { Poster } from '../../components/Poster';
 import { RateMovie } from '../../components/RateMovie';
 import { Empty, ErrorMessage, Loading } from '../../components/Status';
-import { displayTitle } from '../../lib/format';
+import { displayTitle, formatReleaseDate, formatRuntime } from '../../lib/format';
 import { useOptimisticRatings } from '../../lib/ratings';
 import { useAsync } from '../../lib/useAsync';
 import '../../components/components.css';
 
 type Movie = Schemas['Movie'];
+type Details = Schemas['MovieDetails'];
 type SimilarModel = Schemas['SimilarResponse']['model'];
 
 const SIMILAR_COUNT = 12;
@@ -48,6 +51,7 @@ function NotFound() {
 function MovieDetails({ movieId }: { movieId: number }) {
   const load = useCallback((signal: AbortSignal) => api.get('/api/movies/{movieId}', { path: { movieId }, signal }), [movieId]);
   const { state, reload } = useAsync(load);
+  const details = useMovieDetails(movieId);
 
   if (state.status === 'error' && state.error instanceof ApiError && state.error.status === 404) return <NotFound />;
   if (state.status !== 'ready') {
@@ -70,6 +74,7 @@ function MovieDetails({ movieId }: { movieId: number }) {
         <Poster movieId={movie.movieId} title={movie.title} year={movie.year} size="large" />
         <div className="movie-detail__body">
           <h1>{displayTitle(movie.title)}</h1>
+          {details?.tagline && <p className="movie-detail__tagline">{details.tagline}</p>}
           <dl className="movie-facts">
             {movie.year !== null && (
               <>
@@ -83,6 +88,24 @@ function MovieDetails({ movieId }: { movieId: number }) {
                 <dd>{movie.genres.join(', ')}</dd>
               </>
             )}
+            {details?.runtime_minutes != null && (
+              <>
+                <dt>Runtime</dt>
+                <dd>{formatRuntime(details.runtime_minutes)}</dd>
+              </>
+            )}
+            {details?.release_date && (
+              <>
+                <dt>Released</dt>
+                <dd>{formatReleaseDate(details.release_date)}</dd>
+              </>
+            )}
+            {details && details.directors.length > 0 && (
+              <>
+                <dt>{details.directors.length === 1 ? 'Director' : 'Directors'}</dt>
+                <dd>{details.directors.join(', ')}</dd>
+              </>
+            )}
             <dt>Ratings</dt>
             <dd>
               {movie.mean_rating === null || movie.rating_count === 0
@@ -90,11 +113,54 @@ function MovieDetails({ movieId }: { movieId: number }) {
                 : `Average ${movie.mean_rating.toFixed(2)} from ${movie.rating_count} ${movie.rating_count === 1 ? 'rating' : 'ratings'}`}
             </dd>
           </dl>
+          {details?.overview && <Overview text={details.overview} />}
           <YourRating movie={movie} />
         </div>
       </article>
+      {details && details.cast.length > 0 && <CastList cast={details.cast} />}
       <SimilarRow movieId={movie.movieId} />
     </div>
+  );
+}
+
+/**
+ * TMDB details for the movie, or null while loading or if they couldn't be had. A failure is not
+ * shown: the page already has the essentials, and recs-api answers empty details rather than an
+ * error whenever TMDB is unavailable.
+ */
+function useMovieDetails(movieId: number): Details | null {
+  const load = useCallback(
+    (signal: AbortSignal) => api.get('/api/movies/{movieId}/details', { path: { movieId }, signal }),
+    [movieId],
+  );
+  const { state } = useAsync(load);
+  return state.status === 'ready' ? state.data : null;
+}
+
+function Overview({ text }: { text: string }) {
+  const headingId = useId();
+  return (
+    <section className="movie-detail__overview" aria-labelledby={headingId}>
+      <h2 id={headingId}>Plot</h2>
+      <p>{text}</p>
+    </section>
+  );
+}
+
+function CastList({ cast }: { cast: Details['cast'] }) {
+  const headingId = useId();
+  return (
+    <section className="cast" aria-labelledby={headingId}>
+      <h2 id={headingId}>Cast</h2>
+      <ul className="cast-list">
+        {cast.map((member, i) => (
+          <li key={`${i}-${member.name}`}>
+            <span className="cast-list__name">{member.name}</span>
+            {member.character && <span className="muted"> as {member.character}</span>}
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 

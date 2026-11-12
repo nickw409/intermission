@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { displayTitle, joinTitles, titleWithYear } from './format';
+import { displayTitle, formatReleaseDate, formatRuntime, joinTitles, titleWithYear } from './format';
 
 describe('displayTitle', () => {
   it.each([
@@ -28,5 +28,30 @@ describe('joinTitles', () => {
     expect(joinTitles(['A'])).toBe('A');
     expect(joinTitles(['A', 'B'])).toBe('A and B');
     expect(joinTitles(['A', 'B', 'C'])).toBe('A, B and C');
+  });
+});
+
+describe('formatRuntime', () => {
+  it.each([
+    [179, '2 h 59 min'],
+    [120, '2 h'],
+    [45, '45 min'],
+    [61, '1 h 1 min'],
+  ])('%d -> %s', (minutes, shown) => {
+    expect(formatRuntime(minutes)).toBe(shown);
+  });
+});
+
+describe('formatReleaseDate', () => {
+  it('formats the calendar day without shifting it across time zones', () => {
+    const shown = formatReleaseDate('2001-12-18');
+    expect(shown).toContain('2001');
+    expect(shown).toContain('18');
+    expect(shown).not.toContain('17');
+    expect(formatReleaseDate('2001-01-01')).toContain('2001');
+  });
+
+  it('returns anything that is not YYYY-MM-DD unchanged', () => {
+    expect(formatReleaseDate('soon')).toBe('soon');
   });
 });

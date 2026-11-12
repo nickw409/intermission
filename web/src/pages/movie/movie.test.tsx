@@ -139,9 +139,65 @@ describe('Movie page', () => {
     expect(screen.queryByRole('slider')).not.toBeInTheDocument();
   });
 
+  it('shows the plot, tagline, runtime, release date, director and cast from TMDB', async () => {
+    await openMovie();
+    const main = screen.getByRole('main');
+    expect(await within(main).findByRole('heading', { level: 2, name: 'Plot' })).toBeInTheDocument();
+    expect(main).toHaveTextContent('A quiet hobbit inherits a dangerous ring');
+    expect(main).toHaveTextContent('One ring to rule them all.');
+    expect(main).toHaveTextContent(/Runtime\s*2 h 59 min/);
+    expect(main).toHaveTextContent(/Released.*2001/);
+    expect(main).toHaveTextContent(/Director\s*Peter Jackson/);
+    const cast = screen.getByRole('region', { name: 'Cast' });
+    const members = within(cast).getAllByRole('listitem');
+    expect(members.map((li) => li.textContent)).toEqual([
+      'Elijah Wood as Frodo Baggins',
+      'Ian McKellen as Gandalf',
+      'Viggo Mortensen as Aragorn',
+      'Sean Astin as Samwise Gamgee',
+      'Cate Blanchett',
+    ]);
+  });
+
+  it('shows the basic details alone when TMDB has nothing', async () => {
+    server.use(handlerFor('getMovieDetails', 'ok_unavailable'));
+    const details = recordRequests('/api/movies/4993/details', 'GET');
+    await openMovie();
+    await waitFor(() => expect(details).toHaveLength(1));
+    const main = screen.getByRole('main');
+    expect(main).toHaveTextContent('Average 4.11 from 198 ratings');
+    expect(screen.queryByRole('heading', { name: 'Plot' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Cast' })).not.toBeInTheDocument();
+    expect(main).not.toHaveTextContent('Runtime');
+    expect(main).not.toHaveTextContent('Director');
+  });
+
+  it('keeps the page working when the details request fails', async () => {
+    server.use(http.get('/api/movies/:movieId/details', () => HttpResponse.json({}, { status: 500 })));
+    await openMovie();
+    expect(screen.getByRole('main')).toHaveTextContent('Average 4.11 from 198 ratings');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Plot' })).not.toBeInTheDocument();
+  });
+
+  it('renders TMDB text as plain text, never as markup', async () => {
+    const ok = fixtureFor('getMovieDetails').cases.find((c) => c.name === 'ok')!.response.body as Record<string, unknown>;
+    server.use(
+      http.get('/api/movies/:movieId/details', () =>
+        HttpResponse.json({ ...ok, overview: '<img src=x onerror=alert(1)>Plot', cast: [{ name: '<b>Bold</b>', character: null }] }),
+      ),
+    );
+    const { container } = await openMovie();
+    expect(await screen.findByText('<img src=x onerror=alert(1)>Plot')).toBeInTheDocument();
+    expect(screen.getByText('<b>Bold</b>')).toBeInTheDocument();
+    expect(container.querySelector('img[src="x"]')).toBeNull();
+    expect(container.querySelector('.cast b')).toBeNull();
+  });
+
   it('has no axe violations', async () => {
     await openMovie();
     await within(similarRow()).findByRole('link', { name: 'The Matrix' });
+    await screen.findByRole('region', { name: 'Cast' }); // TMDB details included
     expect(await axeViolations()).toEqual([]);
   });
 

@@ -135,6 +135,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/movies/{movieId}/details": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Plot summary, tagline, runtime, release date, directors and top-billed cast, from TMDB and cached on disk. Never 5xx.
+         * @description Fetched by recs-api from TMDB (the same key, hosts and global upstream budget as posters).
+         *     Whenever details can't be had (unknown movie, no TMDB id, no TMDB key configured, TMDB
+         *     failing or the upstream budget spent) the answer is still 200, with every field null or
+         *     empty, so the movie page simply shows less. TMDB text is untrusted: clients render it as
+         *     plain text, never as HTML.
+         */
+        get: operations["getMovieDetails"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/onboarding": {
         parameters: {
             query?: never;
@@ -437,6 +461,20 @@ export interface components {
             tmdbId: number | null;
             /** @description The caller's rating if logged in and rated, else null. Responses that include a session-dependent value are sent with Cache-Control: private, no-store. */
             user_rating: number | null;
+        };
+        MovieDetails: {
+            movieId: number;
+            /** @description Plot summary. Plain text; may contain newlines. */
+            overview: string | null;
+            tagline: string | null;
+            runtime_minutes: number | null;
+            release_date: string | null;
+            directors: string[];
+            /** @description Top-billed cast, in billing order. */
+            cast: {
+                name: string;
+                character: string | null;
+            }[];
         };
         MovieList: {
             items: components["schemas"]["MovieSummary"][];
@@ -867,6 +905,29 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             404: components["responses"]["NotFound"];
             503: components["responses"]["ModelUnavailable"];
+        };
+    };
+    getMovieDetails: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                movieId: components["parameters"]["MovieId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Details (possibly all empty). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MovieDetails"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
         };
     };
     getOnboarding: {

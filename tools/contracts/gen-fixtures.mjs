@@ -247,6 +247,28 @@ write('public', 'getSimilar', [
   kase('model_unavailable', P('GET', '/api/movies/260/similar', { query: { model: 'knn', k: '3' } }), pubUnavailable),
 ]);
 
+// Overview and tagline are written for the fixture (not copied from TMDB).
+const EMPTY_DETAILS = (id) => ({ movieId: id, overview: null, tagline: null, runtime_minutes: null, release_date: null, directors: [], cast: [] });
+write('public', 'getMovieDetails', [
+  kase('ok', P('GET', '/api/movies/4993/details'), res(200, {
+    movieId: 4993,
+    overview: 'A quiet hobbit inherits a dangerous ring and sets out with eight companions to destroy it before its maker can reclaim it.',
+    tagline: 'One ring to rule them all.',
+    runtime_minutes: 179,
+    release_date: '2001-12-18',
+    directors: ['Peter Jackson'],
+    cast: [
+      { name: 'Elijah Wood', character: 'Frodo Baggins' },
+      { name: 'Ian McKellen', character: 'Gandalf' },
+      { name: 'Viggo Mortensen', character: 'Aragorn' },
+      { name: 'Sean Astin', character: 'Samwise Gamgee' },
+      { name: 'Cate Blanchett', character: null },
+    ],
+  })),
+  kase('ok_unavailable', P('GET', `/api/movies/${MISSING}/details`), res(200, EMPTY_DETAILS(MISSING))),
+  kase('bad_movie_id', P('GET', '/api/movies/abc/details'), res(400, err('bad_request', 'movieId must be a positive integer'))),
+]);
+
 write('public', 'getOnboarding', [
   kase('ok', P('GET', '/api/onboarding', { query: { n: '4' }, headers: sess }), res(200, { items: ONBOARDING.map(summary) })),
   kase('bad_n', P('GET', '/api/onboarding', { query: { n: '0' }, headers: sess }), res(400, err('bad_request', 'n must be between 1 and 60'))),

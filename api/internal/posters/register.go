@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"runtime/debug"
 	"strconv"
@@ -86,6 +87,10 @@ var posterPath = regexp.MustCompile(`^/[A-Za-z0-9_-]{1,64}\.jpg$`)
 // Register adds this package's routes to mux. Called once from main.go.
 //
 //	GET /api/posters/{movieId}
+//	GET /api/movies/{movieId}/details  (details.go)
+//
+// Both are the TMDB proxy: they share the key, the HTTP client, the host
+// allowlist and the two global limiters.
 func Register(mux *http.ServeMux, d *app.Deps) {
 	register(mux, d, options{})
 }
@@ -113,6 +118,10 @@ type handler struct {
 	cache     *diskCache
 	negative  *negCache
 	flights   flightGroup
+
+	details         *diskCache // cleaned MovieDetails JSON
+	detailsNegative *negCache
+	detailFlights   flightGroup
 }
 
 func register(mux *http.ServeMux, d *app.Deps, o options) {
@@ -152,6 +161,10 @@ func register(mux *http.ServeMux, d *app.Deps, o options) {
 		cache:     newDiskCache(d.Config.PosterCacheDir, d.Config.PosterCacheMaxByte, logger),
 		negative:  newNegCache(negativeEntries, negativeTTL, o.now),
 		flights:   flightGroup{logger: logger},
+
+		details:         newFileCache(filepath.Join(d.Config.PosterCacheDir, "details"), detailsCacheBytes, detailsFiles, logger),
+		detailsNegative: newNegCache(negativeEntries, negativeTTL, o.now),
+		detailFlights:   flightGroup{logger: logger},
 	}
 	// No proxy from the environment: requests go straight to the TMDB hosts.
 	transport := http.DefaultTransport.(*http.Transport).Clone()
@@ -162,6 +175,7 @@ func register(mux *http.ServeMux, d *app.Deps, o options) {
 		CheckRedirect: h.checkRedirect,
 	}
 	mux.HandleFunc("GET /api/posters/{movieId}", h.serve)
+	mux.HandleFunc("GET /api/movies/{movieId}/details", h.serveDetails)
 }
 
 func (h *handler) serve(w http.ResponseWriter, r *http.Request) {
@@ -206,31 +220,38 @@ func (h *handler) serve(w http.ResponseWriter, r *http.Request) {
 func (h *handler) fetchAndRecord(ctx context.Context, id int64) ([]byte, error) {
 	img, err := h.fetch(ctx, id)
 	if err != nil {
-		var tr transient
-		switch {
-		case errors.Is(err, errNoPoster):
-			h.negative.add(id)
-		case errors.Is(err, errLimited):
-		case errors.Is(err, context.Canceled):
-			// Defensive: ctx is detached (WithoutCancel), but a cancellation
-			// must never be remembered as "no poster".
-		case errors.Is(err, context.DeadlineExceeded) || isTimeout(err):
-			// TMDB was slow: worth retrying soon, so logged but not
-			// negatively cached (the upstream limiter bounds retries).
-			h.logger.WarnContext(ctx, "posters: TMDB timed out", "request_id", reqid.FromContext(ctx),
-				"movie_id", id, "err", h.scrub(err))
-		case errors.As(err, &tr):
-			h.logger.WarnContext(ctx, "posters: movie lookup failed", "request_id", reqid.FromContext(ctx),
-				"movie_id", id, "err", h.scrub(err))
-		default:
-			h.negative.add(id)
-			h.logger.WarnContext(ctx, "posters: fetch failed", "request_id", reqid.FromContext(ctx),
-				"movie_id", id, "err", h.scrub(err))
-		}
+		h.noteFailure(ctx, "posters", id, err, h.negative)
 		return nil, err
 	}
 	h.cache.put(id, img)
 	return img, nil
+}
+
+// noteFailure logs a failed fetch for id and, where retrying soon is
+// pointless, remembers id in neg. what ("posters" or "details") prefixes
+// the log message.
+func (h *handler) noteFailure(ctx context.Context, what string, id int64, err error, neg *negCache) {
+	var tr transient
+	switch {
+	case errors.Is(err, errNoPoster) || errors.Is(err, errNoDetails):
+		neg.add(id)
+	case errors.Is(err, errLimited):
+	case errors.Is(err, context.Canceled):
+		// Defensive: ctx is detached (WithoutCancel), but a cancellation
+		// must never be remembered as "nothing to fetch".
+	case errors.Is(err, context.DeadlineExceeded) || isTimeout(err):
+		// TMDB was slow: worth retrying soon, so logged but not
+		// negatively cached (the upstream limiter bounds retries).
+		h.logger.WarnContext(ctx, what+": TMDB timed out", "request_id", reqid.FromContext(ctx),
+			"movie_id", id, "err", h.scrub(err))
+	case errors.As(err, &tr):
+		h.logger.WarnContext(ctx, what+": movie lookup failed", "request_id", reqid.FromContext(ctx),
+			"movie_id", id, "err", h.scrub(err))
+	default:
+		neg.add(id)
+		h.logger.WarnContext(ctx, what+": fetch failed", "request_id", reqid.FromContext(ctx),
+			"movie_id", id, "err", h.scrub(err))
+	}
 }
 
 // flightGroup runs at most one fetch per movie ID at a time; callers that
