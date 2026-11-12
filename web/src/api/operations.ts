@@ -16,6 +16,8 @@ export const operations = {
   recommend: { method: 'GET', path: '/api/recommend' },
   compare: { method: 'GET', path: '/api/recommend/compare' },
   postFeedback: { method: 'POST', path: '/api/feedback' },
+  listNotInterested: { method: 'GET', path: '/api/feedback/not-interested' },
+  deleteNotInterested: { method: 'DELETE', path: '/api/feedback/not-interested/{movieId}' },
   getFeedbackStats: { method: 'GET', path: '/api/feedback/stats' },
   listModels: { method: 'GET', path: '/api/models' },
   listReports: { method: 'GET', path: '/api/reports' },

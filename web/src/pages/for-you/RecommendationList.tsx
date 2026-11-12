@@ -1,12 +1,13 @@
 // For you's list: fetches /api/recommend for one model and genre filter, and shows the cards with
 // their explanation, rate control and "Not interested". A polite live region announces the count
 // whenever a new list arrives (it stays mounted while the list reloads, so the change is heard).
-import { useCallback, useState, type MouseEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react';
 import { Link } from 'react-router';
 import { api, ApiError, type Schemas } from '../../api/client';
 import { MovieCard } from '../../components/MovieCard';
 import { RateMovie } from '../../components/RateMovie';
 import { Empty, ErrorMessage, Loading } from '../../components/Status';
+import { friendlyMessage } from '../../lib/errors';
 import { feedbackHook } from '../../lib/feedback';
 import { displayTitle, joinTitles } from '../../lib/format';
 import { modelLabel, type ModelName } from '../../lib/models';
@@ -55,31 +56,70 @@ export function RecommendationList({
   const { state, reload } = useRecommendations(model, genresKey);
   const ratings = useOptimisticRatings();
   const [hidden, setHidden] = useState<ReadonlySet<number>>(new Set());
-  // Movies whose "Not interested" could not be saved: shown again, with an error. The error
-  // belongs to the list it happened on, so a new model or filter starts without it.
+  // Movies whose "Not interested" could not be saved: shown again, with an error.
   const [failed, setFailed] = useState<ReadonlySet<number>>(new Set());
+  // The movie just hidden, offered for undo, and a problem with an undo.
+  const [justHidden, setJustHidden] = useState<RecItem | null>(null);
+  const [undoProblem, setUndoProblem] = useState<string | null>(null);
+  // Saves still in flight, so an undo is sent only after its save has landed.
+  const saves = useRef(new Map<number, Promise<void>>());
+  const undoRef = useRef<HTMLButtonElement>(null);
+  // Errors and the undo offer belong to the list they happened on, so a new model or filter
+  // starts without them.
   const listKey = `${model}?${genresKey}`;
-  const [failedFor, setFailedFor] = useState(listKey);
-  if (failedFor !== listKey) {
-    setFailedFor(listKey);
+  const [shownFor, setShownFor] = useState(listKey);
+  if (shownFor !== listKey) {
+    setShownFor(listKey);
     setFailed(new Set());
+    setJustHidden(null);
+    setUndoProblem(null);
   }
-  const hide = (movieId: number) => {
-    setHidden((current) => new Set(current).add(movieId));
-    setFailed((current) => {
-      const next = new Set(current);
-      next.delete(movieId);
-      return next;
-    });
+  const setIn = (set: ReadonlySet<number>, movieId: number, present: boolean) => {
+    const next = new Set(set);
+    if (present) next.add(movieId);
+    else next.delete(movieId);
+    return next;
   };
-  const unhide = (movieId: number) => {
-    setHidden((current) => {
-      const next = new Set(current);
-      next.delete(movieId);
-      return next;
-    });
-    setFailed((current) => new Set(current).add(movieId));
+
+  const notInterested = (item: RecItem, listModel: ModelName) => {
+    setHidden((current) => setIn(current, item.movieId, true));
+    setFailed((current) => setIn(current, item.movieId, false));
+    setJustHidden(item);
+    setUndoProblem(null);
+    const save = feedbackHook.notInterested({ movieId: item.movieId, model: listModel });
+    saves.current.set(item.movieId, save);
+    save
+      .catch(() => {
+        // Not saved: the card comes back with an error, and there is nothing to undo.
+        setHidden((current) => setIn(current, item.movieId, false));
+        setFailed((current) => setIn(current, item.movieId, true));
+        setJustHidden((current) => (current?.movieId === item.movieId ? null : current));
+      })
+      .finally(() => {
+        if (saves.current.get(item.movieId) === save) saves.current.delete(item.movieId);
+      });
   };
+
+  const undo = async (item: RecItem) => {
+    setJustHidden(null);
+    setUndoProblem(null);
+    setHidden((current) => setIn(current, item.movieId, false));
+    try {
+      await saves.current.get(item.movieId);
+    } catch {
+      return; // the save failed, so the movie was never hidden on the server
+    }
+    try {
+      await feedbackHook.undoNotInterested(item.movieId);
+    } catch (error) {
+      setHidden((current) => setIn(current, item.movieId, true));
+      setUndoProblem(`Couldn't undo "Not interested" for ${displayTitle(item.title)}. ${friendlyMessage(error)}`);
+    }
+  };
+
+  useEffect(() => {
+    if (justHidden) undoRef.current?.focus();
+  }, [justHidden]);
   useRefetchAfterRating(() => reload({ quiet: true }));
 
   const phrase = genrePhrase(parseGenres(genresKey));
@@ -102,8 +142,7 @@ export function RecommendationList({
         ratings={ratings}
         onClearGenres={onClearGenres}
         failed={failed}
-        onHide={hide}
-        onHideFailed={unhide}
+        onNotInterested={notInterested}
       />
     );
   }
@@ -112,6 +151,17 @@ export function RecommendationList({
       <p className="visually-hidden" aria-live="polite">
         {announcement}
       </p>
+      <div role="status" className="undo-region">
+        {justHidden && (
+          <div className="notice notice--inline">
+            <p>You won't see {displayTitle(justHidden.title)} in your recommendations.</p>
+            <button ref={undoRef} type="button" className="button" onClick={() => void undo(justHidden)}>
+              Undo
+            </button>
+          </div>
+        )}
+      </div>
+      {undoProblem && <ErrorMessage message={undoProblem} />}
       {body}
     </>
   );
@@ -125,8 +175,7 @@ function Results({
   ratings,
   onClearGenres,
   failed,
-  onHide,
-  onHideFailed,
+  onNotInterested,
 }: {
   data: RecommendResponse;
   items: RecItem[];
@@ -136,8 +185,7 @@ function Results({
   ratings: OptimisticRatings;
   onClearGenres: () => void;
   failed: ReadonlySet<number>;
-  onHide: (movieId: number) => void;
-  onHideFailed: (movieId: number) => void;
+  onNotInterested: (item: RecItem, model: ModelName) => void;
 }) {
   return (
     <>
@@ -169,8 +217,7 @@ function Results({
                 model={data.model}
                 ratings={ratings}
                 hideFailed={failed.has(item.movieId)}
-                onHide={onHide}
-                onHideFailed={onHideFailed}
+                onNotInterested={onNotInterested}
               />
             </li>
           ))}
@@ -208,16 +255,14 @@ function RecommendationCard({
   model,
   ratings,
   hideFailed,
-  onHide,
-  onHideFailed,
+  onNotInterested,
 }: {
   item: RecItem;
   model: ModelName;
   ratings: OptimisticRatings;
   /** The last "Not interested" for this movie could not be saved. */
   hideFailed: boolean;
-  onHide: (movieId: number) => void;
-  onHideFailed: (movieId: number) => void;
+  onNotInterested: (item: RecItem, model: ModelName) => void;
 }) {
   const notInterested = (event: MouseEvent<HTMLButtonElement>) => {
     // Move focus to a neighbouring card before this one disappears.
@@ -226,9 +271,8 @@ function RecommendationCard({
     const target = neighbour?.querySelector<HTMLElement>('a');
     if (target) target.focus();
     else document.querySelector<HTMLElement>('main h1')?.focus();
-    // Hide at once; if the server could not save it, the card comes back with an error.
-    onHide(item.movieId);
-    feedbackHook.notInterested({ movieId: item.movieId, model }).catch(() => onHideFailed(item.movieId));
+    // Hidden at once; if the server could not save it, the card comes back with an error.
+    onNotInterested(item, model);
   };
   return (
     <MovieCard movieId={item.movieId} title={item.title} year={item.year}>

@@ -299,7 +299,9 @@ describe('model-unavailable banner', () => {
     await act(async () => {
       await api.get('/api/recommend').catch(() => undefined);
     });
-    await screen.findByRole('status');
+    // For you has its own status region too (the "Not interested" undo), so wait for the banner's
+    // text (the page's own error may say the same).
+    await screen.findAllByText(BANNER, { exact: false });
     expect(await axeViolations()).toEqual([]);
   });
 });

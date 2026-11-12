@@ -1,6 +1,7 @@
 // My ratings: every rating the user has made (GET /api/ratings), sortable by date, title or rating.
-// Ratings are edited in place with the star control and deleted with an Undo. All of this goes
-// through recs-api alone, so the page keeps working while the model service is down.
+// Ratings are edited in place with the star control and deleted with an Undo. Below them, the
+// movies the user marked "Not interested" on For you, each with an Undo. All of this goes through
+// recs-api alone, so the page keeps working while the model service is down.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { api, type Schemas } from '../../api/client';
@@ -8,12 +9,14 @@ import { RateMovie } from '../../components/RateMovie';
 import { RequireSession } from '../../components/RequireSession';
 import { Empty, ErrorMessage, Loading } from '../../components/Status';
 import { friendlyMessage } from '../../lib/errors';
+import { feedbackHook } from '../../lib/feedback';
 import { displayTitle, formatDate } from '../../lib/format';
 import { saveRating, useOptimisticRatings } from '../../lib/ratings';
 import { useAsync } from '../../lib/useAsync';
 import '../../components/components.css';
 
 type Rating = Schemas['Rating'];
+type Hidden = Schemas['NotInterested'];
 type RatingList = Schemas['RatingList'];
 type SortKey = 'date' | 'title' | 'rating';
 type Direction = 'ascending' | 'descending';
@@ -28,7 +31,14 @@ export default function RatingsPage() {
   return (
     <div className="page">
       <h1>My ratings</h1>
-      <RequireSession action="see your ratings">{() => <Ratings />}</RequireSession>
+      <RequireSession action="see your ratings">
+        {() => (
+          <>
+            <Ratings />
+            <NotInterestedSection />
+          </>
+        )}
+      </RequireSession>
     </div>
   );
 }
@@ -191,5 +201,65 @@ function Ratings() {
         </div>
       )}
     </>
+  );
+}
+
+/** The movies marked "Not interested", newest first, each with an Undo. Hidden while empty. */
+function NotInterestedSection() {
+  const load = useCallback((signal: AbortSignal) => api.get('/api/feedback/not-interested', { signal }), []);
+  const { state, reload, update } = useAsync(load);
+  const [problem, setProblem] = useState<string | null>(null);
+  const [undone, setUndone] = useState<string | null>(null);
+
+  if (state.status === 'loading') return null;
+  if (state.status === 'error') {
+    return (
+      <section aria-labelledby="not-interested-heading" className="not-interested">
+        <h2 id="not-interested-heading">Not interested</h2>
+        <ErrorMessage message={state.message} onRetry={() => reload()} />
+      </section>
+    );
+  }
+  if (state.data.items.length === 0 && !undone && !problem) return null;
+
+  const undo = async (movie: Hidden) => {
+    const without = (data: { items: Hidden[] }) => ({ items: data.items.filter((m) => m.movieId !== movie.movieId) });
+    update(without);
+    setProblem(null);
+    setUndone(null);
+    try {
+      await feedbackHook.undoNotInterested(movie.movieId);
+      setUndone(`${displayTitle(movie.title)} can be recommended to you again.`);
+    } catch (error) {
+      update((data) => ({ items: [...without(data).items, movie].sort((a, b) => b.hidden_at - a.hidden_at) }));
+      setProblem(`Couldn't undo "Not interested" for ${displayTitle(movie.title)}. ${friendlyMessage(error)}`);
+    }
+  };
+
+  return (
+    <section aria-labelledby="not-interested-heading" className="not-interested">
+      <h2 id="not-interested-heading">Not interested</h2>
+      <p className="muted">Movies you hid on For you. They are left out of your recommendations.</p>
+      <p role="status">{undone}</p>
+      {problem && <ErrorMessage message={problem} />}
+      {state.data.items.length > 0 && (
+        <ul className="not-interested__list">
+          {state.data.items.map((movie) => (
+            <li key={movie.movieId}>
+              <Link to={`/movies/${movie.movieId}`}>{displayTitle(movie.title)}</Link>
+              {movie.year !== null && <span className="muted"> ({movie.year})</span>}{' '}
+              <button
+                type="button"
+                className="button button--quiet button--small"
+                aria-label={`Undo not interested in ${displayTitle(movie.title)}`}
+                onClick={() => void undo(movie)}
+              >
+                Undo
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }

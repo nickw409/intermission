@@ -1,0 +1,55 @@
+{
+  "operationId": "listNotInterested",
+  "cases": [
+    {
+      "name": "ok",
+      "request": {
+        "method": "GET",
+        "path": "/api/feedback/not-interested",
+        "query": {},
+        "headers": {
+          "Cookie": "session=fixture-session-token"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {},
+        "body": {
+          "items": [
+            {
+              "movieId": 2959,
+              "title": "Fight Club",
+              "year": 1999,
+              "hidden_at": 1794259200
+            },
+            {
+              "movieId": 1,
+              "title": "Toy Story",
+              "year": 1995,
+              "hidden_at": 1794258000
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "unauthorized",
+      "request": {
+        "method": "GET",
+        "path": "/api/feedback/not-interested",
+        "query": {},
+        "headers": {}
+      },
+      "response": {
+        "status": 401,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "unauthorized",
+            "message": "not logged in"
+          }
+        }
+      }
+    }
+  ]
+}

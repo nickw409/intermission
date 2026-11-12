@@ -1,0 +1,89 @@
+{
+  "operationId": "deleteNotInterested",
+  "cases": [
+    {
+      "name": "ok",
+      "request": {
+        "method": "DELETE",
+        "path": "/api/feedback/not-interested/2959",
+        "query": {},
+        "headers": {
+          "Origin": "https://intermission.example",
+          "X-Requested-With": "recs",
+          "Cookie": "session=fixture-session-token"
+        }
+      },
+      "response": {
+        "status": 204,
+        "headers": {}
+      }
+    },
+    {
+      "name": "bad_movie_id",
+      "request": {
+        "method": "DELETE",
+        "path": "/api/feedback/not-interested/abc",
+        "query": {},
+        "headers": {
+          "Origin": "https://intermission.example",
+          "X-Requested-With": "recs",
+          "Cookie": "session=fixture-session-token"
+        }
+      },
+      "response": {
+        "status": 400,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "bad_request",
+            "message": "movieId must be a positive integer"
+          }
+        }
+      }
+    },
+    {
+      "name": "unauthorized",
+      "request": {
+        "method": "DELETE",
+        "path": "/api/feedback/not-interested/2959",
+        "query": {},
+        "headers": {
+          "Origin": "https://intermission.example",
+          "X-Requested-With": "recs"
+        }
+      },
+      "response": {
+        "status": 401,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "unauthorized",
+            "message": "not logged in"
+          }
+        }
+      }
+    },
+    {
+      "name": "csrf_rejected",
+      "request": {
+        "method": "DELETE",
+        "path": "/api/feedback/not-interested/2959",
+        "query": {},
+        "headers": {
+          "Origin": "https://intermission.example",
+          "Cookie": "session=fixture-session-token"
+        }
+      },
+      "response": {
+        "status": 403,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "csrf_rejected",
+            "message": "missing or invalid X-Requested-With or Origin"
+          }
+        }
+      }
+    }
+  ]
+}
