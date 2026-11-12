@@ -5,6 +5,7 @@
 #   - short_sha only accepts commits that exist in this repository
 #   - one shared lock serialises release/backup/nightly/restore-drill; nested calls pass
 #   - training_changed: which commit pairs recommend a retrain
+#   - check_artifact: exit codes, the old-image skip and fail-closed start errors (compose stubbed)
 #
 #   deploy/tests/test_lib.sh
 # ok/bad always succeed, so `cond && ok || bad` is a safe if-then-else; snippets passed to
@@ -112,6 +113,42 @@ tc() { run_lib "REPO_DIR='$repo'; training_changed $1 $2 && echo RC0 || echo RC\
 [[ "$(tc unknown "$cfg")" == RC2 ]] && ok "git_sha unknown: cannot tell" || bad "unknown gave $(tc unknown "$cfg")"
 [[ "$(tc deadbee "$cfg")" == RC2 ]] && ok "commit not in repo: cannot tell" || bad "missing commit gave $(tc deadbee "$cfg")"
 [[ "$(tc "'-p'" "$cfg")" == RC2 ]] && ok "option-like git_sha refused" || bad "option-like gave $(tc "'-p'" "$cfg")"
+
+# A branch named like a commit id prefix must not be resolved instead of the commit.
+g branch "$base" "$cfg"
+[[ "$(tc "$base" "$cfg")" == RC0 ]] && ok "hex-named branch ignored, the commit is used" || bad "hex-named branch gave $(tc "$base" "$cfg")"
+for f in cmake/deps.cmake CMakeLists.txt CMakePresets.json deploy/docker/train.Dockerfile; do
+  mkdir -p "$repo/$(dirname "$f")"; echo a > "$repo/$f"; g add -A; g commit -q -m "add $f"
+  before="$(g rev-parse --short=7 HEAD)"
+  echo b > "$repo/$f"; g commit -q -am "change $f"
+  [[ "$(tc "$before" "$(g rev-parse --short=7 HEAD)")" == RC0 ]] && ok "$f change: retrain recommended" || bad "$f change not detected"
+done
+
+echo "== check_artifact"
+# compose is stubbed: --help prints $HELP (exit $HELP_RC); the check prints $OUT (exit $CHECK_RC).
+# The stub also records the arguments, so the test sees which service and TAG were used.
+ca() {
+  run_lib "compose() { echo \"TAG=\$TAG \$*\" >> '$tmp/compose.args'
+    if [[ \" \$* \" == *' --help '* ]]; then echo \"\$HELP\"; return \"\$HELP_RC\"; fi
+    [[ -n \"\$OUT\" ]] && echo \"\$OUT\"; return \"\$CHECK_RC\"; }
+  out=\"\$(check_artifact abc1234)\" && rc=0 || rc=\$?; echo \"rc=\$rc out=[\$out]\""
+}
+: > "$tmp/compose.args"
+out="$(HELP='--artifacts --check' HELP_RC=0 OUT=$'version=v1\ngit_sha=abc1234' CHECK_RC=0 ca)"
+grep -q 'rc=0 out=\[version=v1' <<<"$out" && ok "check passes: output passed through" || bad "pass case: $out"
+grep -q '^TAG=abc1234 run --rm --no-deps --pull never -T model-check$' "$tmp/compose.args" \
+  && ok "runs model-check with the release's TAG" || bad "compose called as: $(cat "$tmp/compose.args")"
+grep -qw 'model' <(sed 's/model-check//g' "$tmp/compose.args") && bad "used the live model service" || ok "never uses the live model service"
+out="$(HELP='--artifacts --check' HELP_RC=0 OUT='' CHECK_RC=3 ca)"
+grep -q 'rc=3 out=\[\]' <<<"$out" && ok "refused artifact: exit 3" || bad "refused case: $out"
+out="$(HELP='--artifacts --check' HELP_RC=0 OUT='' CHECK_RC=4 ca)"
+grep -q 'rc=4 out=\[\]' <<<"$out" && ok "no CURRENT: exit 4" || bad "no-CURRENT case: $out"
+out="$(HELP='--artifacts --socket' HELP_RC=0 OUT='' CHECK_RC=0 ca)"
+grep -q 'rc=0 out=\[\]' <<<"$out" && grep -q 'predates --check' <<<"$out" \
+  && ok "image without --check: skipped with a warning" || bad "old-image case: $out"
+out="$(HELP='Error response from daemon: no such image' HELP_RC=1 OUT='' CHECK_RC=0 ca)"
+grep -q 'rc=2 out=\[\]' <<<"$out" && grep -q 'no such image' <<<"$out" \
+  && ok "image that cannot start: fails, with the reason" || bad "start-failure case: $out"
 
 if [[ $fails -gt 0 ]]; then
   echo "FAIL: $fails lib check(s) failed" >&2

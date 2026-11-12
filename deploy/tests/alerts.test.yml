@@ -88,7 +88,7 @@ tests:
         exp_alerts:
           - exp_labels: { severity: info, task: artifact_freshness }
             exp_annotations:
-              summary: 'Training code changed since the serving model artifact was trained (retrain recommended)'
+              summary: 'The serving model artifact was trained by different training code (retrain recommended)'
               runbook: deploy/runbooks/deploy.md
       - eval_time: 2m
         alertname: JobFailed

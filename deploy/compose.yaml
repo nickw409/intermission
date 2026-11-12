@@ -105,6 +105,24 @@ services:
     pids_limit: 256
     stop_grace_period: 15s
 
+  # Release preflight (deploy/release.sh, lib.sh check_artifact): `docker compose run --rm
+  # model-check` with TAG set to the image about to be deployed. That recs-model loads and verifies
+  # the artifact CURRENT names, prints what it found and exits (recs-model --check). Same image,
+  # user and artifacts as `model`, read-only, but without the model socket volume: an image that
+  # has not passed its checks yet never gets near the live socket.
+  model-check:
+    <<: *job
+    profiles: [check]
+    image: intermission-model:${TAG:?set TAG in deploy/.env}
+    user: "10002:10000"
+    command: ["--check", "--artifacts", "/srv/data/artifacts"]
+    volumes:
+      - ${RECS_ARTIFACTS_DIR:-${RECS_DATA_DIR:-../data}/artifacts}:/srv/data/artifacts:ro
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    mem_limit: ${MODEL_MEM_LIMIT:-4g}
+    pids_limit: 256
+
   # Batch job: `docker compose run --rm train <ingest|train|eval|retrain> ...`.
   # Reads files and writes files only; no network. Low CPU weight and the first OOM victim,
   # so training never starves the site.

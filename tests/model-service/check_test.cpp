@@ -75,7 +75,8 @@ TEST_CASE("check: a servable artifact passes and is described for the deploy scr
   TempDir t;
   publish(t.path, "2026-11-12T00-00-00Z", "abc1234");
   const auto r = run_check(t.path);
-  CHECK(r.code == 0);
+  CHECK(r.code == recs::service::kCheckOk);
+  CHECK(r.code == 0);  // the deploy script relies on the literal values
   CHECK(r.out == "version=2026-11-12T00-00-00Z\ngit_sha=abc1234\nmodels=pop,pop_count\n");
 }
 
@@ -93,7 +94,7 @@ TEST_CASE("check: a git_sha that is not a hex commit id is reported as unknown",
 TEST_CASE("check: no CURRENT pointer fails", "[check]") {
   TempDir t;
   const auto r = run_check(t.path);
-  CHECK(r.code == 1);
+  CHECK(r.code == 4);
   CHECK(r.out.empty());
   CHECK(contains(r.log, "no CURRENT pointer"));
 }
@@ -119,7 +120,7 @@ TEST_CASE("check: an artifact that fails verification fails", "[check]") {
     f.write(&c, 1);
   }
   const auto r = run_check(t.path);
-  CHECK(r.code == 1);
+  CHECK(r.code == 3);
   CHECK(r.out.empty());
   CHECK(contains(r.log, "rejected"));
 }
@@ -131,7 +132,7 @@ TEST_CASE("check: an intact artifact under another version's name fails", "[chec
   fs::copy(t.path / "2026-11-12T00-00-00Z", t.path / "2026-11-12T01-00-00Z", fs::copy_options::recursive);
   recs::write_current(t.path, "2026-11-12T01-00-00Z");
   const auto r = run_check(t.path);
-  CHECK(r.code == 1);
+  CHECK(r.code == 3);
   CHECK(r.out.empty());
   CHECK(contains(r.log, "artifact 2026-11-12T01-00-00Z rejected"));
   CHECK(contains(r.log, "does not match"));

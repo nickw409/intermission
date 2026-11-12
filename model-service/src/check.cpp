@@ -29,7 +29,14 @@ int check_artifacts(const std::filesystem::path& root, std::ostream& out, LogSin
   Metrics metrics;
   Service service(holder, metrics, std::move(log));
   ArtifactWatcher watcher(root, holder, metrics, service);
-  if (watcher.poll_once() != ArtifactWatcher::Poll::swapped) return 1;  // the watcher logged why
+  switch (watcher.poll_once()) {  // the watcher logs why whenever it does not swap
+    case ArtifactWatcher::Poll::swapped:
+      break;
+    case ArtifactWatcher::Poll::no_current:
+      return kCheckNoCurrent;
+    default:
+      return kCheckRefused;
+  }
 
   const auto bundle = holder.get();
   std::string models;
@@ -40,7 +47,7 @@ int check_artifacts(const std::filesystem::path& root, std::ostream& out, LogSin
   out << "version=" << bundle->version << '\n'
       << "git_sha=" << safe_git_sha(bundle->manifest.git_sha) << '\n'
       << "models=" << models << '\n';
-  return out ? 0 : 1;
+  return out ? kCheckOk : kCheckRefused;
 }
 
 }  // namespace recs::service

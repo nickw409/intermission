@@ -120,34 +120,61 @@ require_data_dirs() {
 }
 
 # check_artifact TAG: ask TAG's recs-model whether it would serve the artifact production's
-# CURRENT names (recs-model --check), with the model service's own mounts, user and hardening:
-# no network, artifacts read-only. Prints the check's version=, git_sha= and models= lines on
-# stdout; exits non-zero if that recs-model would refuse the artifact (a retrain is needed first).
-# A shell TAG overrides the env file's, so the running services are untouched.
-# Images built before --check existed (any rollback target older than it) cannot be asked: the
-# check is skipped with a warning and nothing is printed, rather than blocking every such rollback.
+# CURRENT names (recs-model --check, run as the compose `model-check` service: the model image,
+# user and artifacts read-only, no network, no model socket). A shell TAG overrides the env
+# file's, so the running services are untouched. Prints the check's version=, git_sha= and
+# models= lines on stdout. Exit codes:
+#   0  the artifact loads with TAG's recs-model (or the check was skipped: nothing printed)
+#   3  that recs-model would refuse the artifact: a retrain is needed first
+#   4  there is no CURRENT pointer
+#   other: the check could not be run (Docker or compose error, the reason is logged)
+# Images built before --check existed (a rollback to an older release) cannot be asked; only for
+# them is the check skipped with a warning. Any failure to even start the image stops instead.
 check_artifact() {
-  local help
-  help="$(TAG="$1" compose run --rm --no-deps -T model --help 2>/dev/null)" || true
+  local help rc=0
+  if ! help="$(TAG="$1" compose run --rm --no-deps --pull never -T model-check --help 2>&1)"; then
+    log "ERROR: could not start recs-model:$1 to check the artifact:"
+    printf '%s\n' "$help" >&2
+    return 2
+  fi
   if [[ "$help" != *--check* ]]; then
     log "WARNING: recs-model:$1 predates --check; skipping the artifact preflight"
     return 0
   fi
-  TAG="$1" compose run --rm --no-deps -T model --check --artifacts /srv/data/artifacts
+  TAG="$1" compose run --rm --no-deps --pull never -T model-check || rc=$?
+  return "$rc"
 }
 
-# The source that decides what `recs-train train` writes into an artifact. Broad on purpose (all
-# of core/, not just the models): an unneeded retrain costs machine time, a missed one leaves the
-# site on a model the code has moved past.
-TRAINING_PATHS=(core train configs)
+# What decides the contents of an artifact: the training code and its configs, plus what builds
+# it (dependency pins, compiler flags, the train image). Broad on purpose (all of core/, not just
+# the models): an unneeded retrain costs machine time, a missed one leaves the site on a model the
+# code has moved past.
+TRAINING_PATHS=(core train configs cmake CMakeLists.txt CMakePresets.json deploy/docker/train.Dockerfile)
+
+# commit_id PREFIX: the full id of the one commit whose id starts with PREFIX (7-40 lowercase
+# hex), else nothing and exit 1. Looked up as an object id only, so a branch or tag that happens
+# to be named like a hex string is never picked instead.
+commit_id() {
+  local prefix="$1" obj found=""
+  [[ "$prefix" =~ ^[0-9a-f]{7,40}$ ]] || return 1
+  for obj in $(git -C "$REPO_DIR" rev-parse --disambiguate="$prefix" 2>/dev/null); do
+    [[ "$(git -C "$REPO_DIR" cat-file -t "$obj" 2>/dev/null)" == commit ]] || continue
+    [[ -z "$found" ]] || return 1  # ambiguous
+    found="$obj"
+  done
+  [[ -n "$found" ]] || return 1
+  printf '%s\n' "$found"
+}
 
 # training_changed FROM TO: whether TRAINING_PATHS differ between commit FROM (the git_sha an
-# artifact was trained at) and commit TO (the release). Exit 0: changed, so a retrain is
-# recommended; 1: unchanged; 2: cannot tell (FROM is not a commit id in this repository).
+# artifact was trained at) and commit TO (the release). "Differ", not "newer": on a rollback the
+# artifact can be the newer side, and a retrain with the older code is still what matches it.
+# Exit 0: they differ, a retrain is recommended; 1: identical; 2: cannot tell (FROM is not
+# exactly one commit in this repository, or git failed).
 training_changed() {
-  local from="$1" to="$2" rc=0
-  [[ "$from" =~ ^[0-9a-f]{7,40}$ ]] || return 2
-  git -C "$REPO_DIR" rev-parse --verify --quiet --end-of-options "${from}^{commit}" >/dev/null || return 2
+  local from to rc=0
+  from="$(commit_id "$1")" || return 2
+  to="$(git -C "$REPO_DIR" rev-parse --verify --quiet --end-of-options "${2}^{commit}")" || return 2
   git -C "$REPO_DIR" diff --quiet "$from" "$to" -- "${TRAINING_PATHS[@]}" || rc=$?
   case "$rc" in
     0) return 1 ;;

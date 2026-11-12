@@ -40,19 +40,24 @@ fi
 images_present "$tag" || die "images for $tag are still missing"
 
 # Preflight, before anything changes: the new recs-model must accept the artifact CURRENT points
-# at. It refuses one whose model file format it no longer reads (or, on a rollback, a newer format
-# it does not know yet); that release needs a retrain with its own train image first. The running
-# version keeps serving either way.
+# at. It refuses one whose model file format it no longer reads (or, on a rollback to an image
+# that has --check, a newer format it does not know yet); that release needs a retrain with its own
+# train image first. The running version keeps serving in every case below.
 log "checking that $tag's recs-model can load the current model artifact"
-if ! check_out="$(check_artifact "$tag")"; then
-  job_status artifact_check 1
-  die "release $tag stopped before any change: its recs-model cannot load the current model artifact (reason above). Retrain with the $tag train image first: deploy/runbooks/deploy.md, \"Model artifacts that need a retrain first\""
-fi
+check_rc=0
+check_out="$(check_artifact "$tag")" || check_rc=$?
+case "$check_rc" in
+  0) ;;
+  3) job_status artifact_check 1
+     die "release $tag stopped before any change: its recs-model refuses the current model artifact (reason above). Retrain with the $tag train image first: deploy/runbooks/deploy.md, \"Model artifacts that need a retrain first\"" ;;
+  4) die "release $tag stopped before any change: there is no CURRENT model artifact. Train one first: deploy/runbooks/deploy.md, \"First-time setup\" step 5" ;;
+  *) die "release $tag stopped before any change: the artifact check could not run (exit $check_rc, reason above)" ;;
+esac
 artifact_version="$(sed -n 's/^version=//p' <<<"$check_out")"
 artifact_sha="$(sed -n 's/^git_sha=//p' <<<"$check_out")"
 if [[ -n "$artifact_version" ]]; then  # empty: the image predates --check (skipped, see above)
   job_status artifact_check 0
-  log "artifact $artifact_version (trained at ${artifact_sha:-unknown}) loads with $tag"
+  log "artifact $artifact_version (trained at $artifact_sha) loads with $tag"
 fi
 
 # deploy runs inside `if`, where `set -e` is off, so every step checks its own status.
@@ -82,17 +87,23 @@ if deploy "$tag"; then
   } | tail -n 5 > "$HISTORY.tmp"
   mv -f "$HISTORY.tmp" "$HISTORY"
   log "release $tag OK (previous: ${previous:-none})"
-  # The artifact loads, but was it trained by older training code? Then the site serves a model
-  # the code has moved past (a new feature such as KNN's mean_damping only arrives with a retrain).
-  # Recorded only now, against the version that is actually running.
-  stale=0
-  training_changed "$artifact_sha" "$tag" || stale=$?
-  case "$stale" in
-    0) log "NOTE: core/, train/ or configs/ changed since artifact $artifact_version was trained at $artifact_sha; a retrain is recommended"
-       job_status artifact_freshness 1 ;;
-    1) job_status artifact_freshness 0 ;;
-    *) log "NOTE: cannot tell whether artifact $artifact_version is up to date (trained at '${artifact_sha:-unknown}', not a commit in this repository)" ;;
-  esac
+  # A successful release supersedes any earlier one the preflight blocked (RetrainRequired).
+  job_status artifact_check 0
+  # The artifact loads, but was it trained by different training code? Then the site serves a
+  # model that does not match the code (a change such as KNN's mean_damping only arrives with a
+  # retrain). Recorded only now, against the version that is actually running.
+  if [[ -z "$artifact_version" ]]; then
+    log "NOTE: artifact freshness not checked ($tag predates --check)"
+  else
+    stale=0
+    training_changed "$artifact_sha" "$tag" || stale=$?
+    case "$stale" in
+      0) log "NOTE: the training code differs between $tag and $artifact_sha, which trained artifact $artifact_version; a retrain is recommended"
+         job_status artifact_freshness 1 ;;
+      1) job_status artifact_freshness 0 ;;
+      *) log "NOTE: cannot tell whether artifact $artifact_version matches $tag (trained at '$artifact_sha', not a single commit in this repository)" ;;
+    esac
+  fi
   exit 0
 fi
 

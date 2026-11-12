@@ -39,7 +39,8 @@ int main(int argc, char** argv) {
   bool check = false;
   app.add_flag("--check", check,
                "Load and verify the artifact CURRENT names as the server would, print its version, git_sha "
-               "and models, and exit 0 if it would be served, 1 if not (deploy preflight)");
+               "and models, and exit 0 if it would be served; 3 if it would be refused, 4 if there is no CURRENT "
+               "(deploy preflight)");
   CLI11_PARSE(app, argc, argv);
 
   if (check) return recs::service::check_artifacts(artifacts, std::cout, recs::service::stderr_log_sink());

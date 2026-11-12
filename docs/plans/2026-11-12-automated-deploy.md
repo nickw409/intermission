@@ -16,6 +16,10 @@ retrain handled safely.
   `train/` and `configs/` against the artifact's `git_sha` (`RetrainRecommended`, task
   `artifact_freshness`).
 - Runbook: `deploy/runbooks/deploy.md`, "Retrain detection".
+- Known limits, to address here: rollbacks to images older than `--check` skip it; the check has
+  no timeout (it holds `ops.lock` if it ever hangs; it takes about 1 s today); manual training
+  runs do not take `ops.lock`; the full `release.sh` flow has no automated test (only its
+  `lib.sh` pieces, with `compose` stubbed).
 
 ## Step 1: alert delivery (prerequisite, owner decision)
 
@@ -36,7 +40,7 @@ follow-up SA6-2). Unattended deploys are not safe until a blocked or failed one 
      which needs a read-only token on the host; or a self-hosted runner that calls the script after
      CI, which needs none but runs CI code on the host: decide which).
   3. Skip if `data/ops/auto-release.paused` exists.
-  4. `deploy/release.sh <sha>`. On any failure (blocked preflight, failed smoke test, rollback),
+  4. `timeout` around `deploy/release.sh <sha>` and around the check. On any failure (blocked preflight, failed smoke test, rollback),
      create the pause file with the reason and record `job_status release 1`.
 - New alert `ReleaseFailed` on task `release`; `RetrainRequired` already covers the blocked case.
 - The owner clears the pause file after dealing with it (`deploy/runbooks/deploy.md` section).
