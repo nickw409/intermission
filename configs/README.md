@@ -12,6 +12,7 @@ config.
 
 `knn.json` is the ml-latest-small config and matches the code defaults. `knn.ml-32m.tuned.json` is
 the ml-32m config. Both use the spec's top-N score (`normalize: false`, `positive_only: true`).
+Both set `mean_damping` 20 (below).
 M (`neighbors`) and λ (`shrinkage`) were chosen on the **validation** split only (split seed 42 and
 model and bootstrap seed 42, `min_support` 20). The ml-32m search is in `docs/phase-1.md`.
 
@@ -46,6 +47,42 @@ The four scoring forms on the same validation split, M = 100, λ = 100:
 | unnormalized, positive only (top-N) | 0.0608 | 0.066 |
 | baseline pop_count | 0.0589 | 0.012 |
 | baseline pop (m = 10) | 0.0355 | 0.007 |
+
+`mean_damping` (β) damps the user mean used in scoring towards the global training mean,
+(Σ r + β·μ) / (n + β); see the "THE SCORING MEAN" note in `core/src/models/item_knn.cpp`. It exists
+so a user whose ratings are all equal (a new user who rates five favourites 5 stars) still gets a
+ranking: with the plain mean every score is 0 and the list falls back to movie-id order. The
+similarities do not change. Validation split (split seed 42, seed 42), each dataset at its own M and λ:
+
+| β | ml-latest-small NDCG@10 | Recall@50 | Coverage@10 | ml-32m NDCG@10 | Recall@50 | Coverage@10 |
+|---|---|---|---|---|---|---|
+| 0 (plain mean) | 0.0783 | 0.1858 | 0.065 | 0.0735 [0.0729, 0.0742] | 0.2186 | 0.049 |
+| 1 | 0.0779 | 0.1865 | 0.065 | | | |
+| 3 | 0.0777 | 0.1888 | 0.065 | | | |
+| 5 | 0.0775 | 0.1895 | 0.064 | 0.0749 | 0.2250 | 0.051 |
+| 10 | 0.0799 | 0.1931 | 0.064 | | | |
+| **20** | **0.0825** | 0.1963 | 0.064 | **0.0751** [0.0744, 0.0758] | 0.2273 | 0.057 |
+| 50 | 0.0822 | 0.1980 | 0.064 | | | |
+| 100 | 0.0821 | 0.1988 | 0.064 | 0.0744 | 0.2268 | 0.065 |
+| 1,000 | 0.0816 | 0.1986 | 0.064 | | | |
+
+Chosen: β = 20 on both datasets. Fold-in parity stays 1.0 (the batch path uses the same damped
+mean). The gain on these users is small because they have many ratings each, so the damped mean is
+close to the plain one; the change matters most for website users with a handful of ratings.
+M and λ were searched with the plain mean and were not searched again with β = 20.
+
+Test split, once per final config (split seed 42, seed 42; paired bootstrap, 1,000 resamples,
+`recs-train compare`; Δ = β 20 minus β 0):
+
+| dataset | NDCG@10 β 0 | NDCG@10 β 20 | Δ NDCG@10 [95% CI] | Δ Recall@50 [95% CI] |
+|---|---|---|---|---|
+| ml-latest-small (570 users) | 0.0658 | 0.0675 | +0.0017 [-0.0003, +0.0041] | +0.0005 [-0.0055, +0.0065] |
+| ml-32m (192,632 users) | 0.0726 | 0.0738 | +0.0012 [+0.0010, +0.0014] | +0.0062 [+0.0059, +0.0066] |
+
+A new user who rates six favourites 5 stars, ml-32m model: with β = 0 every score is 0 and the top
+10 is Toy Story, Heat, Casino, Sense and Sensibility... (the lowest movie ids). With β = 20, six
+sci-fi favourites give Return of the Jedi, Raiders of the Lost Ark, Aliens, The Terminator; six
+animated favourites give Monsters, Inc., The Incredibles, Toy Story 2, Beauty and the Beast.
 
 ## mf
 

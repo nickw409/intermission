@@ -6,6 +6,7 @@
 //  4. Explanations only cite items the user rated                                 (property)
 //  5. min_support respected, lists truncated to M, save/load round-trip identical (property)
 //  6. Determinism: identical neighbour lists with 1 and 4 OpenMP threads
+//  Also: the damped scoring mean (mean_damping) for users whose ratings are all equal
 #include <omp.h>
 
 #include <algorithm>
@@ -74,11 +75,13 @@ RandomCase random_case(recs::Rng& rng) {
   const double density = 0.1 + 0.8 * rng.uniform01();
   RandomCase c{random_dataset(rng, n_users, n_items, density), {}};
   const double shrink_choices[] = {0.0, 0.5, 3.0, 100.0};
+  const double damping_choices[] = {0.0, 0.7, 5.0, 1000.0};
   c.cfg = Config{{"neighbors", 1 + rng.uniform(n_items)},
                  {"shrinkage", shrink_choices[rng.uniform(4)]},
                  {"min_support", 1 + rng.uniform(5)},
                  {"normalize", rng.uniform(2) == 1},
-                 {"positive_only", rng.uniform(2) == 1}};
+                 {"positive_only", rng.uniform(2) == 1},
+                 {"mean_damping", damping_choices[rng.uniform(4)]}};
   return c;
 }
 
@@ -169,7 +172,7 @@ Dataset hand_dataset() {
 }
 
 const Config kHandCfg = Config{{"neighbors", 2},     {"shrinkage", 1.0},       {"min_support", 2},
-                               {"normalize", true}, {"positive_only", false}};
+                               {"normalize", true}, {"positive_only", false}, {"mean_damping", 0.0}};
 
 // The four scoring modes: (normalize, positive_only).
 const std::pair<bool, bool> kModes[] = {{true, false}, {true, true}, {false, false}, {false, true}};
@@ -352,11 +355,11 @@ TEST_CASE("knn gate 2: hand fixture similarities, scores and explanations", "[kn
 
 TEST_CASE("knn: config defaults and validation", "[knn]") {
   const auto ds = hand_dataset();
-  // The default is the spec's top-N form (normalize = false, positive_only = true) with M and
-  // lambda tuned on the ml-latest-small validation split.
+  // The default is the spec's top-N form (normalize = false, positive_only = true) with M, lambda
+  // and mean_damping tuned on the ml-latest-small validation split.
   const auto m = fit_knn(ds, Config::object());
   CHECK(m->config() == Config{{"neighbors", 10}, {"shrinkage", 1000.0}, {"min_support", 20},
-                              {"normalize", false}, {"positive_only", true}});
+                              {"normalize", false}, {"positive_only", true}, {"mean_damping", 20.0}});
   // Every item is below the default min_support 20: nothing can be scored.
   const auto s = score_of(*m, m->fold_in(training_ratings(ds, 0)));
   for (float v : s) CHECK(v == kNegInf);
@@ -366,7 +369,7 @@ TEST_CASE("knn: config defaults and validation", "[knn]") {
   const Config pred{{"neighbors", 100}, {"shrinkage", 100.0}, {"normalize", true}, {"positive_only", false}};
   const auto mp = fit_knn(ds, pred);
   CHECK(mp->config() == Config{{"neighbors", 100}, {"shrinkage", 100.0}, {"min_support", 20},
-                               {"normalize", true}, {"positive_only", false}});
+                               {"normalize", true}, {"positive_only", false}, {"mean_damping", 20.0}});
   for (float v : score_of(*mp, mp->fold_in(training_ratings(ds, 0)))) CHECK(v == kNegInf);
 
   auto bad = [&](Config c) { CHECK_THROWS_AS(recs::make_item_knn()->fit(ds, c, {}), std::invalid_argument); };
@@ -379,6 +382,9 @@ TEST_CASE("knn: config defaults and validation", "[knn]") {
   bad(Config{{"normalize", "false"}});
   bad(Config{{"positive_only", 0}});
   bad(Config{{"positive_only", nullptr}});
+  bad(Config{{"mean_damping", -0.5}});
+  bad(Config{{"mean_damping", "5"}});
+  bad(Config{{"mean_damping", true}});
 }
 
 // With no scoring flags the model uses the top-N form: positive neighbours only, no division by
@@ -389,7 +395,7 @@ TEST_CASE("knn: config defaults and validation", "[knn]") {
 //   explain(C) = [B with weight 0.4714045207910316]
 TEST_CASE("knn: the default scoring form is the spec's top-N score", "[knn]") {
   const auto ds = hand_dataset();
-  const Config neighbourhood{{"neighbors", 2}, {"shrinkage", 1.0}, {"min_support", 2}};
+  const Config neighbourhood{{"neighbors", 2}, {"shrinkage", 1.0}, {"min_support", 2}, {"mean_damping", 0.0}};
   const auto m = fit_knn(ds, neighbourhood);
   CHECK(m->config()["normalize"] == false);
   CHECK(m->config()["positive_only"] == true);
@@ -442,14 +448,17 @@ TEST_CASE("knn: shipped configs select the top-N form", "[knn]") {
   CHECK(big.positive_only);
   CHECK(big.neighbors == 50);
   CHECK(big.shrinkage == 30000.0);
+  CHECK(big.mean_damping == 20.0);
+  CHECK(small.mean_damping == 20.0);
 }
 
 // ---- gate 3 ---------------------------------------------------------------------------------------
 TEST_CASE("knn gate 3: fold_in + score equals the batch path bit for bit (tiny fixture)", "[knn][gate]") {
   const auto ds = recs::load_movielens(recs::testing::tiny_dir(), "tiny");
   std::vector<Config> configs;  // two neighbourhood settings x the four scoring modes
-  for (const auto& base : {Config{{"neighbors", 5}, {"shrinkage", 2.0}, {"min_support", 2}},
-                           Config{{"neighbors", 100}, {"shrinkage", 100.0}, {"min_support", 1}}}) {
+  for (const auto& base : {Config{{"neighbors", 5}, {"shrinkage", 2.0}, {"min_support", 2}, {"mean_damping", 0.0}},
+                           Config{{"neighbors", 100}, {"shrinkage", 100.0}, {"min_support", 1}},
+                           Config{{"neighbors", 5}, {"shrinkage", 2.0}, {"min_support", 2}, {"mean_damping", 3.0}}}) {
     for (const auto& mode : kModes) configs.push_back(with_mode(base, mode));
   }
   for (const auto& cfg : configs) {
@@ -690,10 +699,10 @@ TEST_CASE("knn: load rejects a corrupt or truncated file", "[knn]") {
 
   // Field-level corruption. Byte offsets for the hand model (4 items, 6 neighbour entries):
   //   0 magic | 8 version | 12 n_items | 16 neighbors | 20 min_support | 24 shrinkage (f64)
-  //   32 normalize | 33 positive_only | 34 nnz (u64) | 42 offsets u64[5] | 82 ids u32[6]
-  //   106 sims f32[6]                                                       -> 130 bytes total
+  //   32 normalize | 33 positive_only | 34 mean_damping (f64) | 42 global mean (f64)
+  //   50 nnz (u64) | 58 offsets u64[5] | 98 ids u32[6] | 122 sims f32[6]   -> 146 bytes total
   // Rows: A=[B, C] (s' -0.7071, -0.6495), B=[A, C], C=[A, B], D=[].
-  REQUIRE(bytes.size() == 130);
+  REQUIRE(bytes.size() == 146);
   // Returns a copy of `b` with `width` little-endian bytes of v written at `at`. (replace() rather
   // than indexing: GCC's -Wstringop-overflow misreads indexed writes into a copied std::string.)
   auto put_le = [](std::string b, std::size_t at, std::uint64_t v, std::size_t width) {
@@ -711,7 +720,7 @@ TEST_CASE("knn: load rejects a corrupt or truncated file", "[knn]") {
     for (int k = 0; k < 4; ++k) v |= static_cast<std::uint32_t>(static_cast<unsigned char>(bytes[at + static_cast<std::size_t>(k)])) << (8 * k);
     return v;
   };
-  constexpr std::size_t kIds = 82, kSims = 106, kOffsets = 42;
+  constexpr std::size_t kIds = 98, kSims = 122, kOffsets = 58;
   REQUIRE(get_u32(kIds) == 1);      // A's first neighbour is B
   REQUIRE(get_u32(kIds + 4) == 2);  // then C
   auto rejects = [&](const std::string& b, const std::string& why) {
@@ -737,7 +746,12 @@ TEST_CASE("knn: load rejects a corrupt or truncated file", "[knn]") {
     for (std::size_t k = 0; k < 4; ++k) std::swap(swapped[kSims + k], swapped[kSims + 4 + k]);
     rejects(swapped, "out of order");
   }
-  rejects(put_u64(bytes, 34, std::uint64_t{1} << 62), "wrong size");     // huge nnz: no allocation
+  rejects(put_u64(bytes, 50, std::uint64_t{1} << 62), "wrong size");     // huge nnz: no allocation
+  rejects(put_u64(bytes, 34, std::bit_cast<std::uint64_t>(-1.0)), "mean_damping");  // negative beta
+  rejects(put_u64(bytes, 42, std::bit_cast<std::uint64_t>(std::numeric_limits<double>::infinity())),
+          "bad global mean");
+  rejects(put_u32(bytes, 8, 1), "unsupported format version");
+  rejects(put_u32(bytes, 8, 4), "unsupported format version");
   {
     std::string flag = bytes;
     flag[32] = 2;  // normalize must be 0 or 1
@@ -745,6 +759,122 @@ TEST_CASE("knn: load rejects a corrupt or truncated file", "[knn]") {
   }
   write(bytes);
   CHECK_NOTHROW(recs::make_item_knn()->load(dir.path()));
+}
+
+// ---- damped scoring mean -------------------------------------------------------------------------
+// A user whose ratings are all equal (say, five movies all rated 5) has r - mu_u = 0 for every
+// rating, so with the plain mean every score is exactly 0 and the list falls back to ItemIdx order.
+// mean_damping = beta pulls the scoring mean towards the training set's global mean g:
+//   mu~ = (sum r + beta g) / (n + beta).
+// Hand fixture: g = 39 / 11 (eleven ratings summing to 39). Top-N form, lists B: [C], C: [B].
+// Fold-in user B = 5, D = 5, beta = 2:  mu~ = (10 + 2 * 39/11) / 4 = 47 / 11,
+//   score(C) = s'_CB (5 - 47/11) = 0.4714045207910316 * 8 / 11 = 0.34283965148438662.
+// With beta = 0 the same user gets score(C) = 0.
+TEST_CASE("knn: mean_damping gives an all-equal-ratings user a ranking", "[knn]") {
+  const auto ds = hand_dataset();
+  const Config plain{{"neighbors", 2}, {"shrinkage", 1.0}, {"min_support", 2}, {"mean_damping", 0.0}};
+  Config damped = plain;
+  damped["mean_damping"] = 2.0;
+  const std::vector<Rating> fan = {{3, 5.0f, 0}, {1, 5.0f, 0}};
+
+  const auto m0 = fit_knn(ds, plain);
+  const auto s0 = score_of(*m0, m0->fold_in(fan));
+  CHECK(s0[2] == 0.0f);  // the problem: the only candidate scores exactly 0
+
+  const auto m = fit_knn(ds, damped);
+  CHECK(m->config()["mean_damping"] == 2.0);
+  const auto st = m->fold_in(fan);
+  CHECK_THAT(st.mean, WithinAbs(47.0 / 11.0, 1e-12));
+  const auto s = score_of(*m, st);
+  CHECK(s[0] == kNegInf);
+  CHECK(s[1] == kNegInf);
+  CHECK_THAT(s[2], WithinAbs(0.34283965148438662, 1e-6));
+  CHECK(s[3] == kNegInf);
+  const auto e = m->explain(st, 2);
+  REQUIRE(e.because.size() == 1);
+  CHECK(e.because[0].item == 1);
+  CHECK_THAT(e.because[0].weight, WithinAbs(0.34283965148438662, 1e-6));
+
+  // No ratings: the scoring mean is g itself (no NaN from 0 / 0).
+  CHECK_THAT(m->fold_in({}).mean, WithinAbs(39.0 / 11.0, 1e-12));
+  // Damping only moves the scoring mean: the neighbour lists are the same.
+  for (ItemIdx i = 0; i < 4; ++i) CHECK(neighbour_list(*m, i) == neighbour_list(*m0, i));
+}
+
+// On a larger fixture: an all-5 user with the plain mean gets 0 for every scorable item, so the
+// top 10 is decided by ItemIdx alone. With damping each score is (5 - mu~) * sum of the rated
+// neighbours' s', so the list follows the similarity evidence.
+TEST_CASE("knn: mean_damping ranks an all-5 user by summed similarity", "[knn]") {
+  const auto ds = recs::load_movielens(recs::testing::tiny_dir(), "tiny");
+  const Config plain{{"neighbors", 5}, {"shrinkage", 2.0}, {"min_support", 2}, {"mean_damping", 0.0}};
+  Config damped = plain;
+  damped["mean_damping"] = 5.0;
+  std::vector<Rating> fan;
+  for (ItemIdx i = 0; i < ds.n_items() && fan.size() < 4; i += 3) fan.push_back(Rating{i, 5.0f, 0});
+
+  const auto m0 = fit_knn(ds, plain);
+  std::size_t finite = 0;
+  for (float v : score_of(*m0, m0->fold_in(fan))) {
+    if (v != kNegInf) {
+      CHECK(v == 0.0f);
+      ++finite;
+    }
+  }
+  REQUIRE(finite > 1);  // not vacuous
+
+  const auto m = fit_knn(ds, damped);
+  const auto st = m->fold_in(fan);
+  REQUIRE(st.mean < 5.0);
+  const auto s = score_of(*m, st);
+  std::vector<std::uint8_t> rated(ds.n_items(), 0);
+  for (const auto& r : fan) rated[r.item] = 1;
+  bool distinct = false;
+  float first = kNegInf;
+  for (ItemIdx i = 0; i < ds.n_items(); ++i) {
+    double sum = 0.0;
+    bool any = false;
+    for (const auto& nb : neighbour_list(*m, i)) {
+      if (rated[nb.item]) {
+        sum += static_cast<double>(nb.score);
+        any = true;
+      }
+    }
+    if (!any) {
+      CHECK(s[i] == kNegInf);
+      continue;
+    }
+    CHECK_THAT(s[i], WithinAbs((5.0 - st.mean) * sum, 1e-5));
+    CHECK(s[i] > 0.0f);
+    if (first == kNegInf) first = s[i];
+    else if (s[i] != first) distinct = true;
+  }
+  CHECK(distinct);  // the scores now separate the candidates
+}
+
+// Format 2 files (before mean_damping) still load, as beta = 0, and score exactly as before.
+TEST_CASE("knn: a format 2 model file loads with mean_damping 0", "[knn]") {
+  const auto m = fit_knn(hand_dataset(), kHandCfg);
+  recs::testing::TempDir dir("knn-format2");
+  m->save(dir.path());
+  const auto file = dir.path() / "item_knn.bin";
+  std::string bytes;
+  {
+    std::ifstream in(file, std::ios::binary);
+    bytes.assign(std::istreambuf_iterator<char>(in), {});
+  }
+  REQUIRE(bytes.size() == 146);
+  // Drop the two f64 fields at 34..49 and set the version (offset 8) to 2.
+  std::string v2 = bytes.substr(0, 34) + bytes.substr(50);
+  v2.replace(8, 4, std::string("\x02\x00\x00\x00", 4));
+  {
+    std::ofstream out(file, std::ios::binary | std::ios::trunc);
+    out.write(v2.data(), static_cast<std::streamsize>(v2.size()));
+  }
+  auto loaded = recs::make_item_knn();
+  loaded->load(dir.path());
+  CHECK(loaded->config() == m->config());
+  const std::vector<Rating> user = {{3, 5.0f, 0}, {0, 2.0f, 0}, {1, 5.0f, 0}};
+  CHECK(bitwise_equal(score_of(*loaded, loaded->fold_in(user)), score_of(*m, m->fold_in(user))));
 }
 
 // ---- gate 6 ---------------------------------------------------------------------------------------
