@@ -33,18 +33,8 @@ func newNegCache(limit int, ttl time.Duration, now func() time.Time) *negCache {
 
 // has reports whether id is remembered and not yet expired.
 func (n *negCache) has(id int64) bool {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	el, ok := n.until[id]
-	if !ok {
-		return false
-	}
-	if !n.now().Before(el.Value.(*negItem).expires) {
-		n.order.Remove(el)
-		delete(n.until, id)
-		return false
-	}
-	return true
+	_, ok := n.remaining(id)
+	return ok
 }
 
 // add remembers id for the cache's ttl.

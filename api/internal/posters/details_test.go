@@ -365,10 +365,14 @@ func TestDetailsNegativeCacheExpires(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	clock := func() time.Time { return now }
 	e := detailsEnv(t, setup{key: testKey, now: clock}, fellowship)
-	e.tmdb.setAPI(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "x", 500) })
+	e.tmdb.setAPI(func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) }) // lasting
 	decodeDetails(t, e.details("7"))
 	e.tmdb.setAPI(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, fellowship("1007")) })
-	now = now.Add(negativeTTL + time.Second)
+	now = now.Add(negativeTTL - time.Second)
+	if d := decodeDetails(t, e.details("7")); !isEmptyDetails(d, 7) {
+		t.Fatal("asked TMDB again within negativeTTL")
+	}
+	now = now.Add(2 * time.Second)
 	if d := decodeDetails(t, e.details("7")); d.Overview == nil {
 		t.Fatal("still empty after the negative TTL")
 	}
