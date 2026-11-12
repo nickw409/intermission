@@ -50,6 +50,16 @@ Planning is complete; no code exists yet. Wave 0 (the spine) is next.
     - gitleaks runs in CI and as a pre-commit hook.
     - If a secret is ever committed, stop and tell the owner: rotate it first, then rewrite history.
 12. **No public exposure without the audit.** Never run or script `tailscale funnel` before the Wave 3b security audit has passed and the owner has signed off.
+13. **Never change the branch of the shared checkout.**
+    - The owner and every agent work in the same checkout at the same time.
+    - Never switch its branch: no `git checkout <branch>`, `git switch`, `git checkout -b`, and no `git rebase`, `git reset` or `git stash` that moves its `HEAD` or rewrites its working tree.
+    - If a task needs its own branch, create it in your own worktree (`git worktree add`), never in the shared checkout.
+    - If an operation would need a branch switch, stop and ask.
+14. **Merging PRs.**
+    - Agents may merge a PR once every CI check passes on its current head commit. Never use `--admin`, `--auto`, or any other way around a failing or pending check.
+    - Merge with `gh pr merge <n> --merge` (merge commits, never squash or rebase) and without `--delete-branch`.
+    - If the branch is behind `main`, merge `origin/main` into it inside its worktree, push, and wait for CI on the new head. Never rebase or force-push a pushed branch.
+    - Delete a branch only after `gh pr view <n> --json state` reports `MERGED`. Deleting the remote branch of an open PR closes the PR. Never chain cleanup after `gh pr merge` with `;`. Check the state first, then remove the worktree, the local branch and the remote branch.
 
 ## Layout
 
