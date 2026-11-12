@@ -385,6 +385,7 @@ TEST_CASE("knn: config defaults and validation", "[knn]") {
   bad(Config{{"mean_damping", -0.5}});
   bad(Config{{"mean_damping", "5"}});
   bad(Config{{"mean_damping", true}});
+  bad(Config{{"mean_damping", 2e6}});  // above the 1e6 cap (beta * g must not overflow)
 }
 
 // With no scoring flags the model uses the top-N form: positive neighbours only, no division by
@@ -455,7 +456,7 @@ TEST_CASE("knn: shipped configs select the top-N form", "[knn]") {
 // ---- gate 3 ---------------------------------------------------------------------------------------
 TEST_CASE("knn gate 3: fold_in + score equals the batch path bit for bit (tiny fixture)", "[knn][gate]") {
   const auto ds = recs::load_movielens(recs::testing::tiny_dir(), "tiny");
-  std::vector<Config> configs;  // two neighbourhood settings x the four scoring modes
+  std::vector<Config> configs;  // three neighbourhood/damping settings x the four scoring modes
   for (const auto& base : {Config{{"neighbors", 5}, {"shrinkage", 2.0}, {"min_support", 2}, {"mean_damping", 0.0}},
                            Config{{"neighbors", 100}, {"shrinkage", 100.0}, {"min_support", 1}},
                            Config{{"neighbors", 5}, {"shrinkage", 2.0}, {"min_support", 2}, {"mean_damping", 3.0}}}) {
@@ -750,6 +751,20 @@ TEST_CASE("knn: load rejects a corrupt or truncated file", "[knn]") {
   rejects(put_u64(bytes, 34, std::bit_cast<std::uint64_t>(-1.0)), "mean_damping");  // negative beta
   rejects(put_u64(bytes, 42, std::bit_cast<std::uint64_t>(std::numeric_limits<double>::infinity())),
           "bad global mean");
+  rejects(put_u64(bytes, 34, std::bit_cast<std::uint64_t>(std::numeric_limits<double>::quiet_NaN())),
+          "mean_damping");
+  rejects(put_u64(bytes, 34, std::bit_cast<std::uint64_t>(2e6)), "mean_damping");  // above the cap
+  {
+    // With beta > 0 the global mean must be a rating mean, in [0.5, 5].
+    const std::string damped = put_u64(bytes, 34, std::bit_cast<std::uint64_t>(20.0));
+    rejects(put_u64(damped, 42, std::bit_cast<std::uint64_t>(7.0)), "bad global mean");
+    rejects(put_u64(damped, 42, std::bit_cast<std::uint64_t>(0.1)), "bad global mean");
+    rejects(put_u64(damped, 42, std::bit_cast<std::uint64_t>(1e300)), "bad global mean");
+    rejects(put_u64(damped, 42, std::bit_cast<std::uint64_t>(std::numeric_limits<double>::quiet_NaN())),
+            "bad global mean");
+    write(put_u64(damped, 42, std::bit_cast<std::uint64_t>(3.5)));
+    CHECK_NOTHROW(recs::make_item_knn()->load(dir.path()));
+  }
   rejects(put_u32(bytes, 8, 1), "unsupported format version");
   rejects(put_u32(bytes, 8, 4), "unsupported format version");
   {
@@ -799,6 +814,26 @@ TEST_CASE("knn: mean_damping gives an all-equal-ratings user a ranking", "[knn]"
   CHECK_THAT(m->fold_in({}).mean, WithinAbs(39.0 / 11.0, 1e-12));
   // Damping only moves the scoring mean: the neighbour lists are the same.
   for (ItemIdx i = 0; i < 4; ++i) CHECK(neighbour_list(*m, i) == neighbour_list(*m0, i));
+}
+
+// The other side (documented in item_knn.cpp): equal ratings BELOW g are read as dislikes.
+// Hand fixture, beta = 2, user B = 3, D = 3: mu~ = (6 + 2 * 39/11) / 4 = 36/11, c_B = -3/11,
+//   score(C) = s'_CB * (-3/11) = -0.4714045207910316 * 3 / 11 = -0.12856486930664498.
+TEST_CASE("knn: mean_damping reads all-equal ratings below the global mean as dislikes", "[knn]") {
+  const Config damped{{"neighbors", 2}, {"shrinkage", 1.0}, {"min_support", 2}, {"mean_damping", 2.0}};
+  const auto m = fit_knn(hand_dataset(), damped);
+  const auto st = m->fold_in(std::vector<Rating>{{3, 3.0f, 0}, {1, 3.0f, 0}});
+  CHECK_THAT(st.mean, WithinAbs(36.0 / 11.0, 1e-12));
+  const auto s = score_of(*m, st);
+  CHECK_THAT(s[2], WithinAbs(-0.12856486930664498, 1e-6));
+  CHECK(m->explain(st, 2).because.empty());  // no positive term to cite
+}
+
+TEST_CASE("knn: mean_damping refuses training ratings outside [0.5, 5]", "[knn]") {
+  std::vector<Triplet> t = {{0, 0, 9.0f, 1}, {0, 1, 8.0f, 2}, {1, 0, 9.0f, 1}, {1, 1, 7.0f, 2}};
+  const auto ds = recs::make_dataset("off-scale", 2, 2, std::move(t));
+  CHECK_THROWS_AS(fit_knn(ds, Config{{"min_support", 1}, {"mean_damping", 5.0}}), std::invalid_argument);
+  CHECK_NOTHROW(fit_knn(ds, Config{{"min_support", 1}, {"mean_damping", 0.0}}));
 }
 
 // On a larger fixture: an all-5 user with the plain mean gets 0 for every scorable item, so the

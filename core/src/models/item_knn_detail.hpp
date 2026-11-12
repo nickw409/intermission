@@ -23,7 +23,7 @@ struct Params {
 
 /// Reads a knn config, filling defaults for missing keys. Throws std::invalid_argument on an
 /// unknown key, a wrong type (including a non-bool normalize/positive_only), neighbors == 0,
-/// min_support == 0, or a negative/non-finite shrinkage or mean_damping.
+/// min_support == 0, a negative/non-finite shrinkage, or a mean_damping outside [0, 1e6].
 Params parse_config(const Config& cfg);
 Config to_config(const Params& p);
 

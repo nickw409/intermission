@@ -64,7 +64,8 @@
 //   stronger for top-N recommendation, and Deshpande and Karypis (2004) rank by plain similarity
 //   sums. Our own numbers agree (docs/phase-1.md): on ml-32m, form (2) with the spec's starting
 //   values scores NDCG@10 0.0039, well below the rating-count baseline's 0.0440, while form (1)
-//   with positive neighbours and validation-tuned M and lambda scores 0.0726. Form (2) stays as a
+//   with positive neighbours and validation-tuned M and lambda scores 0.0726 (plain mean; 0.0738 with
+//   the damped mean below). Form (2) stays as a
 //   config option so the two can be compared.
 //
 //   Tuning note: with form (1) the best shrinkage is large (lambda = 30,000 on ml-32m), so s' is
@@ -85,6 +86,10 @@
 //
 //   A 5-star-only user then has c_uj = 5 - mu~_u > 0, and the score ranks by summed similarity to
 //   the movies they rated. For a training user with hundreds of ratings mu~_u is nearly mu_u.
+//   The other side of this: a user whose ratings are all equal and BELOW g (a few movies, all 3
+//   stars) has c_uj < 0 everywhere, so every score is negative and the items most similar to what
+//   they rated rank last. The model reads "everything you rated was below average" as dislikes and
+//   ranks away from them. (With the plain mean the same user got all-zero scores, i.e. no ranking.)
 //   Only scoring (and explanations) use mu~; the similarities keep the plain mean, which is what
 //   adjusted cosine is defined with. beta = 0 is the plain mean.
 //
@@ -159,6 +164,9 @@ namespace item_knn_detail {
 
 namespace {
 
+// Upper bound on beta: far above any useful value, and small enough that beta * g cannot overflow.
+constexpr double kMaxMeanDamping = 1e6;
+
 std::uint32_t read_count(const Config& v, const char* key, std::uint32_t min_value) {
   if (!v.is_number_integer()) throw std::invalid_argument(std::string("knn: '") + key + "' must be an integer");
   if (v.is_number_unsigned()) {
@@ -193,8 +201,8 @@ Params parse_config(const Config& cfg) {
     } else if (key == "mean_damping") {
       if (!value.is_number()) throw std::invalid_argument("knn: 'mean_damping' must be a number");
       p.mean_damping = value.get<double>();
-      if (!std::isfinite(p.mean_damping) || p.mean_damping < 0.0) {
-        throw std::invalid_argument("knn: 'mean_damping' must be finite and >= 0");
+      if (!(p.mean_damping >= 0.0 && p.mean_damping <= kMaxMeanDamping)) {  // also rejects NaN
+        throw std::invalid_argument("knn: 'mean_damping' must be in [0, 1e6]");
       }
     } else if (key == "normalize" || key == "positive_only") {
       if (!value.is_boolean()) throw std::invalid_argument("knn: '" + key + "' must be true or false");
@@ -224,26 +232,33 @@ using item_knn_detail::Params;
 
 constexpr float kCannotScore = -std::numeric_limits<float>::infinity();
 
-/// mu_u: the plain mean of a user's ratings, summed in double in the order given. Both fold_in()
-/// and fit() call this with the values in ascending item order, which is what makes the fold-in
-/// and batch paths bit-identical.
-double user_mean(std::span<const float> values_by_item) {
-  if (values_by_item.empty()) return 0.0;
+/// Sum of the values in double, in the order given. Both fold_in() and fit() pass a user's values
+/// in ascending item order, which is what makes the fold-in and batch paths bit-identical.
+double sum_in_order(std::span<const float> values) {
   double sum = 0.0;
-  for (float v : values_by_item) sum += static_cast<double>(v);
-  return sum / static_cast<double>(values_by_item.size());
+  for (float v : values) sum += static_cast<double>(v);
+  return sum;
 }
 
-/// The scoring mean: mu_u pulled towards the training set's global mean g by beta pseudo-ratings,
-///   (sum r + beta g) / (n + beta).
-/// beta = 0 is the plain mean. Summed in double in the order given (ascending item order on both
-/// the fold-in and the batch path, so the two stay bit-identical).
+/// mu_u: the plain mean of a user's ratings (0 for no ratings). Used by the similarities.
+double user_mean(std::span<const float> values_by_item) {
+  if (values_by_item.empty()) return 0.0;
+  return sum_in_order(values_by_item) / static_cast<double>(values_by_item.size());
+}
+
+/// The scoring mean mu~_u: mu_u pulled towards the training set's global mean g by beta
+/// pseudo-ratings, (sum r + beta g) / (n + beta). beta = 0 is the plain mean (handled by
+/// user_mean, which also avoids 0 / 0 for a user with no ratings).
 double damped_mean(std::span<const float> values_by_item, double beta, double global_mean) {
   if (beta == 0.0) return user_mean(values_by_item);
-  double sum = 0.0;
-  for (float v : values_by_item) sum += static_cast<double>(v);
-  return (sum + beta * global_mean) / (static_cast<double>(values_by_item.size()) + beta);
+  return (sum_in_order(values_by_item) + beta * global_mean) / (static_cast<double>(values_by_item.size()) + beta);
 }
+
+// Ratings are in [0.5, 5] (recs/types.hpp), so g, a mean of ratings, is in that range too; load()
+// rejects a file outside it (the slack only absorbs rounding). With beta capped at
+// kMaxMeanDamping, mu~ stays in the rating range and every score stays finite.
+constexpr double kMinRating = 0.5, kMaxRating = 5.0, kMeanSlack = 1e-9;
+bool valid_global_mean(double g) { return g >= kMinRating - kMeanSlack && g <= kMaxRating + kMeanSlack; }
 
 /// A light CSR (no timestamps): rows -> (column, raw rating).
 struct Rows {
@@ -296,7 +311,12 @@ Prepared prepare(const Dataset& train, const Params& p) {
   for (std::uint32_t i = 0; i < pr.n_items; ++i) pr.eligible[i] = I.row_size(i) >= p.min_support ? 1 : 0;
   pr.user_mean.resize(U.n_rows);
   for (std::uint32_t u = 0; u < U.n_rows; ++u) pr.user_mean[u] = user_mean(U.row_values(u));
-  pr.global_mean = user_mean(U.values);
+  // g for the damped scoring mean. An empty training set has no mean; any valid value will do,
+  // since no item can be scored then.
+  pr.global_mean = U.values.empty() ? (kMinRating + kMaxRating) / 2 : user_mean(U.values);
+  if (p.mean_damping > 0.0 && !valid_global_mean(pr.global_mean)) {
+    throw std::invalid_argument("knn: training ratings are outside [0.5, 5], so mean_damping cannot be used");
+  }
   pr.by_user = filter_columns(U, [&](std::uint32_t item) { return pr.eligible[item] != 0; });
   // by_item: keep every column (user) but only the rows of eligible items.
   pr.by_item.indptr.reserve(static_cast<std::size_t>(pr.n_items) + 1);
@@ -585,7 +605,7 @@ class ItemKnn final : public Model {
 
   // File layout (all little-endian):
   //   char[8]  magic "RECSKNN1"
-  //   u32      format version (kFormatVersion, currently 2)
+  //   u32      format version (kFormatVersion, currently 3)
   //   u32      n_items
   //   u32      neighbors      u32 min_support      f64 shrinkage
   //   u8       normalize (0/1)  u8 positive_only (0/1)
@@ -645,6 +665,8 @@ class ItemKnn final : public Model {
     if (version >= 3) {
       p.mean_damping = r.f64();
       global_mean = r.f64();
+      // g is only used when beta > 0; a model fitted with beta = 0 still stores the data's mean.
+      if (p.mean_damping > 0.0 && !valid_global_mean(global_mean)) throw std::runtime_error("knn: bad global mean");
       if (!std::isfinite(global_mean)) throw std::runtime_error("knn: bad global mean");
     }
     item_knn_detail::parse_config(item_knn_detail::to_config(p));  // same validation as fit()

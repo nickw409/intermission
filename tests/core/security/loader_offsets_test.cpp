@@ -68,6 +68,30 @@ TEST_CASE("SA2-1: knn load rejects non-monotonic row offsets before walking rows
   CHECK_THROWS_WITH(m->load(dir.path()), ContainsSubstring("row offsets: decrease at row 1"));
 }
 
+TEST_CASE("SA2-1: knn format 3 load rejects non-monotonic row offsets before walking rows", "[security][sa2]") {
+  TempDir dir("sa2-knn3");
+  Bytes b;
+  b.raw("RECSKNN1", 8);
+  b.u32(3);            // format version
+  b.u32(2);            // n_items
+  b.u32(0xFFFFFFFFu);  // neighbors
+  b.u32(1);            // min_support
+  b.f64(100.0);        // shrinkage
+  b.u8(1);             // normalize
+  b.u8(0);             // positive_only
+  b.f64(20.0);         // mean_damping
+  b.f64(3.5);          // global mean
+  b.u64(1);            // nnz
+  b.u64(0);            // row offsets [0, 3, 1]
+  b.u64(3);
+  b.u64(1);
+  b.u32(1);     // items[0]
+  b.f32(0.9f);  // sims[0]
+  dir.write("item_knn.bin", b.s);
+  auto m = recs::make_model("knn");
+  CHECK_THROWS_WITH(m->load(dir.path()), ContainsSubstring("row offsets: decrease at row 1"));
+}
+
 TEST_CASE("SA2-1: content load rejects non-monotonic row offsets before walking rows", "[security][sa2]") {
   TempDir dir("sa2-content");
   const auto cfg = recs::make_model("content")->config();
