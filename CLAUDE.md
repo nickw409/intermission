@@ -11,11 +11,19 @@ Intermission is a movie recommender built as a learning project. It has five rec
 
 ## Current status
 
-Planning is complete; no code exists yet. Wave 0 (the spine) is next.
+The site is live (as of 2026-11-12). It went public through Tailscale Funnel on 2026-11-10, after the owner signed off the Wave 3b security audit (`docs/security/audit-2026-11-10.md`).
 
 - **Phase mode: Pipelined** (approved by the owner on 2026-11-10; plan §2). Code for later phases may start early behind the frozen contracts. Merges to `main` and phase sign-offs still happen strictly in phase order.
+- **Phases:** Phase 0 is signed off (tag `phase-0-done`). Phase 1 (`docs/phase-1.md`) is not signed off yet, and `docs/phase-2.md` is not written.
 - **The repo is public** (`github.com/nickw409/intermission`).
-- **The site does not go public** until the Wave 3b pre-launch security audit passes and the owner signs off (plan §5, Wave 3).
+- **Production** serves ml-32m artifacts trained with `recs-train train ... --set-current`. `recs-train retrain` is still a stub, so the model is only retrained by hand. A full ml-32m train took 37 min on 2026-11-12.
+- **Deploys are manual:** `deploy/release.sh <sha>` on the host (`deploy/runbooks/deploy.md`); `deploy/release.sh --list` shows what is live. Merging to `main` deploys nothing. Since PR #68, the release first checks that the new recs-model can load the current artifact and stops if a retrain is needed ("Retrain detection" in the runbook).
+- **Alerts are not delivered anywhere yet.** Prometheus rules fire only at `127.0.0.1:9090/alerts` (`deploy/runbooks/monitoring.md`, "Known gaps").
+- **Open plans:**
+  - `docs/plans/2026-11-12-automated-deploy.md`: alert delivery, then an auto-deploy timer and auto-retrain. Steps 1–4 need owner decisions first.
+  - `docs/plans/2026-11-12-new-releases.md`
+  - `docs/plans/2026-11-11-feature-backlog.md`
+  - Security follow-ups still open: `docs/security/audit-2026-11-10.md` §4.
 
 ## Non-negotiable rules
 
@@ -78,7 +86,7 @@ data/           gitignored: raw/, artifacts/, reports/, exports/, app.db, backup
 
 ## Commands
 
-Build, test and contract commands work now. `ingest`, `train`, `eval` and `compare` land in Wave 1.
+All of these work. Production runs the same commands through Docker (`deploy/runbooks/deploy.md`).
 
 ```bash
 tools/download_movielens.sh ml-latest-small        # also: ml-32m (large, run in background)
