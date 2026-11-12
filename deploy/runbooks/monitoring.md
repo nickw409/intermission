@@ -35,7 +35,7 @@ monitoring volume is restored from somewhere else.
 | Target | What | Alerts |
 | --- | --- | --- |
 | `api:8081/metrics` (internal network) | request rate/errors/latency per route, login failures, model-client errors | `SiteDown`, `High5xxRate`, `RecommendP99High` |
-| `node-exporter:9100` (internal `metrics` network) | the data filesystem (only `data/` is mounted); `data/ops/textfile/*.prom` from the nightly jobs and the drill | `DiskAbove85Percent`, `JobFailed`, `NightlyJobStale`, `RestoreDrillStale` |
+| `node-exporter:9100` (internal `metrics` network) | the data filesystem (only `data/` is mounted); `data/ops/textfile/*.prom` from the nightly jobs, the drill and `release.sh` | `DiskAbove85Percent`, `JobFailed`, `NightlyJobStale`, `RestoreDrillStale`, `RetrainRequired`, `RetrainRecommended` |
 
 Rules: `deploy/alerts/intermission.yml`, checked in CI with `promtool check rules` and
 unit-tested with `promtool test rules deploy/tests/alerts.test.yml`. Firing alerts show at
