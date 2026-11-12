@@ -17,6 +17,7 @@ import (
 
 	"github.com/nickw409/intermission/api/internal/apperr"
 	"github.com/nickw409/intermission/api/internal/moviecache"
+	"github.com/rivo/uniseg"
 )
 
 // How movie details are served (GET /api/movies/{movieId}/details):
@@ -304,7 +305,8 @@ func clean(id int64, raw tmdbDetails) MovieDetails {
 // dropped, except the zero-width joiner and non-joiner that some scripts
 // and emoji need. Runs of combining marks are capped at maxCombiningRun.
 // Tabs become spaces; newlines are kept (as \n) only if multiline. Text
-// longer than max runes is cut to max runes, the last being an ellipsis.
+// longer than max runes is cut at a grapheme cluster boundary to at most
+// max runes, the last being an ellipsis.
 func cleanText(s *string, max int, multiline bool) *string {
 	if s == nil {
 		return nil
@@ -339,10 +341,28 @@ func cleanText(s *string, max int, multiline bool) *string {
 		return nil
 	}
 	if utf8.RuneCountInString(out) > max {
-		runes := []rune(out)[:max-1]
-		out = strings.TrimRightFunc(string(runes), unicode.IsSpace) + "…"
+		out = strings.TrimRightFunc(graphemePrefix(out, max-1), unicode.IsSpace) + "…"
 	}
 	return &out
+}
+
+// graphemePrefix returns the longest prefix of s that is made of whole
+// grapheme clusters (what a reader sees as one character, Unicode UAX #29)
+// and has at most n runes. Cutting at a rune could split an emoji ZWJ
+// sequence, a flag's pair of regional indicators, a skin-tone modifier or
+// variation selector from its emoji, or an accent from its letter. If the
+// first cluster alone is longer than n runes, the prefix is empty.
+func graphemePrefix(s string, n int) string {
+	end, runes, state := 0, 0, -1
+	for rest := s; rest != ""; {
+		var cluster string
+		cluster, rest, _, state = uniseg.FirstGraphemeClusterInString(rest, state)
+		if runes += utf8.RuneCountInString(cluster); runes > n {
+			break
+		}
+		end += len(cluster)
+	}
+	return s[:end]
 }
 
 const (

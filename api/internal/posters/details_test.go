@@ -586,3 +586,40 @@ func TestDetailsCleaningEdgeCases(t *testing.T) {
 		t.Errorf("boundary values dropped: %+v", d2)
 	}
 }
+
+// Text over the cap is cut at a grapheme cluster boundary (UAX #29), so
+// the "…" never lands inside an emoji sequence, a flag or a letter with
+// its accent. Each case puts a multi-rune cluster across the point where
+// a cut at max-1 runes would fall.
+func TestCleanTextTruncatesOnGraphemeBoundaries(t *testing.T) {
+	const max = 6 // keeps at most 5 runes, then the ellipsis
+	tests := []struct {
+		name, in, want string
+	}{
+		{"plain ASCII", "abcdefgh", "abcde…"},
+		{"ZWJ family emoji split", "abc\U0001F468\u200d\U0001F469\u200d\U0001F467xyz", "abc…"},
+		{"flag split", "abcd\U0001F1FA\U0001F1F8xyz", "abcd…"},
+		{"flag fits", "abc\U0001F1FA\U0001F1F8xyz", "abc\U0001F1FA\U0001F1F8…"},
+		{"skin tone split", "abcd\U0001F44D\U0001F3FDxyz", "abcd…"},
+		{"variation selector split", "abcd\u2764\ufe0fxyz", "abcd…"},
+		{"combining accent split", "abcde\u0301xyz", "abcd…"},
+		{"combining accent fits", "abce\u0301xyz", "abce\u0301…"},
+		{"space before the cut trimmed", "ab  e\u0301xyz", "ab…"},
+		// One cluster longer than the cap (ZWJ is not capped like the
+		// combining marks are): nothing fits, so only the ellipsis is left.
+		{"cluster longer than the cap", "a" + strings.Repeat("\u200d", 10), "…"},
+		{"short text untouched", "e\u0301\U0001F1FA\U0001F1F8", "e\u0301\U0001F1FA\U0001F1F8"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			in := tc.in
+			got := cleanText(&in, max, false)
+			if got == nil || *got != tc.want {
+				t.Fatalf("cleanText(%+q, %d) = %+q, want %+q", tc.in, max, deref(got), tc.want)
+			}
+			if n := utf8.RuneCountInString(*got); n > max {
+				t.Errorf("%d runes, over the cap of %d", n, max)
+			}
+		})
+	}
+}
