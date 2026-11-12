@@ -12,9 +12,10 @@ import (
 // A cached answer is only correct for the exact inputs that produced it, so
 // the key holds every one of them:
 //
-//   - userID and ratingsVersion: the user's ratings. Every rating write bumps
-//     users.ratings_version in the same transaction, so new ratings mean a
-//     new key and the old entry simply ages out.
+//   - userID and ratingsVersion: the user's ratings and "not interested"
+//     movies. Every rating write and every new "not interested" bumps
+//     users.ratings_version in the same transaction, so a change means a new
+//     key and the old entry simply ages out.
 //   - userCreated: users.created_at, which never changes for an account.
 //     The real guards against one account being served another's answer
 //     are that IDs are never reused (migration 0003) and that deleting an

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"strconv"
 	"time"
 
 	"github.com/nickw409/intermission/api/internal/app"
@@ -19,10 +20,8 @@ import (
 	"github.com/nickw409/intermission/api/internal/reqid"
 )
 
-// MaxNotInterested is how many "not interested" movies a user keeps. With the
-// 5,000-rating cap, the recommend exclude list stays within recs-model's
-// 10,000 limit.
-const MaxNotInterested = 5000
+// MaxNotInterested is how many "not interested" movies a user keeps.
+const MaxNotInterested = db.MaxNotInterested
 
 // Actions in the FeedbackRequest schema.
 const (
@@ -49,7 +48,10 @@ type request struct {
 
 // Register adds this package's routes to mux. Called once from main.go.
 //
-//	POST /api/feedback  (session, 60/min per session)
+//	POST /api/feedback  (session, 60/min per session and per user)
+//
+// The per-user bucket has the same shape as the per-session one, so more
+// sessions on one account don't add up to more writes.
 func Register(mux *http.ServeMux, d *app.Deps) {
 	register(mux, d, time.Now)
 }
@@ -67,9 +69,25 @@ func register(mux *http.ServeMux, d *app.Deps, now func() time.Time) {
 	}
 	h := &handler{db: d.DB, logger: logger, now: now}
 	session := auth.RequireSession(d)
-	limit := ratelimit.Middleware(ratelimit.NewKeyed(ratelimit.FeedbackPerSession), auth.SessionKey)
-	mux.Handle("POST /api/feedback", session(limit(http.HandlerFunc(h.post))))
+	clock := ratelimit.WithClock(now)
+	perSession := ratelimit.Middleware(ratelimit.NewKeyed(ratelimit.FeedbackPerSession, clock), auth.SessionKey)
+	userBuckets := ratelimit.NewKeyed(ratelimit.FeedbackPerSession, clock)
+	perUser := ratelimit.Middleware(userBuckets, userKey)
+	// A deleted account's bucket goes with it (its IDs are never reused).
+	d.DB.OnUserDeleted(func(uid int64) { userBuckets.Retire(userBucket(uid)) })
+	mux.Handle("POST /api/feedback", session(perSession(perUser(http.HandlerFunc(h.post)))))
 }
+
+// userKey is the per-user rate-limit key.
+func userKey(r *http.Request) (string, bool) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		return "", false
+	}
+	return userBucket(uid), true
+}
+
+func userBucket(uid int64) string { return "feedback-user:" + strconv.FormatInt(uid, 10) }
 
 // parse decodes and validates a FeedbackRequest body. Every error is an
 // *apperr.Error (400 invalid_json or bad_request). The action is checked
@@ -82,7 +100,7 @@ func parse(body []byte) (movieID int64, model modelclient.ModelName, action stri
 	if req.Action == nil || !slices.Contains([]string{ActionImpression, ActionClick, ActionNotInterested}, *req.Action) {
 		return 0, "", "", errBadAction
 	}
-	if req.MovieID == nil || *req.MovieID < 1 || *req.MovieID > 2147483647 {
+	if req.MovieID == nil || *req.MovieID < 1 || *req.MovieID > modelclient.MaxMovieID {
 		return 0, "", "", errBadMovieID
 	}
 	if req.Model == nil || !slices.Contains(modelclient.AllModels, modelclient.ModelName(*req.Model)) {
@@ -112,7 +130,7 @@ func (h *handler) post(w http.ResponseWriter, r *http.Request) {
 	if action == ActionNotInterested {
 		if err := h.notInterested(ctx, uid, movieID, model, h.now().Unix()); err != nil {
 			var ae *apperr.Error
-			if !errors.As(err, &ae) {
+			if !errors.As(err, &ae) && !errors.Is(err, context.Canceled) {
 				h.logger.ErrorContext(ctx, "feedback: save failed", "request_id", reqid.FromContext(ctx), "err", err)
 			}
 			apperr.Write(w, err)
@@ -134,13 +152,13 @@ func (h *handler) notInterested(ctx context.Context, uid, movieID int64, model m
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var exists int
+	var exists bool
 	if err := tx.QueryRowContext(ctx,
-		"SELECT count(*) FROM feedback WHERE user_id = ? AND movie_id = ? AND action = 'not_interested'",
+		"SELECT EXISTS (SELECT 1 FROM feedback WHERE user_id = ? AND movie_id = ? AND action = 'not_interested')",
 		uid, movieID).Scan(&exists); err != nil {
 		return err
 	}
-	if exists > 0 {
+	if exists {
 		return nil
 	}
 	var n int

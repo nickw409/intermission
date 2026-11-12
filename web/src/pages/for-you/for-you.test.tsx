@@ -116,6 +116,14 @@ describe('For you page', () => {
     const spy = vi.spyOn(feedbackHook, 'notInterested');
     await openPage();
     const sent = recordRequests('/api/feedback', 'POST');
+    // Hold the save open: the card must be gone before the server answers.
+    const { wait, release } = gate();
+    server.use(
+      http.post('/api/feedback', async () => {
+        await wait;
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
     await user.click(within(card(LOTR)).getByRole('button', { name: `Not interested in ${LOTR}` }));
     expect(screen.queryByRole('heading', { level: 2, name: LOTR })).not.toBeInTheDocument();
     expect(screen.getAllByRole('article')).toHaveLength(2);
@@ -125,8 +133,11 @@ describe('For you page', () => {
     expect(sent[0]!.headers.get('X-Requested-With')).toBe('recs');
     // Focus does not get lost when the card disappears.
     expect(document.activeElement).not.toBe(document.body);
-    // Saved: the card stays hidden and no error appears.
-    await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
+    // Saved: once the request has finished, the card stays hidden and no error appears.
+    release();
+    await act(async () => {
+      await spy.mock.results[0]!.value;
+    });
     expect(screen.queryByRole('heading', { level: 2, name: LOTR })).not.toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     spy.mockRestore();
@@ -147,6 +158,16 @@ describe('For you page', () => {
     expect(screen.queryByRole('heading', { level: 2, name: LOTR })).not.toBeInTheDocument();
     await waitFor(() => expect(screen.getAllByRole('article')).toHaveLength(2));
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('drops a "Not interested" error when the model changes', async () => {
+    const user = userEvent.setup();
+    server.use(http.post('/api/feedback', () => errorBody('internal', 500)));
+    await openPage();
+    await user.click(within(card(LOTR)).getByRole('button', { name: `Not interested in ${LOTR}` }));
+    await screen.findByRole('alert');
+    await user.selectOptions(screen.getByRole('combobox', { name: /model/i }), 'knn');
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
   });
 
   it('updates a rating optimistically and sends it', async () => {

@@ -55,8 +55,15 @@ export function RecommendationList({
   const { state, reload } = useRecommendations(model, genresKey);
   const ratings = useOptimisticRatings();
   const [hidden, setHidden] = useState<ReadonlySet<number>>(new Set());
-  // Movies whose "Not interested" could not be saved: shown again, with an error.
+  // Movies whose "Not interested" could not be saved: shown again, with an error. The error
+  // belongs to the list it happened on, so a new model or filter starts without it.
   const [failed, setFailed] = useState<ReadonlySet<number>>(new Set());
+  const listKey = `${model}?${genresKey}`;
+  const [failedFor, setFailedFor] = useState(listKey);
+  if (failedFor !== listKey) {
+    setFailedFor(listKey);
+    setFailed(new Set());
+  }
   const hide = (movieId: number) => {
     setHidden((current) => new Set(current).add(movieId));
     setFailed((current) => {

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/nickw409/intermission/api/internal/db"
+	"github.com/nickw409/intermission/api/internal/feedback"
 	"github.com/nickw409/intermission/api/internal/modelclient"
 	"github.com/nickw409/intermission/api/internal/modelclient/fake"
 	"github.com/nickw409/intermission/api/internal/moviecache/cachetest"
@@ -21,7 +22,8 @@ func dismiss(t *testing.T, d *db.DB, uid, movie int64) {
 	if _, err := tx.Exec("INSERT INTO feedback (user_id, movie_id, model, action, ts) VALUES (?, ?, 'als', 'not_interested', 1)", uid, movie); err != nil {
 		t.Fatal(err)
 	}
-	// What POST /api/feedback does in the same transaction.
+	// What POST /api/feedback does in the same transaction (the end-to-end test
+// below goes through the real handler).
 	if _, err := tx.Exec("UPDATE users SET ratings_version = ratings_version + 1 WHERE id = ?", uid); err != nil {
 		t.Fatal(err)
 	}
@@ -54,8 +56,11 @@ func lastExclude(t *testing.T, e *cachetest.Env) []int64 {
 	return out
 }
 
+// End to end through the real POST /api/feedback handler: the dismissed
+// movies are excluded, newest first after the rated ones, and the cached list
+// from before is not reused.
 func TestNotInterestedMoviesAreExcluded(t *testing.T) {
-	e := newEnv(t, nil)
+	e := cachetest.NewEnv(t, nil, Register, feedback.Register)
 	uid, tok := cachetest.NewUser(t, e.DB, "alice")
 	seedAlice(t, e.DB, uid) // rated 260, 2571, 296, 1, 318
 	if rec := get(e, "/api/recommend?model=als", tok); rec.Code != 200 {
@@ -65,8 +70,11 @@ func TestNotInterestedMoviesAreExcluded(t *testing.T) {
 		t.Fatalf("exclude before dismissing: %v", got)
 	}
 
-	dismiss(t, e.DB, uid, 4993)
-	dismiss(t, e.DB, uid, 260) // already rated: listed once
+	for _, movie := range []string{"4993", "260"} { // 260 is already rated: listed once
+		if rec := e.Do("POST", "/api/feedback", `{"movieId":`+movie+`,"model":"als","action":"not_interested"}`, tok); rec.Code != 204 {
+			t.Fatalf("feedback %s: %d %s", movie, rec.Code, rec.Body.String())
+		}
+	}
 	e.Fake.ResetCalls()
 	// The version bump means the cached list is not reused.
 	if rec := get(e, "/api/recommend?model=als", tok); rec.Code != 200 {

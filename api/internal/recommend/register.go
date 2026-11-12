@@ -17,7 +17,6 @@ import (
 	"github.com/nickw409/intermission/api/internal/apperr"
 	"github.com/nickw409/intermission/api/internal/auth"
 	"github.com/nickw409/intermission/api/internal/db"
-	"github.com/nickw409/intermission/api/internal/feedback"
 	"github.com/nickw409/intermission/api/internal/modelclient"
 	"github.com/nickw409/intermission/api/internal/moviecache"
 	"github.com/nickw409/intermission/api/internal/ratelimit"
@@ -552,23 +551,16 @@ func (h *handler) loadRatings(ctx context.Context, uid int64) (userRatings, erro
 	for _, id := range u.ids {
 		rated[id] = true
 	}
-	dismissed, err := tx.QueryContext(ctx,
-		"SELECT DISTINCT movie_id FROM feedback WHERE user_id = ? AND action = 'not_interested' ORDER BY movie_id LIMIT ?",
-		uid, feedback.MaxNotInterested)
+	dismissed, err := db.NotInterestedMovies(ctx, tx, uid)
 	if err != nil {
 		return u, err
 	}
-	defer dismissed.Close()
-	for dismissed.Next() {
-		var id int64
-		if err := dismissed.Scan(&id); err != nil {
-			return u, err
-		}
+	for _, id := range dismissed {
 		if !rated[id] {
 			u.ids = append(u.ids, id)
 		}
 	}
-	return u, dismissed.Err()
+	return u, nil
 }
 
 func joinModels(models []modelclient.ModelName) string {
