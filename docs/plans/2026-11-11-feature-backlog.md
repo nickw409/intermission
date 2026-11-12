@@ -26,6 +26,9 @@ audit and phase-order sign-off before it merges. Notes below are first thoughts,
 
 ## 3. Richer movie page
 
+**Built 2026-11-12** (branch `feat/movie-details`): `GET /api/movies/{id}/details` with plot summary,
+tagline, runtime, release date, directors and cast. The notes below are the original idea.
+
 - Overview/description, runtime, release date, cast/crew highlights, from TMDB (MovieLens
   `links.csv` already maps movieId → tmdbId; recs-api already calls TMDB for posters with the key
   from the environment). Cache responses on disk like posters, with a TTL, so TMDB is not called

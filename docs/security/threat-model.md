@@ -18,7 +18,7 @@ Written 2026-11-10 before the Wave 3b audit; the audit passes (SA1–SA6) test a
 ## Entry points
 - **Public (via Funnel → Caddy :8080):** every `/api/*` route in `contracts/public.yaml`, `/healthz`, the static SPA.
   Unauthenticated: signup, login, movies search/get/similar, models, reports list/get, posters, healthz.
-- **Outbound:** recs-api → `api.themoviedb.org` and `image.tmdb.org` (posters) only.
+- **Outbound:** recs-api → `api.themoviedb.org` and `image.tmdb.org` (posters, movie details) only.
 - **Internal:** recs-api → recs-model over the Unix socket `model.sock` (group `recs`, 0660).
 - **Files:** recs-api writes `data/db/`, `data/exports/`, `data/posters/`; recs-train reads exports + raw data and
   writes `data/artifacts/`, `data/reports/`, `data/reports-private/`; recs-model reads artifacts (verified).
@@ -32,7 +32,7 @@ Written 2026-11-10 before the Wave 3b audit; the audit passes (SA1–SA6) test a
 3. recs-api → recs-model: recs-model re-validates everything (defense in depth) and never sees identities.
 4. recs-train → artifacts → recs-model: artifacts are hash-verified before use; CURRENT may not escape the root.
 5. recs-api → exports → recs-train: the export format is the only interface; no usernames cross it.
-6. recs-api → TMDB: response sizes and hosts constrained; the key never leaves recs-api.
+6. recs-api → TMDB: response sizes and hosts constrained; the key never leaves recs-api. Movie details text (overview, names) is untrusted: cleaned server-side and rendered as plain text. Accepted (LOW, 2026-11-12 delta audit): until per-IP limits exist, one crawler can spend the shared poster+details TMDB budget and churn the 64 MiB details cache; empty answers caused by our own limiter are sent no-store so they don't linger in browsers.
 
 ## Attacker goals and the controls that address them (verified in 3b)
 | Goal | Primary controls | Audit pass |

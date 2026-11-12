@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -100,12 +101,16 @@ type setup struct {
 	lookup   *ratelimit.Global // per-route limiter before the movie lookup
 	timeout  time.Duration
 	now      func() time.Time
+	dir      string // poster cache directory; default a new temporary one
 }
 
 func newEnv(t *testing.T, s setup) *env {
 	t.Helper()
 	f := newTMDB(t)
-	dir := filepath.Join(t.TempDir(), "posters")
+	dir := s.dir
+	if dir == "" {
+		dir = filepath.Join(t.TempDir(), "posters")
+	}
 	if s.maxBytes == 0 {
 		s.maxBytes = 1 << 20
 	}
@@ -311,7 +316,7 @@ func TestFailuresGivePlaceholder(t *testing.T) {
 			if !isPlaceholder(rec) {
 				t.Fatalf("%d %s %q", rec.Code, rec.Header().Get("Content-Type"), rec.Body.String()[:min(80, rec.Body.Len())])
 			}
-			if ents, _ := os.ReadDir(e.dir); len(ents) != 0 {
+			if ents := posterEntries(t, e.dir); len(ents) != 0 {
 				t.Fatalf("cached after failure: %v", ents)
 			}
 			checkNoKey(t, e, rec)
@@ -406,12 +411,19 @@ func TestGlobalUpstreamLimit(t *testing.T) {
 	}
 }
 
-func dirSize(t *testing.T, dir string) (int64, []string) {
+// posterEntries lists dir without the details cache's subdirectory.
+func posterEntries(t *testing.T, dir string) []os.DirEntry {
 	t.Helper()
 	ents, err := os.ReadDir(dir)
-	if err != nil {
+	if err != nil && !os.IsNotExist(err) {
 		t.Fatal(err)
 	}
+	return slices.DeleteFunc(ents, func(e os.DirEntry) bool { return e.IsDir() && e.Name() == "details" })
+}
+
+func dirSize(t *testing.T, dir string) (int64, []string) {
+	t.Helper()
+	ents := posterEntries(t, dir)
 	var total int64
 	var names []string
 	for _, e := range ents {

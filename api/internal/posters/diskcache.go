@@ -16,9 +16,10 @@ import (
 	"time"
 )
 
-// diskCache stores poster JPEGs as <dir>/<movieId>.jpg with a cap on their
-// total size, evicting the least recently used. File names come only from
-// the numeric movie ID (never from TMDB or the request path).
+// diskCache stores one file per movie as <dir>/<movieId><ext> (poster JPEGs,
+// or movie details as JSON) with a cap on their total size, evicting the
+// least recently used. File names come only from the numeric movie ID
+// (never from TMDB or the request path).
 //
 // The index (sizes and recency) lives in memory and is rebuilt from the
 // directory at startup, using modification times as the recency order;
@@ -36,6 +37,8 @@ import (
 type diskCache struct {
 	dir    string
 	max    int64
+	kind   fileKind
+	name   *regexp.Regexp // what a cache file's name looks like
 	logger *slog.Logger
 	broken bool // the directory can't be used; caching is off (set once)
 
@@ -50,15 +53,30 @@ type diskItem struct {
 	size int64
 }
 
-var cacheFileName = regexp.MustCompile(`^[1-9][0-9]{0,9}\.jpg$`)
+// fileKind is what one cache holds: the file extension, the largest file
+// it will read back, and a check that a file read back is intact.
+type fileKind struct {
+	ext     string
+	maxFile int64
+	valid   func([]byte) bool
+}
+
+// posterFiles are poster JPEGs.
+var posterFiles = fileKind{ext: ".jpg", maxFile: MaxImageBytes, valid: isJPEG}
 
 const tmpPrefix = ".tmp-"
 
+// newDiskCache returns a poster cache.
 func newDiskCache(dir string, max int64, logger *slog.Logger) *diskCache {
+	return newFileCache(dir, max, posterFiles, logger)
+}
+
+func newFileCache(dir string, max int64, kind fileKind, logger *slog.Logger) *diskCache {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	c := &diskCache{dir: dir, max: max, logger: logger, order: list.New(), entries: map[int64]*list.Element{}}
+	c := &diskCache{dir: dir, max: max, kind: kind, logger: logger, order: list.New(), entries: map[int64]*list.Element{},
+		name: regexp.MustCompile(`^[1-9][0-9]{0,9}` + regexp.QuoteMeta(kind.ext) + `$`)}
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		logger.Warn("posters: disk cache disabled", "err", err)
 		c.broken = true
@@ -82,14 +100,14 @@ func newDiskCache(dir string, max int64, logger *slog.Logger) *diskCache {
 			_ = os.Remove(filepath.Join(dir, name)) // left by a crash mid-write
 			continue
 		}
-		if !cacheFileName.MatchString(name) || !e.Type().IsRegular() {
+		if !c.name.MatchString(name) || !e.Type().IsRegular() {
 			continue
 		}
 		info, err := e.Info()
 		if err != nil {
 			continue
 		}
-		id, _ := strconv.ParseInt(strings.TrimSuffix(name, ".jpg"), 10, 64)
+		id, _ := strconv.ParseInt(strings.TrimSuffix(name, kind.ext), 10, 64)
 		files = append(files, found{id: id, size: info.Size(), mtime: info.ModTime()})
 	}
 	// Oldest first, each pushed to the front: the newest ends up in front.
@@ -106,10 +124,10 @@ func newDiskCache(dir string, max int64, logger *slog.Logger) *diskCache {
 }
 
 func (c *diskCache) path(id int64) string {
-	return filepath.Join(c.dir, strconv.FormatInt(id, 10)+".jpg")
+	return filepath.Join(c.dir, strconv.FormatInt(id, 10)+c.kind.ext)
 }
 
-// get returns the cached poster for id.
+// get returns the cached file for id.
 func (c *diskCache) get(id int64) ([]byte, bool) {
 	c.mu.Lock()
 	el, ok := c.entries[id]
@@ -118,11 +136,11 @@ func (c *diskCache) get(id int64) ([]byte, bool) {
 		return nil, false
 	}
 
-	b, err := readImage(c.path(id))
+	b, err := readCapped(c.path(id), c.kind.maxFile)
 
 	c.mu.Lock()
 	current := c.entries[id] == el
-	if err != nil || !isJPEG(b) {
+	if err != nil || !c.kind.valid(b) {
 		if current {
 			c.unindexLocked(el)
 		}
@@ -141,11 +159,11 @@ func (c *diskCache) get(id int64) ([]byte, bool) {
 	return b, true
 }
 
-// put stores a poster and evicts until the total fits the cap. A poster
-// bigger than the whole cap is not stored.
+// put stores a file and evicts until the total fits the cap. A file bigger
+// than the whole cap, or than get would read back, is not stored.
 func (c *diskCache) put(id int64, data []byte) {
 	size := int64(len(data))
-	if c.broken || size > c.max {
+	if c.broken || size > c.max || size > c.kind.maxFile {
 		return
 	}
 	if err := c.write(id, data); err != nil {
@@ -221,20 +239,20 @@ func (c *diskCache) bytes() int64 {
 	return c.total
 }
 
-// readImage reads a cached poster with openRegular, refusing files over
-// MaxImageBytes.
-func readImage(path string) ([]byte, error) {
+// readCapped reads a cache file with openRegular, refusing files over limit
+// bytes.
+func readCapped(path string, limit int64) ([]byte, error) {
 	f, err := openRegular(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	b, err := io.ReadAll(io.LimitReader(f, MaxImageBytes+1))
+	b, err := io.ReadAll(io.LimitReader(f, limit+1))
 	if err != nil {
 		return nil, err
 	}
-	if len(b) > MaxImageBytes {
-		return nil, errors.New("cached poster too large")
+	if int64(len(b)) > limit {
+		return nil, errors.New("cached file too large")
 	}
 	return b, nil
 }

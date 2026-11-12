@@ -28,3 +28,24 @@ const DATE = new Intl.DateTimeFormat(undefined, { year: 'numeric', month: 'short
 export function formatDate(unixSeconds: number): string {
   return DATE.format(new Date(unixSeconds * 1000));
 }
+
+/** Minutes → "2 h 59 min", "1 h", or "45 min". */
+export function formatRuntime(minutes: number): string {
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  if (h === 0) return `${m} min`;
+  return m === 0 ? `${h} h` : `${h} h ${m} min`;
+}
+
+const RELEASE_DATE = new Intl.DateTimeFormat(undefined, { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' });
+
+/**
+ * A calendar date "YYYY-MM-DD" → a long date such as "December 18, 2001". It is read as UTC so the
+ * day never shifts with the viewer's time zone. Anything else is returned unchanged.
+ */
+export function formatReleaseDate(date: string): string {
+  const parsed = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  if (!parsed) return date;
+  const ms = Date.UTC(Number(parsed[1]), Number(parsed[2]) - 1, Number(parsed[3]));
+  return Number.isNaN(ms) ? date : RELEASE_DATE.format(new Date(ms));
+}

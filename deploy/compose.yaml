@@ -80,7 +80,7 @@ services:
       - model-socket:/run/recs
     tmpfs:
       - /tmp:size=64m,mode=1777
-    # backend: caddy -> api (internal, no egress). egress: TMDB poster fetches only.
+    # backend: caddy -> api (internal, no egress). egress: TMDB (posters, movie details) only.
     networks: [backend, egress]
     depends_on: [model]
     mem_limit: 768m
