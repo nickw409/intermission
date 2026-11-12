@@ -1,5 +1,8 @@
 # Feature backlog (owner requests, 2026-11-11)
 
+**Tracked as GitHub issues:** infinite scrolling #88, want-to-watch list #89, group recommendations
+#90. The richer movie page is #69. The notes below are the original first thoughts.
+
 Ideas the owner wants after the For you controls (model selector and genre chips) ship. Not
 scheduled yet. Each needs a spec amendment and, where noted, a contract change, a delta security
 audit and phase-order sign-off before it merges. Notes below are first thoughts, not designs.

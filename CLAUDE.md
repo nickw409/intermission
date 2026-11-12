@@ -108,3 +108,6 @@ docker compose -f deploy/compose.yaml -f deploy/compose.dev.yaml up
 - **Doc naming:** kebab-case under `docs/`; date-prefixed plans (`YYYY-MM-DD-name.md`); numbered ADRs (`docs/adr/0001-name.md`). No spaces or non-ASCII characters in filenames.
 - **Commits:** do not mention Claude, AI or any assistant, and add no Co-authored-by trailers.
 - **Owner-only actions:** Tailscale Funnel setup, the TMDB API key, the GitHub remote, switching `signup_mode` to `open`. Prepare runbooks for these; don't run them.
+- **Follow-ups:** anything deferred (from a review, an audit, a PR or an owner request) becomes a GitHub issue with a short context, its source PR or review, and "done when", labelled `follow-up`, `ops`, `tech-debt`, `tests`, `enhancement`, `documentation` or `owner-only` as fits. Link the issues a PR opens or closes in its description (`Fixes #N` closes it on merge). Don't keep follow-up lists in private notes or plan docs.
+  - **Security weaknesses never go in public issues** (see `SECURITY.md`). File them as private draft repository security advisories, e.g. `gh api -X POST repos/nickw409/intermission/security-advisories --input advisory.json`, list them with `gh api repos/nickw409/intermission/security-advisories`, and close or publish them once fixed.
+  - Public issue text must follow rule 11: no machine or tailnet name, no personal data.
