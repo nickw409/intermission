@@ -20,7 +20,7 @@ ml-latest-small validation NDCG@10 (610 users), top-N form, full grid. Each cell
 
 ```bash
 build/release/train/recs-train eval --dataset ml-latest-small --model knn --on validation --split-seed 42 --seed 42 \
-  --config <(echo '{"neighbors": M, "shrinkage": λ, "min_support": 20, "normalize": false, "positive_only": true}')
+  --config <(echo '{"neighbors": M, "shrinkage": λ, "min_support": 20, "normalize": false, "positive_only": true, "mean_damping": 0}')
 ```
 
 | M \ λ | 0 | 10 | 25 | 50 | 100 | 300 | 1,000 | 3,000 | 10,000 | 30,000 |
@@ -48,8 +48,8 @@ The four scoring forms on the same validation split, M = 100, λ = 100:
 | baseline pop_count | 0.0589 | 0.012 |
 | baseline pop (m = 10) | 0.0355 | 0.007 |
 
-`mean_damping` (β) damps the user mean used in scoring towards the global training mean,
-(Σ r + β·μ) / (n + β); see the "THE SCORING MEAN" note in `core/src/models/item_knn.cpp`. It exists
+`mean_damping` (β) damps the user mean used in scoring towards the global training mean g,
+(Σ r + β·g) / (n + β); see the "THE SCORING MEAN" note in `core/src/models/item_knn.cpp`. It exists
 so a user whose ratings are all equal (a new user who rates five favourites 5 stars) still gets a
 ranking: with the plain mean every score is 0 and the list falls back to movie-id order. The
 similarities do not change. Validation split (split seed 42, seed 42), each dataset at its own M and λ:
@@ -69,6 +69,9 @@ similarities do not change. Validation split (split seed 42, seed 42), each data
 Chosen: β = 20 on both datasets. Fold-in parity stays 1.0 (the batch path uses the same damped
 mean). The gain on these users is small because they have many ratings each, so the damped mean is
 close to the plain one; the change matters most for website users with a handful of ratings.
+The flip side: a user whose ratings are all equal and below g (a few movies, all 3 stars) now gets
+all-negative scores, so the movies most similar to what they rated rank last (the model reads
+below-average ratings as dislikes). With the plain mean that user got no ranking at all.
 M and λ were searched with the plain mean and were not searched again with β = 20.
 
 Test split, once per final config (split seed 42, seed 42; paired bootstrap, 1,000 resamples,
