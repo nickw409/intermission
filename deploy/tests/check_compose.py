@@ -27,8 +27,8 @@ ENV_EXAMPLE = os.path.join(DEPLOY, ".env.example")
 
 VARIANTS = {
     "default": ([], []),
-    "all-profiles": ([], ["jobs", "monitoring"]),
-    "dev": (["compose.dev.yaml"], ["jobs", "monitoring"]),
+    "all-profiles": ([], ["jobs", "monitoring", "check"]),
+    "dev": (["compose.dev.yaml"], ["jobs", "monitoring", "check"]),
     "drill": (["compose.drill.yaml"], ["jobs"]),
 }
 
@@ -36,6 +36,7 @@ VARIANTS = {
 READ_ONLY_MOUNTS = {
     ("api", "/srv/data/reports"),
     ("model", "/srv/data/artifacts"),
+    ("model-check", "/srv/data/artifacts"),
     ("train", "/srv/data/raw"),
     ("train", "/srv/data/exports"),
     ("train", "/srv/configs"),
@@ -106,8 +107,13 @@ def check_service(variant, name, svc, networks):
             fail(variant, f"{name}: {tgt} must be mounted read-only")
         if src == "/" and not v.get("read_only"):
             fail(variant, f"{name}: host / mounted read-write")
-    if name == "model" and svc.get("network_mode") != "none":
-        fail(variant, "model: must have network_mode: none (Unix socket only)")
+    if name in ("model", "model-check") and svc.get("network_mode") != "none":
+        fail(variant, f"{name}: must have network_mode: none")
+    if name == "model-check" and any(
+        (v.get("target") if isinstance(v, dict) else str(v)).startswith("/run/recs")
+        for v in svc.get("volumes") or []
+    ):
+        fail(variant, "model-check: must not mount the model socket volume")
     if name == "api":
         for net in svc.get("networks") or {}:
             if net == "frontend":

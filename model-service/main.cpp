@@ -16,6 +16,7 @@
 #include <CLI/CLI.hpp>
 
 #include "bundle.hpp"
+#include "check.hpp"
 #include "server.hpp"
 #include "service.hpp"
 #include "version.hpp"
@@ -35,7 +36,14 @@ int main(int argc, char** argv) {
   app.add_option("--poll-seconds", poll_seconds, "Seconds between checks of CURRENT")
       ->check(CLI::Range(1, 3600))
       ->capture_default_str();
+  bool check = false;
+  app.add_flag("--check", check,
+               "Load and verify the artifact CURRENT names as the server would, print its version, git_sha "
+               "and models, and exit 0 if it would be served; 3 if it would be refused, 4 if there is no CURRENT "
+               "(deploy preflight)");
   CLI11_PARSE(app, argc, argv);
+
+  if (check) return recs::service::check_artifacts(artifacts, std::cout, recs::service::stderr_log_sink());
 
   // Block SIGINT/SIGTERM in every thread; a dedicated thread waits for them.
   sigset_t signals;
