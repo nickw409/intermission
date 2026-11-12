@@ -912,6 +912,52 @@ describe('For you: release years', () => {
     expect(recommend.map(queryOf)).toEqual([{ model: 'als', k: '20', genres: 'Western' }]);
     expect(router.state.location.search).toBe('?model=als&genres=Western');
     expect(document.activeElement).toBe(yearInput('From'));
+    // The inputs follow a range cleared from outside the controls.
+    expect(yearInput('From')).toHaveValue(null);
+    expect(yearInput('To')).toHaveValue(null);
+    expect(clearYearsButton()).toBeDisabled();
+  });
+
+  it('shows a range that arrives by navigation (a link, back or forward) in the inputs', async () => {
+    const { router } = renderApp('/?year_from=1990&year_to=1999');
+    await screen.findByRole('heading', { level: 2, name: LOTR });
+    expect(yearInput('From')).toHaveValue(1990);
+    await act(() => router.navigate('/?year_from=1980'));
+    expect(yearInput('From')).toHaveValue(1980);
+    expect(yearInput('To')).toHaveValue(null);
+    await act(() => router.navigate('/?model=als'));
+    expect(yearInput('From')).toHaveValue(null);
+    expect(clearYearsButton()).toBeDisabled();
+  });
+
+  it.each([
+    ['a half-typed year', '2'],
+    ['an out-of-range year', '2200'],
+  ])('puts the applied year back when the user leaves %s in a box', async (_, typed) => {
+    const user = userEvent.setup();
+    renderApp('/?year_from=1990');
+    await screen.findByRole('heading', { level: 2, name: LOTR });
+    const recommend = recordRequests('/api/recommend');
+    // Select the applied year and type over it, so the box never passes through empty.
+    await user.type(yearInput('From'), typed, { initialSelectionStart: 0, initialSelectionEnd: 4 });
+    expect(yearInput('From')).toHaveValue(Number(typed));
+    await user.tab();
+    expect(yearInput('From')).toHaveValue(1990);
+    expect(yearInput('From')).not.toHaveAttribute('aria-invalid');
+    expect(yearsGroup()).not.toHaveTextContent('Enter a year');
+    await letDebounceSettle();
+    expect(recommend).toHaveLength(0); // the applied range never changed
+  });
+
+  it('keeps an inverted range in the boxes, with its message, after leaving them', async () => {
+    const user = userEvent.setup();
+    await openPage();
+    await user.type(yearInput('From'), '2000');
+    await user.type(yearInput('To'), '1990');
+    await user.tab();
+    expect(yearInput('From')).toHaveValue(2000);
+    expect(yearInput('To')).toHaveValue(1990);
+    expect(yearsGroup()).toHaveTextContent('“From” must not be later than “To”.');
   });
 
   it('offers only Clear years in the empty state when only years are set', async () => {

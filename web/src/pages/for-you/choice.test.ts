@@ -60,6 +60,14 @@ describe('cleanYears', () => {
   it('drops both bounds when from is later than to (an inverted range is not guessed at)', () => {
     expect(cleanYears(2000, 1990)).toEqual(NO_YEARS);
   });
+
+  it('treats an absent or empty bound as unbounded, but drops both bounds when one is not a year', () => {
+    expect(cleanYears(1990, undefined)).toEqual({ from: 1990, to: null });
+    expect(cleanYears('', '1999')).toEqual({ from: null, to: 1999 });
+    expect(cleanYears(1990, 'abc')).toEqual(NO_YEARS);
+    expect(cleanYears(1700, 1999)).toEqual(NO_YEARS);
+    expect(cleanYears('1990', 2200)).toEqual(NO_YEARS);
+  });
 });
 
 describe('hasYears', () => {
@@ -107,9 +115,11 @@ describe('URL', () => {
   });
 
   it.each([
-    ['year_from=199&year_to=1999', { from: null, to: 1999 }],
-    ['year_from=1990&year_to=2200', { from: 1990, to: null }],
+    ['year_from=199&year_to=1999', NO_YEARS],
+    ['year_from=1990&year_to=2200', NO_YEARS],
+    ['year_from=1990&year_to=abc', NO_YEARS],
     ['year_from=abc&year_to=', NO_YEARS],
+    ['year_from=1990&year_to=', { from: 1990, to: null }],
     ['year_from=2000&year_to=1990', NO_YEARS],
     ['year_from=1990&year_from=1999', { from: 1990, to: null }],
   ])('drops invalid years in %s', (query, years) => {
@@ -181,7 +191,7 @@ describe('storage', () => {
 
   it.each([
     ['strings', { year_from: '1990', year_to: '1999' }, NINETIES],
-    ['out of range', { year_from: 1700, year_to: 1999 }, { from: null, to: 1999 }],
+    ['out of range', { year_from: 1700, year_to: 1999 }, NO_YEARS],
     ['fractions', { year_from: 1990.5 }, NO_YEARS],
     ['an inverted range', { year_from: 2000, year_to: 1990 }, NO_YEARS],
     ['the wrong types', { year_from: true, year_to: [1999] }, NO_YEARS],

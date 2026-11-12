@@ -7,10 +7,12 @@
 // own. Anything the contract would reject (an unknown genre, a year that is not a whole number from
 // 1800 to 2100) or a model that is not loaded is dropped, never sent.
 //
-// Years: an inverted range (year_from later than year_to) drops BOTH bounds rather than swapping
-// them. Such a range only comes from a hand-edited link or a bug, and guessing what it meant could
-// show a list the user did not ask for; the unfiltered list is the honest fallback. (The year inputs
-// never apply an inverted range in the first place; see Controls.tsx.)
+// Years: an unusable range drops BOTH bounds. That is a bound that is present but not a year
+// (out of range, not a whole number) or an inverted range (year_from later than year_to); it is
+// neither kept one-sided nor swapped. Such a range only comes from a hand-edited link or a bug, and
+// guessing what it meant could show a list the user did not ask for; the unfiltered list is the
+// honest fallback. An absent or empty bound is simply unbounded. (The year inputs never apply an
+// unusable range in the first place; see Controls.tsx.)
 //
 // What is remembered (localStorage) is what the user chose: their genres and year range, and a model
 // only if they picked one in the selector that is not the server's default (so a later default change
@@ -112,8 +114,16 @@ export function parseYear(value: unknown): number | null {
   return Number.isInteger(year) && year >= MIN_YEAR && year <= MAX_YEAR ? year : null;
 }
 
-/** A range from two parsed bounds; an inverted range drops both (see the note at the top). */
-export function cleanYears(from: number | null, to: number | null): YearRange {
+/**
+ * A range from two raw bounds (URL or storage values). An absent or empty bound is unbounded; a
+ * present bound that is not a year, or an inverted range, drops both (see the note at the top).
+ */
+export function cleanYears(rawFrom: unknown, rawTo: unknown): YearRange {
+  const absent = (raw: unknown) => raw === null || raw === undefined || raw === '';
+  const from = absent(rawFrom) ? null : parseYear(rawFrom);
+  const to = absent(rawTo) ? null : parseYear(rawTo);
+  if (from === null && !absent(rawFrom)) return NO_YEARS;
+  if (to === null && !absent(rawTo)) return NO_YEARS;
   if (from !== null && to !== null && from > to) return NO_YEARS;
   return { from, to };
 }
@@ -147,7 +157,7 @@ const VIEW_KEYS = ['model', 'genres', 'year_from', 'year_to'];
 export function parseFilter(params: URLSearchParams): Filter {
   return {
     genres: parseGenres(params.get('genres') ?? ''),
-    years: cleanYears(parseYear(params.get('year_from')), parseYear(params.get('year_to'))),
+    years: cleanYears(params.get('year_from'), params.get('year_to')),
   };
 }
 
@@ -201,7 +211,7 @@ export function readStored(): RawChoice {
     return {
       model: typeof model === 'string' ? model : null,
       genres: Array.isArray(genres) ? cleanGenres(genres) : [],
-      years: cleanYears(parseYear(year_from), parseYear(year_to)),
+      years: cleanYears(year_from, year_to),
     };
   } catch {
     return empty; // storage unavailable or malformed JSON

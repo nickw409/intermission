@@ -105,7 +105,8 @@ function readBox(text: string): number | null | undefined {
 /**
  * "Released": From and To year inputs. A range is applied (onChange) only when each box is empty or
  * a whole year from 1800 to 2100 and From is not later than To; until then the last applied range
- * stays. A finished but unusable entry (out of range, or an inverted range) gets an inline message.
+ * stays. A finished but unusable entry (out of range, or an inverted range) gets an inline message,
+ * and leaving a box that does not hold a year puts the applied year back.
  */
 export function YearRangeInputs({
   value,
@@ -154,6 +155,15 @@ export function YearRangeInputs({
   if (outOfRange('from') || outOfRange('to')) message = `Enter a year from ${MIN_YEAR} to ${MAX_YEAR}.`;
   else if (inverted) message = '“From” must not be later than “To”.';
 
+  // Leaving a box that holds something other than a year (half-typed, out of range) puts the applied
+  // year back, so the boxes never disagree with the list for longer than the typing takes. An
+  // inverted range is two real years, so it stays, with its message, until the user fixes it.
+  const restore = (side: keyof YearDraft, input: HTMLInputElement) => {
+    const applied = draftOf(value)[side];
+    if (input.validity.badInput) input.value = applied; // text React never saw, such as "19e"
+    if (readBox(draft[side]) === undefined) setDraft({ ...draft, [side]: applied });
+  };
+
   const nothingToClear = !hasYears(value) && draft.from === '' && draft.to === '';
   const clear = () => {
     setDraft(draftOf(NO_YEARS));
@@ -175,6 +185,7 @@ export function YearRangeInputs({
         aria-invalid={invalid[side] || undefined}
         aria-describedby={invalid[side] ? messageId : undefined}
         onChange={(event) => update(side, event.currentTarget)}
+        onBlur={(event) => restore(side, event.currentTarget)}
       />
     </div>
   );
