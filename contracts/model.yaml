@@ -143,6 +143,11 @@ components:
       uniqueItems: true
       description: Restrict results to movies with at least one of these genres (union). Absent or empty means no restriction. Fewer than k items may be returned when few movies match.
       items: { $ref: '#/components/schemas/Genre' }
+    ReleaseYear:
+      type: integer
+      minimum: 1800
+      maximum: 2100
+      description: A release year, parsed from the trailing "(YYYY)" of the MovieLens title.
     RecommendRequest:
       type: object
       additionalProperties: false
@@ -153,6 +158,8 @@ components:
         k: { type: integer, minimum: 1, maximum: 100 }
         exclude: { $ref: '#/components/schemas/Exclude' }
         genres: { $ref: '#/components/schemas/Genres' }
+        year_from: { $ref: '#/components/schemas/ReleaseYear', description: 'Inclusive lower bound on the release year. When year_from or year_to is present, movies without a parsed year are not returned. Must not exceed year_to. Fewer than k items may be returned when few movies match.' }
+        year_to: { $ref: '#/components/schemas/ReleaseYear', description: Inclusive upper bound on the release year; as year_from. }
     CompareRequest:
       type: object
       additionalProperties: false
@@ -163,6 +170,8 @@ components:
         k: { type: integer, minimum: 1, maximum: 100 }
         exclude: { $ref: '#/components/schemas/Exclude' }
         genres: { $ref: '#/components/schemas/Genres' }
+        year_from: { $ref: '#/components/schemas/ReleaseYear', description: 'Inclusive lower bound on the release year. When year_from or year_to is present, movies without a parsed year are not returned. Must not exceed year_to. Fewer than k items may be returned when few movies match.' }
+        year_to: { $ref: '#/components/schemas/ReleaseYear', description: Inclusive upper bound on the release year; as year_from. }
     Because:
       type: object
       additionalProperties: false

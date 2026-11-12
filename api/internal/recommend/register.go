@@ -33,6 +33,7 @@ const (
 	maxModelsParam = 64  // characters, compare's models parameter
 	maxGenresParam = 200 // characters, the genres parameter
 	maxGenres      = modelclient.MaxGenres
+	maxYearParam   = 4 // characters, year_from and year_to (whole years 1800-2100)
 	maxBecause     = 3 // RecItem.because maxItems
 	// Recommendation cache bounds: entries, approximate bytes, and entries
 	// per user.
@@ -52,6 +53,7 @@ var (
 	errBadK      = apperr.New(http.StatusBadRequest, apperr.CodeBadRequest, "k must be between 1 and 100")
 	errBadModels = apperr.New(http.StatusBadRequest, apperr.CodeBadRequest, "models must list 1-5 distinct model names")
 	errBadGenres = apperr.New(http.StatusBadRequest, apperr.CodeBadRequest, "genres must list up to 19 distinct genre names")
+	errBadYears  = apperr.New(http.StatusBadRequest, apperr.CodeBadRequest, "year_from and year_to must be whole years from 1800 to 2100, with year_from no later than year_to")
 	errNoUser    = apperr.New(http.StatusUnauthorized, apperr.CodeUnauthorized, "not logged in")
 )
 
@@ -99,8 +101,8 @@ type CompareResponse struct {
 
 // Register adds this package's routes to mux. Called once from main.go.
 //
-//	GET /api/recommend?model=&k=&genres=                 (session, 30/min per session and per user)
-//	GET /api/recommend/compare?models=a,b,c&k=&genres=   (session, same buckets)
+//	GET /api/recommend?model=&k=&genres=&year_from=&year_to=                 (session, 30/min per session and per user)
+//	GET /api/recommend/compare?models=a,b,c&k=&genres=&year_from=&year_to=   (session, same buckets)
 //
 // The per-user bucket has the same shape as the per-session one, so logging
 // in again for a fresh session doesn't reset the budget.
@@ -205,12 +207,12 @@ func (h *handler) recommend(w http.ResponseWriter, r *http.Request) {
 		apperr.Write(w, errBadK)
 		return
 	}
-	genres, err := parseGenres(q)
+	f, err := parseFilter(q)
 	if err != nil {
 		apperr.Write(w, err)
 		return
 	}
-	h.serve(w, r, "recommend", []modelclient.ModelName{model}, k, genres, func(e *entry) any {
+	h.serve(w, r, "recommend", []modelclient.ModelName{model}, k, f, func(e *entry) any {
 		res := e.results[0]
 		return RecommendResponse{Model: res.Model, ModelVersion: e.modelVersion, Items: res.Items, ColdStart: e.coldStart}
 	})
@@ -229,12 +231,12 @@ func (h *handler) compare(w http.ResponseWriter, r *http.Request) {
 		apperr.Write(w, errBadK)
 		return
 	}
-	genres, err := parseGenres(q)
+	f, err := parseFilter(q)
 	if err != nil {
 		apperr.Write(w, err)
 		return
 	}
-	h.serve(w, r, "compare", models, k, genres, func(e *entry) any {
+	h.serve(w, r, "compare", models, k, f, func(e *entry) any {
 		// The cache key ignores model order; list results in this request's
 		// order. (A cold start answer is a single pop list.)
 		results := e.results
@@ -329,6 +331,92 @@ func genresKey(genres []modelclient.Genre) string {
 	return strings.Join(s, ",")
 }
 
+// filter is what a request restricts its lists to. The zero value means no
+// restriction.
+type filter struct {
+	genres   []modelclient.Genre // nil = any genre
+	yearFrom *int                // inclusive; nil = unbounded
+	yearTo   *int                // inclusive; nil = unbounded
+}
+
+// parseFilter reads the optional genres, year_from and year_to parameters.
+func parseFilter(q map[string][]string) (filter, error) {
+	genres, err := parseGenres(q)
+	if err != nil {
+		return filter{}, err
+	}
+	from, to, err := parseYears(q)
+	if err != nil {
+		return filter{}, err
+	}
+	return filter{genres: genres, yearFrom: from, yearTo: to}, nil
+}
+
+// parseYears validates the optional year_from and year_to parameters
+// (public.yaml parameters.YearFrom and YearTo): each, when present, is one
+// value of ASCII digits only, a whole year in [1800, 2100]; when both are
+// present year_from must not exceed year_to. An absent or empty bound is nil
+// (unbounded), as an empty genres is no filter. Anything else, a repeated
+// parameter included, is bad_request with one fixed message that never
+// echoes the input.
+func parseYears(q map[string][]string) (from, to *int, err error) {
+	from, ok := yearParam(q, "year_from")
+	if !ok {
+		return nil, nil, errBadYears
+	}
+	to, ok = yearParam(q, "year_to")
+	if !ok {
+		return nil, nil, errBadYears
+	}
+	if from != nil && to != nil && *from > *to {
+		return nil, nil, errBadYears
+	}
+	return from, to, nil
+}
+
+// yearParam parses one year parameter. An absent or empty one is (nil, true).
+func yearParam(q map[string][]string, name string) (*int, bool) {
+	vals, present := q[name]
+	if !present {
+		return nil, true
+	}
+	if len(vals) != 1 || len(vals[0]) > maxYearParam {
+		return nil, false
+	}
+	if vals[0] == "" {
+		return nil, true // year_from= means unbounded
+	}
+	for i := 0; i < len(vals[0]); i++ {
+		if vals[0][i] < '0' || vals[0][i] > '9' {
+			return nil, false
+		}
+	}
+	n, err := strconv.Atoi(vals[0])
+	if err != nil || n < modelclient.MinYear || n > modelclient.MaxYear {
+		return nil, false
+	}
+	return &n, true
+}
+
+// yearsKey is the cache key's year component: "from..to" with an absent
+// bound left empty ("1990..", "..1999", "1990..1999"), and "" when neither
+// is set. Every distinct pair of bounds, absent ones included, gives a
+// distinct string.
+func yearsKey(from, to *int) string {
+	if from == nil && to == nil {
+		return ""
+	}
+	var b strings.Builder
+	if from != nil {
+		b.WriteString(strconv.Itoa(*from))
+	}
+	b.WriteString("..")
+	if to != nil {
+		b.WriteString(strconv.Itoa(*to))
+	}
+	return b.String()
+}
+
 func knownModel(s string) bool {
 	return slices.Contains(modelclient.AllModels, modelclient.ModelName(s))
 }
@@ -336,9 +424,9 @@ func knownModel(s string) bool {
 // serve is the shared path of both routes: read the caller's ratings, ask
 // recs-model for its current version, answer from the cache or compute,
 // enrich and cache. models holds one entry for op "recommend" ("" means the
-// default model). genres (nil = no filter) goes to recs-model on every path,
-// cold start included.
-func (h *handler) serve(w http.ResponseWriter, r *http.Request, op string, models []modelclient.ModelName, k int, genres []modelclient.Genre, render func(*entry) any) {
+// default model). The filter (genres and year range) goes to recs-model on
+// every path, cold start included.
+func (h *handler) serve(w http.ResponseWriter, r *http.Request, op string, models []modelclient.ModelName, k int, f filter, render func(*entry) any) {
 	uid, ok := auth.UserID(r.Context())
 	if !ok {
 		apperr.Write(w, errNoUser)
@@ -378,10 +466,10 @@ func (h *handler) serve(w http.ResponseWriter, r *http.Request, op string, model
 	if op == "compare" {
 		keyModels = slices.Sorted(slices.Values(models))
 	}
-	key := cacheKey{userID: uid, userCreated: user.created, ratingsVersion: user.version, modelVersion: version, op: op, models: joinModels(keyModels), k: k, genres: genresKey(genres)}
+	key := cacheKey{userID: uid, userCreated: user.created, ratingsVersion: user.version, modelVersion: version, op: op, models: joinModels(keyModels), k: k, genres: genresKey(f.genres), years: yearsKey(f.yearFrom, f.yearTo)}
 	e, hit := h.cache.get(key)
 	if !hit {
-		e, err = h.compute(ctx, version, op, models, k, genres, user)
+		e, err = h.compute(ctx, version, op, models, k, f, user)
 		if err != nil {
 			h.modelError(w, r, op, err)
 			return
@@ -399,20 +487,22 @@ func (h *handler) serve(w http.ResponseWriter, r *http.Request, op string, model
 // compute asks recs-model for the lists and enriches them with titles.
 // checked is the version /v1/version reported, used only if the response
 // carries no X-Model-Version.
-func (h *handler) compute(ctx context.Context, checked, op string, models []modelclient.ModelName, k int, genres []modelclient.Genre, user userRatings) (*entry, error) {
+func (h *handler) compute(ctx context.Context, checked, op string, models []modelclient.ModelName, k int, f filter, user userRatings) (*entry, error) {
 	var (
 		raw  []rawResult
 		meta modelclient.Meta
 	)
 	if op == "recommend" {
-		resp, m, err := h.model.Recommend(ctx, modelclient.RecommendRequest{Model: models[0], Ratings: user.ratings, K: k, Exclude: user.ids, Genres: genres})
+		resp, m, err := h.model.Recommend(ctx, modelclient.RecommendRequest{Model: models[0], Ratings: user.ratings, K: k, Exclude: user.ids,
+			Genres: f.genres, YearFrom: f.yearFrom, YearTo: f.yearTo})
 		if err != nil {
 			return nil, err
 		}
 		meta = m
 		raw = []rawResult{{model: models[0], items: resp.Items}}
 	} else {
-		resp, m, err := h.model.Compare(ctx, modelclient.CompareRequest{Models: models, Ratings: user.ratings, K: k, Exclude: user.ids, Genres: genres})
+		resp, m, err := h.model.Compare(ctx, modelclient.CompareRequest{Models: models, Ratings: user.ratings, K: k, Exclude: user.ids,
+			Genres: f.genres, YearFrom: f.yearFrom, YearTo: f.yearTo})
 		if err != nil {
 			return nil, err
 		}

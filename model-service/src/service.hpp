@@ -32,6 +32,8 @@ struct Limits {
   static constexpr std::size_t kDefaultSearchLimit = 20;
   static constexpr std::size_t kDefaultSimilarK = 20;
   static constexpr std::int64_t kMaxMovieId = 2147483647;
+  static constexpr std::int64_t kMinReleaseYear = 1800;  // ReleaseYear
+  static constexpr std::int64_t kMaxReleaseYear = 2100;
   static constexpr int kMaxJsonDepth = 8;  // deepest valid request is 3
 };
 

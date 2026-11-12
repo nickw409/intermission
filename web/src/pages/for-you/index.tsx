@@ -1,9 +1,9 @@
 // For you: the signed-in user's top 20. The model defaults to the server's (GET /api/models
 // default_model, falling back to knn, then pop), and the user can pick any loaded model and narrow
-// the list with genre chips; the view lives in the URL and the user's choices are remembered per
-// browser (see choice.ts). Each poster card explains itself ("Because you rated …"), can be rated in
-// place, and can be dismissed with "Not interested". The list refetches 500 ms after a rating change
-// is saved, so newly rated movies drop out and the rest re-rank.
+// the list with genre chips and a range of release years; the view lives in the URL and the user's
+// choices are remembered per browser (see choice.ts). Each poster card explains itself ("Because you
+// rated …"), can be rated in place, and can be dismissed with "Not interested". The list refetches
+// 500 ms after a rating change is saved, so newly rated movies drop out and the rest re-rank.
 import { useCallback, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router';
 import { api } from '../../api/client';
@@ -12,14 +12,27 @@ import { Loading } from '../../components/Status';
 import { pickDefaultModel, type ModelName, type ModelsResponse } from '../../lib/models';
 import { useAsync } from '../../lib/useAsync';
 import { useDebouncedValue } from '../../lib/useDebouncedValue';
-import { fromSearchParams, genresParam, readStored, resolveChoice, toSearchParams, writeStored, type Genre } from './choice';
-import { GenreChips, ModelSelect } from './Controls';
+import {
+  filterParams,
+  fromSearchParams,
+  NO_YEARS,
+  readStored,
+  resolveChoice,
+  toSearchParams,
+  writeStored,
+  type Choice,
+  type Genre,
+  type RawChoice,
+  type YearRange,
+} from './choice';
+import { GenreChips, ModelSelect, YearRangeInputs } from './Controls';
 import { RecommendationList } from './RecommendationList';
 import '../../components/components.css';
 import './for-you.css';
 
-/** Chip toggles settle this long before the list is fetched (recommend calls are rate limited). */
-const GENRE_DEBOUNCE_MS = 350;
+/** Chip toggles and year typing settle this long before the list is fetched (recommend calls are
+ * rate limited). */
+const FILTER_DEBOUNCE_MS = 350;
 
 export default function ForYouPage() {
   return (
@@ -49,30 +62,41 @@ function ForYou({ models }: { models: ModelsResponse | null }) {
   const [params, setParams] = useSearchParams();
   const [stored, setStored] = useState(readStored);
   const choice = resolveChoice(fromSearchParams(params), stored, models, pickDefaultModel(models));
-  // The chips and URL change at once; the request waits for the toggling to stop.
-  const fetchGenres = useDebouncedValue(genresParam(choice.genres), GENRE_DEBOUNCE_MS);
+  // The controls and URL change at once; the request waits for the chips and typing to settle. The
+  // filter is debounced as one string (its query form) so a change to both sends one request.
+  const filterKey = useDebouncedValue(filterParams(choice).toString(), FILTER_DEBOUNCE_MS);
 
-  const show = (model: ModelName, genres: Genre[]) =>
+  const show = (next: Choice) =>
     // Without a model list the model is a guess, so it stays out of the URL.
-    setParams(toSearchParams({ model, genres }, models !== null), { replace: true });
-  const remember = (model: string | null, genres: Genre[]) => {
-    setStored({ model, genres });
-    writeStored({ model, genres });
+    setParams(toSearchParams(next, models !== null), { replace: true });
+  const remember = (next: RawChoice) => {
+    setStored(next);
+    writeStored(next);
   };
   const chooseModel = (model: ModelName) => {
-    remember(model === models?.default_model ? null : model, choice.genres);
-    show(model, choice.genres);
+    remember({ ...choice, model: model === models?.default_model ? null : model });
+    show({ ...choice, model });
   };
   const chooseGenres = (genres: Genre[]) => {
-    remember(stored.model, genres);
-    show(choice.model, genres);
+    remember({ ...choice, model: stored.model, genres });
+    show({ ...choice, genres });
+  };
+  const chooseYears = (years: YearRange) => {
+    remember({ ...choice, model: stored.model, years });
+    show({ ...choice, years });
   };
 
-  // Both Clear buttons become disabled or disappear once used; focus moves to the first chip.
+  // Each Clear button becomes disabled or disappears once used, so focus moves into the control it
+  // cleared: the first chip, or the From year.
   const firstChip = useRef<HTMLButtonElement>(null);
+  const fromYear = useRef<HTMLInputElement>(null);
   const clearGenres = () => {
     firstChip.current?.focus();
     chooseGenres([]);
+  };
+  const clearYears = () => {
+    fromYear.current?.focus();
+    chooseYears(NO_YEARS);
   };
 
   return (
@@ -80,8 +104,14 @@ function ForYou({ models }: { models: ModelsResponse | null }) {
       <div className="for-you-controls">
         {models !== null && <ModelSelect models={models} value={choice.model} onChange={chooseModel} />}
         <GenreChips selected={choice.genres} onChange={chooseGenres} onClear={clearGenres} firstChip={firstChip} />
+        <YearRangeInputs value={choice.years} onChange={chooseYears} onClear={clearYears} fromInput={fromYear} />
       </div>
-      <RecommendationList model={choice.model} genresKey={fetchGenres} onClearGenres={clearGenres} />
+      <RecommendationList
+        model={choice.model}
+        filterKey={filterKey}
+        onClearGenres={clearGenres}
+        onClearYears={clearYears}
+      />
     </>
   );
 }

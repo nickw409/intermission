@@ -317,6 +317,183 @@
           }
         }
       }
+    },
+    {
+      "name": "ok_years",
+      "request": {
+        "method": "GET",
+        "path": "/api/recommend",
+        "query": {
+          "model": "als",
+          "k": "3",
+          "year_from": "1990",
+          "year_to": "1999"
+        },
+        "headers": {
+          "Cookie": "session=fixture-session-token"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "model": "als",
+          "model_version": "2026-11-09T21-14-03Z",
+          "items": [
+            {
+              "movieId": 2959,
+              "title": "Fight Club",
+              "year": 1999,
+              "score": 0.71,
+              "because": [
+                {
+                  "movieId": 2571,
+                  "title": "Matrix, The",
+                  "weight": 0.38
+                },
+                {
+                  "movieId": 296,
+                  "title": "Pulp Fiction",
+                  "weight": 0.3
+                }
+              ]
+            },
+            {
+              "movieId": 593,
+              "title": "Silence of the Lambs, The",
+              "year": 1991,
+              "score": 0.64,
+              "because": [
+                {
+                  "movieId": 2571,
+                  "title": "Matrix, The",
+                  "weight": 0.29
+                }
+              ]
+            },
+            {
+              "movieId": 480,
+              "title": "Jurassic Park",
+              "year": 1993,
+              "score": 0.52,
+              "because": [
+                {
+                  "movieId": 260,
+                  "title": "Star Wars: Episode IV - A New Hope",
+                  "weight": 0.33
+                }
+              ]
+            }
+          ],
+          "cold_start": false
+        }
+      }
+    },
+    {
+      "name": "inverted_years",
+      "request": {
+        "method": "GET",
+        "path": "/api/recommend",
+        "query": {
+          "model": "als",
+          "k": "3",
+          "year_from": "2000",
+          "year_to": "1990"
+        },
+        "headers": {
+          "Cookie": "session=fixture-session-token"
+        }
+      },
+      "response": {
+        "status": 400,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "bad_request",
+            "message": "year_from and year_to must be whole years from 1800 to 2100, with year_from no later than year_to"
+          }
+        }
+      }
+    },
+    {
+      "name": "ok_years_empty",
+      "request": {
+        "method": "GET",
+        "path": "/api/recommend",
+        "query": {
+          "model": "als",
+          "k": "3",
+          "year_from": "",
+          "year_to": ""
+        },
+        "headers": {
+          "Cookie": "session=fixture-session-token"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "model": "als",
+          "model_version": "2026-11-09T21-14-03Z",
+          "items": [
+            {
+              "movieId": 4993,
+              "title": "Lord of the Rings: The Fellowship of the Ring, The",
+              "year": 2001,
+              "score": 0.83,
+              "because": [
+                {
+                  "movieId": 260,
+                  "title": "Star Wars: Episode IV - A New Hope",
+                  "weight": 0.41
+                },
+                {
+                  "movieId": 2571,
+                  "title": "Matrix, The",
+                  "weight": 0.22
+                }
+              ]
+            },
+            {
+              "movieId": 1196,
+              "title": "Star Wars: Episode V - The Empire Strikes Back",
+              "year": 1980,
+              "score": 0.79,
+              "because": [
+                {
+                  "movieId": 260,
+                  "title": "Star Wars: Episode IV - A New Hope",
+                  "weight": 0.52
+                }
+              ]
+            },
+            {
+              "movieId": 2959,
+              "title": "Fight Club",
+              "year": 1999,
+              "score": 0.71,
+              "because": [
+                {
+                  "movieId": 2571,
+                  "title": "Matrix, The",
+                  "weight": 0.38
+                },
+                {
+                  "movieId": 296,
+                  "title": "Pulp Fiction",
+                  "weight": 0.3
+                }
+              ]
+            }
+          ],
+          "cold_start": false
+        }
+      }
     }
   ]
 }

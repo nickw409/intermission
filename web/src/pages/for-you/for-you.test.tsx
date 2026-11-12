@@ -845,6 +845,357 @@ describe('For you: model selector and categories', () => {
   });
 });
 
+function yearsGroup(): HTMLElement {
+  return screen.getByRole('group', { name: 'Released' });
+}
+
+function yearInput(name: 'From' | 'To'): HTMLInputElement {
+  return within(yearsGroup()).getByRole('spinbutton', { name });
+}
+
+function clearYearsButton(): HTMLElement {
+  return within(yearsGroup()).getByRole('button', { name: 'Clear years' });
+}
+
+function searchOf(router: { state: { location: { search: string } } }): URLSearchParams {
+  return new URLSearchParams(router.state.location.search);
+}
+
+/** Lets the 350 ms filter debounce run out (twice over), so a request that would be sent has been. */
+async function letDebounceSettle() {
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 700));
+  });
+}
+
+describe('For you: release years', () => {
+  beforeEach(() => localStorage.clear());
+  afterEach(() => {
+    localStorage.clear();
+    vi.restoreAllMocks();
+  });
+
+  it('shows empty From and To year inputs and a disabled Clear years', async () => {
+    await openPage();
+    expect(yearsGroup().tagName).toBe('FIELDSET');
+    for (const name of ['From', 'To'] as const) {
+      const input = yearInput(name);
+      expect(input).toHaveValue(null);
+      expect(input).toHaveAttribute('placeholder', 'Any');
+      expect(input).toHaveAttribute('inputmode', 'numeric');
+      expect(input).toHaveAttribute('min', '1800');
+      expect(input).toHaveAttribute('max', '2100');
+    }
+    expect(clearYearsButton()).toBeDisabled();
+  });
+
+  it('sends a typed range once, debounced, and keeps it in the URL, storage and summary', async () => {
+    const user = userEvent.setup();
+    server.use(recommendWith(20));
+    const { router } = renderApp('/');
+    await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
+    const recommend = recordRequests('/api/recommend');
+    await user.type(yearInput('From'), '1990');
+    await user.type(yearInput('To'), '1999');
+    expect(recommend).toHaveLength(0);
+    expect(searchOf(router).get('year_from')).toBe('1990');
+    expect(searchOf(router).get('year_to')).toBe('1999');
+    await waitFor(() => expect(recommend).toHaveLength(1));
+    await letDebounceSettle();
+    expect(recommend.map(queryOf)).toEqual([{ model: 'als', k: '20', year_from: '1990', year_to: '1999' }]);
+    expect(stored()).toEqual({ genres: [], year_from: 1990, year_to: 1999 });
+    expect(screen.getByRole('main')).toHaveTextContent('Picks from Implicit ALS · 1990–1999');
+    expect(clearYearsButton()).toBeEnabled();
+  });
+
+  it('combines the years with the genres', async () => {
+    const user = userEvent.setup();
+    server.use(recommendWith(20));
+    const { router } = renderApp('/?genres=Horror,Sci-Fi');
+    await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
+    const recommend = recordRequests('/api/recommend');
+    await user.type(yearInput('From'), '1990');
+    await user.type(yearInput('To'), '1999');
+    await waitFor(() => expect(recommend).toHaveLength(1));
+    await letDebounceSettle();
+    expect(recommend.map(queryOf)).toEqual([
+      { model: 'als', k: '20', genres: 'Horror,Sci-Fi', year_from: '1990', year_to: '1999' },
+    ]);
+    expect(router.state.location.search).toBe('?model=als&genres=Horror%2CSci-Fi&year_from=1990&year_to=1999');
+    expect(screen.getByRole('main')).toHaveTextContent('Picks from Implicit ALS · horror or sci-fi · 1990–1999');
+  });
+
+  it.each([
+    ['a three-digit year', 'From', '199'],
+    ['a year before 1800', 'From', '1799'],
+    ['a year after 2100', 'To', '2101'],
+  ] as const)('does not apply %s', async (_, name, typed) => {
+    const user = userEvent.setup();
+    const { router } = await openPage();
+    const recommend = recordRequests('/api/recommend');
+    await user.type(yearInput(name), typed);
+    await letDebounceSettle();
+    expect(recommend).toHaveLength(0);
+    expect(router.state.location.search).toBe('');
+    expect(stored()).toBeNull();
+  });
+
+  it('does not apply an inverted range, and says why next to the inputs', async () => {
+    const user = userEvent.setup();
+    server.use(recommendWith(20));
+    const { router } = renderApp('/');
+    await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
+    const recommend = recordRequests('/api/recommend');
+    await user.type(yearInput('From'), '2000');
+    await user.type(yearInput('To'), '1990');
+    const hint = within(yearsGroup()).getByText('“From” must not be later than “To”.');
+    for (const name of ['From', 'To'] as const) {
+      expect(yearInput(name)).toHaveAttribute('aria-invalid', 'true');
+      expect(yearInput(name)).toHaveAccessibleDescription(hint.textContent);
+    }
+    await letDebounceSettle();
+    // Only the valid "from 2000" was applied; the inverted range never reaches the URL or the API.
+    expect(recommend.map(queryOf)).toEqual([{ model: 'als', k: '20', year_from: '2000' }]);
+    expect(searchOf(router).has('year_to')).toBe(false);
+    expect(await axeViolations()).toEqual([]);
+
+    await user.clear(yearInput('To'));
+    await user.type(yearInput('To'), '2009');
+    expect(within(yearsGroup()).queryByText(/must not be later/)).not.toBeInTheDocument();
+    expect(yearInput('From')).not.toHaveAttribute('aria-invalid');
+    expect(yearInput('From')).not.toHaveAccessibleDescription();
+    await waitFor(() => expect(recommend).toHaveLength(2));
+    expect(queryOf(recommend[1]!)).toEqual({ model: 'als', k: '20', year_from: '2000', year_to: '2009' });
+  });
+
+  it('starts from the years in the URL', async () => {
+    server.use(recommendWith(20));
+    const recommend = recordRequests('/api/recommend');
+    renderApp('/?model=knn&genres=Horror&year_from=1990&year_to=1999');
+    await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
+    expect(recommend.map(queryOf)).toEqual([
+      { model: 'knn', k: '20', genres: 'Horror', year_from: '1990', year_to: '1999' },
+    ]);
+    expect(yearInput('From')).toHaveValue(1990);
+    expect(yearInput('To')).toHaveValue(1999);
+    expect(screen.getByRole('main')).toHaveTextContent('Picks from Item-KNN · horror · 1990–1999');
+  });
+
+  it.each([
+    ['only a lower bound', '/?year_from=1990', { model: 'als', k: '20', year_from: '1990' }, 'from 1990'],
+    ['only an upper bound', '/?year_to=1999', { model: 'als', k: '20', year_to: '1999' }, 'up to 1999'],
+    [
+      'a single year',
+      '/?year_from=1995&year_to=1995',
+      { model: 'als', k: '20', year_from: '1995', year_to: '1995' },
+      '1995',
+    ],
+  ])('names %s in the summary', async (_, path, expected, words) => {
+    server.use(recommendWith(20));
+    const recommend = recordRequests('/api/recommend');
+    renderApp(path);
+    await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
+    expect(recommend.map(queryOf)).toEqual([expected]);
+    expect(screen.getByRole('main')).toHaveTextContent(`Picks from Implicit ALS · ${words}`);
+  });
+
+  it.each([
+    ['non-integers', '/?year_from=19x0&year_to=1999.5'],
+    ['out-of-range years', '/?year_from=1066&year_to=3000'],
+    ['an inverted range', '/?year_from=2000&year_to=1990'],
+    ['empty values', '/?year_from=&year_to='],
+  ])('drops %s in the URL and sends no years', async (_, path) => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ model: 'content', genres: ['Comedy'], year_from: 1980 }));
+    const recommend = recordRequests('/api/recommend');
+    renderApp(path);
+    await screen.findByRole('heading', { level: 2, name: LOTR });
+    // The URL names a view, so the remembered one is ignored entirely.
+    expect(recommend.map(queryOf)).toEqual([{ model: 'als', k: '20' }]);
+    expect(yearInput('From')).toHaveValue(null);
+    expect(yearInput('To')).toHaveValue(null);
+  });
+
+  it('remembers the range in this browser when the URL has none', async () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({ model: 'content', genres: ['Comedy'], year_from: 1980, year_to: 1989 }),
+    );
+    server.use(recommendWith(20));
+    const recommend = recordRequests('/api/recommend');
+    const { router } = renderApp('/');
+    await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
+    expect(recommend.map(queryOf)).toEqual([
+      { model: 'content', k: '20', genres: 'Comedy', year_from: '1980', year_to: '1989' },
+    ]);
+    expect(yearInput('From')).toHaveValue(1980);
+    expect(yearInput('To')).toHaveValue(1989);
+    expect(router.state.location.search).toBe('');
+  });
+
+  it('keeps the remembered range when the genres change, and the genres when the years change', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ genres: ['Comedy'], year_from: 1980 }));
+    await openPage();
+    await user.click(chip('Horror'));
+    expect(stored()).toEqual({ genres: ['Comedy', 'Horror'], year_from: 1980 });
+    await user.type(yearInput('To'), '1989');
+    expect(stored()).toEqual({ genres: ['Comedy', 'Horror'], year_from: 1980, year_to: 1989 });
+  });
+
+  it('Clear years empties the inputs, URL and storage, refetches without years and keeps focus in the controls', async () => {
+    const user = userEvent.setup();
+    server.use(recommendWith(20));
+    const { router } = renderApp('/?genres=Drama&year_from=1990&year_to=1999');
+    await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
+    const recommend = recordRequests('/api/recommend');
+    await user.click(clearYearsButton());
+    expect(yearInput('From')).toHaveValue(null);
+    expect(yearInput('To')).toHaveValue(null);
+    expect(clearYearsButton()).toBeDisabled();
+    expect(document.activeElement).toBe(yearInput('From'));
+    expect(router.state.location.search).toBe('?model=als&genres=Drama');
+    expect(stored()).toEqual({ genres: ['Drama'] });
+    await waitFor(() => expect(recommend).toHaveLength(1));
+    expect(queryOf(recommend[0]!)).toEqual({ model: 'als', k: '20', genres: 'Drama' });
+  });
+
+  it('Clear years also clears a half-typed year that was never applied', async () => {
+    const user = userEvent.setup();
+    await openPage();
+    await user.type(yearInput('To'), '19');
+    expect(clearYearsButton()).toBeEnabled();
+    await user.click(clearYearsButton());
+    expect(yearInput('To')).toHaveValue(null);
+  });
+
+  it('announces the count with the range', async () => {
+    const user = userEvent.setup();
+    server.use(recommendWith(20));
+    renderApp('/?genres=Horror');
+    await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
+    await user.type(yearInput('From'), '1990');
+    await user.type(yearInput('To'), '1999');
+    const message = await screen.findByText('20 horror picks from Implicit ALS, released 1990–1999');
+    expect(message.closest('[aria-live="polite"]')).not.toBeNull();
+  });
+
+  it.each([
+    [
+      'categories and years',
+      '/?genres=Horror&year_from=1990&year_to=1999',
+      'Only 3 horror picks released 1990–1999 right now — rate more movies or widen the categories or years.',
+    ],
+    [
+      'only years',
+      '/?year_from=1990',
+      'Only 3 picks released 1990 or later right now — rate more movies or widen the years.',
+    ],
+    ['only categories', '/?genres=Horror', 'Only 3 horror picks right now — rate more movies or widen the categories.'],
+  ])('says when a filter with %s returns fewer than 20 movies', async (_, path, text) => {
+    server.use(recommendWith(3));
+    renderApp(path);
+    await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
+    expect(screen.getByRole('main')).toHaveTextContent(text);
+  });
+
+  it('offers both clears in the empty state when categories and years match nothing', async () => {
+    const user = userEvent.setup();
+    server.use(recommendWith(0));
+    const { router } = renderApp('/?genres=Western&year_from=2020&year_to=2025');
+    const main = screen.getByRole('main');
+    const empty = (await within(main).findByText('No western picks released 2020–2025 right now.')).parentElement!;
+    expect(within(empty).getByRole('button', { name: 'Clear categories' })).toBeInTheDocument();
+    expect(await axeViolations()).toEqual([]);
+    const recommend = recordRequests('/api/recommend');
+    server.use(recommendWith(20));
+    await user.click(within(empty).getByRole('button', { name: 'Clear years' }));
+    await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
+    expect(recommend.map(queryOf)).toEqual([{ model: 'als', k: '20', genres: 'Western' }]);
+    expect(router.state.location.search).toBe('?model=als&genres=Western');
+    expect(document.activeElement).toBe(yearInput('From'));
+    // The inputs follow a range cleared from outside the controls.
+    expect(yearInput('From')).toHaveValue(null);
+    expect(yearInput('To')).toHaveValue(null);
+    expect(clearYearsButton()).toBeDisabled();
+  });
+
+  it('shows a range that arrives by navigation (a link, back or forward) in the inputs', async () => {
+    const { router } = renderApp('/?year_from=1990&year_to=1999');
+    await screen.findByRole('heading', { level: 2, name: LOTR });
+    expect(yearInput('From')).toHaveValue(1990);
+    await act(() => router.navigate('/?year_from=1980'));
+    expect(yearInput('From')).toHaveValue(1980);
+    expect(yearInput('To')).toHaveValue(null);
+    await act(() => router.navigate('/?model=als'));
+    expect(yearInput('From')).toHaveValue(null);
+    expect(clearYearsButton()).toBeDisabled();
+  });
+
+  it.each([
+    ['a half-typed year', '2'],
+    ['an out-of-range year', '2200'],
+  ])('puts the applied year back when the user leaves %s in a box', async (_, typed) => {
+    const user = userEvent.setup();
+    renderApp('/?year_from=1990');
+    await screen.findByRole('heading', { level: 2, name: LOTR });
+    const recommend = recordRequests('/api/recommend');
+    // Select the applied year and type over it, so the box never passes through empty.
+    await user.type(yearInput('From'), typed, { initialSelectionStart: 0, initialSelectionEnd: 4 });
+    expect(yearInput('From')).toHaveValue(Number(typed));
+    await user.tab();
+    expect(yearInput('From')).toHaveValue(1990);
+    expect(yearInput('From')).not.toHaveAttribute('aria-invalid');
+    expect(yearsGroup()).not.toHaveTextContent('Enter a year');
+    await letDebounceSettle();
+    expect(recommend).toHaveLength(0); // the applied range never changed
+  });
+
+  it('keeps an inverted range in the boxes, with its message, after leaving them', async () => {
+    const user = userEvent.setup();
+    await openPage();
+    await user.type(yearInput('From'), '2000');
+    await user.type(yearInput('To'), '1990');
+    await user.tab();
+    expect(yearInput('From')).toHaveValue(2000);
+    expect(yearInput('To')).toHaveValue(1990);
+    expect(yearsGroup()).toHaveTextContent('“From” must not be later than “To”.');
+  });
+
+  it('offers only Clear years in the empty state when only years are set', async () => {
+    server.use(recommendWith(0));
+    renderApp('/?year_to=1900');
+    const main = screen.getByRole('main');
+    const empty = (await within(main).findByText('No picks released 1900 or earlier right now.')).parentElement!;
+    expect(within(empty).getByRole('button', { name: 'Clear years' })).toBeInTheDocument();
+    expect(within(empty).queryByRole('button', { name: 'Clear categories' })).not.toBeInTheDocument();
+  });
+
+  it('refetches with the same years after a rating change', async () => {
+    const recommend = recordRequests('/api/recommend');
+    renderApp('/?year_from=1990&year_to=2005');
+    await screen.findByRole('heading', { level: 2, name: LOTR });
+    rateWithKeyboard(within(card(LOTR)).getByRole('slider'), 4);
+    await waitFor(() => expect(recommend).toHaveLength(2));
+    expect(queryOf(recommend[1]!)).toEqual({ model: 'als', k: '20', year_from: '1990', year_to: '2005' });
+  });
+
+  it('keeps the cold-start message with years chosen', async () => {
+    server.use(handlerFor('recommend', 'ok_cold_start'));
+    const recommend = recordRequests('/api/recommend');
+    renderApp('/?year_from=1990');
+    await screen.findByRole('heading', { level: 2, name: 'The Shawshank Redemption' });
+    expect(screen.getByRole('main')).toHaveTextContent(/Rate at least 5 movies/);
+    expect(queryOf(recommend[0]!).year_from).toBe('1990');
+  });
+
+  it('has no axe violations with a range chosen', async () => {
+    server.use(recommendWith(3));
+    renderApp('/?model=knn&genres=Horror&year_from=1990&year_to=1999');
+    await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
+    expect(await axeViolations()).toEqual([]);
+  });
+});
+
 function handlerBody(op: 'recommend', name: string): Record<string, unknown> {
   return fixtureFor(op).cases.find((c) => c.name === name)!.response.body as Record<string, unknown>;
 }

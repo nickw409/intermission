@@ -92,7 +92,9 @@ const (
 	MaxSearchQ  = 100 // characters
 	MaxSearchN  = 50
 	MaxMovieID  = 2147483647
-	MaxGenres   = 19 // Genres maxItems: every genre at most once
+	MaxGenres   = 19   // Genres maxItems: every genre at most once
+	MinYear     = 1800 // ReleaseYear minimum
+	MaxYear     = 2100 // ReleaseYear maximum
 )
 
 // ModelName is a recommender name (ModelName enum in model.yaml).
@@ -171,6 +173,11 @@ type RecommendRequest struct {
 	// Genres restricts results to movies with at least one of these genres.
 	// Empty means no restriction (the field is then omitted).
 	Genres []Genre `json:"genres,omitempty"`
+	// YearFrom and YearTo are inclusive bounds on the release year, each in
+	// [MinYear, MaxYear]; nil means unbounded (the field is then omitted).
+	// When either is set, movies without a year are not returned.
+	YearFrom *int `json:"year_from,omitempty"`
+	YearTo   *int `json:"year_to,omitempty"`
 }
 
 // CompareRequest is the body of POST /v1/compare.
@@ -181,6 +188,9 @@ type CompareRequest struct {
 	Exclude []int64     `json:"exclude,omitempty"`
 	// Genres: as in RecommendRequest.
 	Genres []Genre `json:"genres,omitempty"`
+	// YearFrom and YearTo: as in RecommendRequest.
+	YearFrom *int `json:"year_from,omitempty"`
+	YearTo   *int `json:"year_to,omitempty"`
 }
 
 // Because is one explanation entry: a movie the user rated and its weight.

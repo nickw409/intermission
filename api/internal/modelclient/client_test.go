@@ -24,6 +24,15 @@ func enum(t *testing.T, src []byte, re string) []string {
 	return out
 }
 
+// bounds returns the two submatches of re in src, or nil.
+func bounds(src []byte, re string) []string {
+	m := regexp.MustCompile(re).FindSubmatch(src)
+	if len(m) != 3 {
+		return nil
+	}
+	return []string{string(m[1]), string(m[2])}
+}
+
 // The Go enums must match contracts/model.yaml exactly.
 func TestEnumsMatchContract(t *testing.T) {
 	dir, err := contractsdir.Find()
@@ -64,6 +73,18 @@ func TestEnumsMatchContract(t *testing.T) {
 	}
 	if got, want := MaxGenres, atoiT(t, enum(t, src, `Genres:\s*\n\s*type: array\n\s*maxItems: (\d+)`)[0]); got != want {
 		t.Errorf("MaxGenres %d, model.yaml Genres maxItems %d", got, want)
+	}
+	// The release-year bounds (model.yaml ReleaseYear; public.yaml YearFrom
+	// and YearTo).
+	yr := bounds(src, `ReleaseYear:\s*\n\s*type: integer\n\s*minimum: (\d+)\n\s*maximum: (\d+)`)
+	if len(yr) != 2 || atoiT(t, yr[0]) != MinYear || atoiT(t, yr[1]) != MaxYear {
+		t.Errorf("MinYear..MaxYear %d..%d, model.yaml ReleaseYear %v", MinYear, MaxYear, yr)
+	}
+	for _, p := range []string{"YearFrom", "YearTo"} {
+		got := bounds(pub, p+`:\s*\n(?:\s+[A-Za-z]+: [^\n]*\n)*?\s*schema: \{ type: integer, minimum: (\d+), maximum: (\d+)`)
+		if len(got) != 2 || atoiT(t, got[0]) != MinYear || atoiT(t, got[1]) != MaxYear {
+			t.Errorf("MinYear..MaxYear %d..%d, public.yaml %s %v", MinYear, MaxYear, p, got)
+		}
 	}
 
 	codes := []string{ErrorCodeBadRequest, ErrorCodeInvalidJSON, ErrorCodeBodyTooLarge, ErrorCodeNotFound,
