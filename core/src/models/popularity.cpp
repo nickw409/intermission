@@ -33,6 +33,11 @@
 // Saved files (inside the model's directory): scores.bin — magic "RECSPOP1", u32 version 1,
 // u32 variant (0 = pop, 1 = pop_count), f64 m, f64 C, u32 n_items, then n_items x u32 counts and
 // n_items x f32 scores (little-endian).
+//
+// load() accepts only what fit() can write (the knn and content loaders check their files the
+// same way): finite scores; m = 0 for pop_count; C exactly 0 when no item has a rating, else C in
+// the rating range [0.5, 5]; pop_count scores equal to the counts; pop scores in the rating range
+// (each is a weighted mean of the item's ratings and C), or 0 when there are no ratings at all.
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -47,6 +52,11 @@ namespace {
 constexpr std::string_view kMagic = "RECSPOP1";
 constexpr std::uint32_t kVersion = 1;
 constexpr double kDefaultM = 10.0;
+// Ratings are in [0.5, 5] (recs/types.hpp), so C and every pop score lie in that range. The slack
+// covers double rounding in fit(); the cast to float cannot leave the range, since both ends are
+// exact floats.
+constexpr double kMinRating = 0.5, kMaxRating = 5.0, kRangeSlack = 1e-9;
+bool in_rating_range(double v) { return v >= kMinRating - kRangeSlack && v <= kMaxRating + kRangeSlack; }
 
 class Popularity final : public Model {
  public:
@@ -124,6 +134,7 @@ class Popularity final : public Model {
     if (!std::isfinite(m) || m < 0.0 || !std::isfinite(c)) {
       throw ArtifactError(std::string(name()) + ": invalid m or global mean in scores.bin");
     }
+    if (count_variant_ && m != 0.0) throw ArtifactError("pop_count: m must be 0 in scores.bin");
     const std::uint32_t n = r.u32();
     r.need_elems(n, 8);
     std::vector<std::uint32_t> counts(n);
@@ -135,6 +146,7 @@ class Popularity final : public Model {
       if (!std::isfinite(v)) throw ArtifactError(std::string(name()) + ": non-finite score in scores.bin");
     }
     r.finish();
+    check_consistent(c, counts, scores);
     m_ = m;
     global_mean_ = c;
     counts_ = std::move(counts);
@@ -149,11 +161,31 @@ class Popularity final : public Model {
   }
 
  private:
+  // The cross-checks described at the top of the file. Throws ArtifactError on the first failure.
+  void check_consistent(double c, const std::vector<std::uint32_t>& counts, const std::vector<float>& scores) const {
+    const std::string who(name());
+    std::uint64_t n_ratings = 0;
+    for (const auto n : counts) n_ratings += n;
+    if (n_ratings == 0 ? c != 0.0 : !in_rating_range(c)) {
+      // fit() stores C = 0 for an empty training set, and a mean of ratings otherwise.
+      throw ArtifactError(who + ": global mean in scores.bin is outside the rating range (or nonzero with no ratings)");
+    }
+    for (std::size_t i = 0; i < scores.size(); ++i) {
+      if (count_variant_) {
+        if (scores[i] != static_cast<float>(counts[i])) {
+          throw ArtifactError("pop_count: score " + std::to_string(i) + " differs from its count in scores.bin");
+        }
+      } else if (n_ratings == 0 ? scores[i] != 0.0f : !in_rating_range(scores[i])) {
+        throw ArtifactError("pop: score " + std::to_string(i) + " is outside the rating range in scores.bin");
+      }
+    }
+  }
+
   // pop: {"m": number >= 0} (default 10). pop_count: no keys. Unknown keys are rejected so that a
   // typo in a config file cannot silently fall back to a default.
   double parse_config(const Config& cfg) const {
     const std::string who(name());
-    if (cfg.is_null()) return kDefaultM;
+    if (cfg.is_null()) return count_variant_ ? 0.0 : kDefaultM;  // pop_count ignores m: store 0
     if (!cfg.is_object()) throw std::invalid_argument(who + ": config must be a JSON object");
     double m = kDefaultM;
     for (const auto& [key, value] : cfg.items()) {

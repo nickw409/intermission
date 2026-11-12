@@ -9,6 +9,7 @@
 #include <iterator>
 #include <limits>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -204,4 +205,106 @@ TEST_CASE("pop save rejects non-finite scores", "[security][fuzz][popularity]") 
   auto m = recs::make_model("pop");
   m->fit(small_dataset(), recs::Config{{"m", 1e308}}, {});
   CHECK_THROWS_WITH(m->save(dir.path()), ContainsSubstring("non-finite score"));
+}
+
+namespace {
+
+// A hand-written scores.bin (layout in core/src/models/popularity.cpp): variant 0 = pop,
+// 1 = pop_count.
+std::string pop_file(std::uint32_t variant, double m, double c, const std::vector<std::uint32_t>& counts,
+                     const std::vector<float>& scores) {
+  std::string b("RECSPOP1", 8);
+  const auto put = [&](const auto v) { b.append(reinterpret_cast<const char*>(&v), sizeof v); };
+  put(std::uint32_t{1});  // format version
+  put(variant);
+  put(m);
+  put(c);
+  put(static_cast<std::uint32_t>(counts.size()));
+  for (const std::uint32_t v : counts) put(v);
+  for (const float v : scores) put(v);
+  return b;
+}
+
+std::string pop_load_error(const char* name, const TempDir& dir) {
+  auto m = recs::make_model(name);
+  try {
+    m->load(dir.path());
+  } catch (const std::exception& e) {
+    return e.what();
+  }
+  return "";
+}
+
+}  // namespace
+
+// #95: the popularity loader cross-checks scores.bin the way knn and content check theirs. fit()
+// stores m = 0 for pop_count, a global mean C inside the rating range [0.5, 5] (or exactly 0 when
+// there were no ratings), pop_count scores equal to the stored counts, and pop scores that are
+// weighted means of ratings and C, so inside the rating range too. A file breaking any of these
+// was not written by fit(), so load() rejects it.
+TEST_CASE("pop load rejects inconsistent scores.bin", "[security][fuzz][popularity]") {
+  TempDir dir("pop-cross-check");
+  const auto rejects = [&](const char* name, const std::string& file, const char* what) {
+    dir.write("scores.bin", file);
+    CHECK_THAT(pop_load_error(name, dir), ContainsSubstring(what));
+  };
+  const auto loads = [&](const char* name, const std::string& file) {
+    dir.write("scores.bin", file);
+    CHECK(pop_load_error(name, dir).empty());
+  };
+
+  // pop_count: m must be 0.
+  rejects("pop_count", pop_file(1, 10.0, 3.5, {2, 1}, {2.0f, 1.0f}), "m");
+  rejects("pop_count", pop_file(1, 1e-300, 3.5, {2, 1}, {2.0f, 1.0f}), "m");
+  // pop_count: every score equals its count.
+  rejects("pop_count", pop_file(1, 0.0, 3.5, {2, 1}, {2.0f, 7.0f}), "count");
+  rejects("pop_count", pop_file(1, 0.0, 3.5, {2, 1}, {2.0f, 1.5f}), "count");
+  rejects("pop_count", pop_file(1, 0.0, 3.5, {2, 1}, {2.0f, -1.0f}), "count");
+
+  for (const auto& [name, variant, m] : {std::tuple{"pop", 0u, 10.0}, std::tuple{"pop_count", 1u, 0.0}}) {
+    INFO(name);
+    const std::vector<std::uint32_t> counts{2, 1, 0};
+    const std::vector<float> scores = variant == 1 ? std::vector<float>{2.0f, 1.0f, 0.0f}
+                                                   : std::vector<float>{4.0f, 3.5f, 3.5f};
+    // The global mean must lie in the rating range when there are ratings ...
+    for (const double c : {0.0, 0.49, -1.0, 5.01, 1e300, -1e300}) {
+      INFO("C = " << c);
+      rejects(name, pop_file(variant, m, c, counts, scores), "global mean");
+    }
+    // ... and be exactly 0 when there are none (fit() on an empty training set).
+    rejects(name, pop_file(variant, m, 3.5, {0, 0}, {0.0f, 0.0f}), "global mean");
+    // The edges of the range, and the empty case, load.
+    loads(name, pop_file(variant, m, 0.5, counts, variant == 1 ? scores : std::vector<float>{0.5f, 0.5f, 0.5f}));
+    loads(name, pop_file(variant, m, 5.0, counts, variant == 1 ? scores : std::vector<float>{5.0f, 5.0f, 5.0f}));
+    loads(name, pop_file(variant, m, 0.0, {0, 0}, {0.0f, 0.0f}));
+  }
+
+  // pop: a score is a weighted mean of ratings and C, so it lies in the rating range (or is 0 when
+  // there are no ratings at all).
+  for (const float s : {0.0f, 0.49f, 5.01f, -3.0f, 1e30f, -1e30f}) {
+    INFO("pop score = " << s);
+    rejects("pop", pop_file(0, 10.0, 3.5, {2, 1}, {4.0f, s}), "score");
+  }
+  rejects("pop", pop_file(0, 10.0, 0.0, {0, 0}, {0.0f, 1.0f}), "score");
+
+  // Files written by fit() + save() still load, for both variants, including an empty training set.
+  for (const char* name : {"pop", "pop_count"}) {
+    INFO(name);
+    for (const auto& ds : {small_dataset(), recs::make_dataset("pop-empty", 2, 3, {})}) {
+      auto fitted = recs::make_model(name);
+      fitted->fit(ds, recs::Config::object(), {});
+      fitted->save(dir.path());
+      CHECK(pop_load_error(name, dir).empty());
+    }
+  }
+}
+
+// pop_count ignores m, but fit() with a null config used to keep pop's default m = 10, which the
+// stricter load() above would then refuse. fit() now stores m = 0 for pop_count whatever the config.
+TEST_CASE("pop_count stores m = 0 even with a null config", "[security][popularity]") {
+  TempDir dir("pop-count-null-cfg");
+  auto fitted = recs::make_model("pop_count");
+  fitted->fit(small_dataset(), recs::Config(), {});
+  fitted->save(dir.path());
+  CHECK(pop_load_error("pop_count", dir).empty());
 }

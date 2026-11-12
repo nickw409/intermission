@@ -7,9 +7,10 @@
 // features.bin, centering.bin). Both end in a SHA-256, which the harness appends (see
 // fuzz_util.hpp).
 //
-// After a successful load the model is used once (fold_in + score over a few items), so a file
-// that loads but leaves inconsistent state is caught too. The ranking mask runs as well. Every
-// resulting score must pass score_allowed(): finite or -infinity, never NaN or +infinity.
+// After a successful load the model is used once (check_loaded_model() in model_check.hpp:
+// fold_in, score, the ranking mask, explain and similar), so a file that loads but leaves
+// inconsistent state is caught too. Every resulting score, explanation weight and similarity must
+// pass score_allowed(): finite or -infinity, never NaN or +infinity.
 #pragma once
 
 #include <cstddef>
@@ -22,7 +23,7 @@
 
 #include "fuzz_util.hpp"
 #include "recs/model.hpp"
-#include "score_check.hpp"
+#include "model_check.hpp"
 
 namespace recs::fuzz {
 
@@ -88,28 +89,8 @@ inline int model_load(std::string_view model, const std::uint8_t* data, std::siz
   } catch (const std::exception&) {
     return 0;
   }
-  // Loaded: the model must be usable. Exercise fold-in and scoring on a tiny profile.
-  const std::uint32_t n = m->n_items();
-  if (n == 0 || n > (1u << 20)) return 0;
-  std::vector<Rating> ratings;
-  ratings.push_back({0, 4.5f});
-  if (n > 1) ratings.push_back({n - 1, 2.0f});
-  try {
-    const UserState u = m->fold_in(ratings);
-    std::vector<float> out(n);
-    m->score(u, out);
-    // Check before the mask too: it overwrites masked items with -inf, which would hide a bad
-    // score from eval's prediction path (that one does not mask).
-    for (float v : out) {
-      if (!score_allowed(v)) __builtin_trap();  // NaN or +inf (see score_check.hpp)
-    }
-    m->mask_unrankable(out);  // the ranking mask must cope with whatever the file held
-    for (float v : out) {
-      if (!score_allowed(v)) __builtin_trap();
-    }
-  } catch (const std::exception&) {
-    // A model may refuse a profile; that is a clean failure, not a crash.
-  }
+  // Loaded: the model must be usable (model_check.hpp).
+  if (!check_loaded_model(*m).empty()) __builtin_trap();
   return 0;
 }
 
