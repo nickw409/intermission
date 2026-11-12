@@ -200,7 +200,8 @@ TEST_CASE("recs-model: years: result is the filtered full ranking, for every mod
 
 TEST_CASE("recs-model: years: bounds are inclusive at both ends", "[model-service][years]") {
   Fixture f;
-  // Pulp Fiction, Forrest Gump and Shawshank are 1994; Matrix and Fight Club are 1999.
+  // Pulp Fiction, Forrest Gump and Shawshank are 1994; Lone Star (1081) is 1996; Matrix and Fight Club
+  // are 1999; Jurassic Park (480) is 1993, just outside.
   const json got = items_of(f, rec_body("pop", 100, {1994, 1999}));
   std::vector<std::int64_t> ids;
   for (const auto& it : got) ids.push_back(it["movie_id"].get<std::int64_t>());

@@ -350,21 +350,17 @@ YearRange parse_years(const json& obj) {
 // Masking before recommend()'s top-k cut (not filtering its output) means the result is the k best
 // MATCHING items, in the order the unfiltered ranking would put them. Shared by recommend and
 // compare, so every model is filtered the same way and no model needs to know about genres or
-// years. O(n_items): one bitwise AND and at most two comparisons per item.
+// years. O(n_items): one pass, with one bitwise AND and at most two comparisons per item.
 // Any future re-ranker (mmr, hybrid) must receive this pre-masked list too, so the filters are
 // applied before re-ranking: re-ranking first and filtering after would return fewer than k items
 // and a different order than re-ranking the matching set.
 std::vector<ItemIdx> masked_items(const Bundle& b, std::vector<ItemIdx> exclude, GenreMask wanted, const YearRange& years) {
   if (wanted == 0 && !years.active()) return exclude;
   const std::uint32_t n = b.n_items();
-  const auto fails = [&](ItemIdx i) {
-    return (wanted != 0 && (b.genre_mask[i] & wanted) == 0) || !years.matches(b.catalog.movies[i].year);
-  };
-  std::size_t non_matching = 0;
-  for (ItemIdx i = 0; i < n; ++i) non_matching += fails(i);
-  exclude.reserve(exclude.size() + non_matching);
   for (ItemIdx i = 0; i < n; ++i) {
-    if (fails(i)) exclude.push_back(i);
+    const bool genre_ok = wanted == 0 || (b.genre_mask[i] & wanted) != 0;
+    const bool year_ok = years.matches(b.catalog.movies[i].year);
+    if (!genre_ok || !year_ok) exclude.push_back(i);
   }
   return exclude;
 }
@@ -492,7 +488,12 @@ class Handler {
     const auto [name, model] = resolve_model(*b_, j.at("model"));
     const std::size_t k = get_k(j);
     const ParsedRatings ratings = parse_ratings(*b_, j.at("ratings"));
-    const auto exclude = masked_items(*b_, parse_exclude(*b_, j), parse_genres(j), parse_years(j));
+    // Parsed one by one (argument evaluation order is unspecified in C++), so a request with several
+    // bad fields always gets the same 400.
+    auto excluded = parse_exclude(*b_, j);
+    const GenreMask genres = parse_genres(j);
+    const YearRange years = parse_years(j);
+    const auto exclude = masked_items(*b_, std::move(excluded), genres, years);
     return dump(json{{"model", name}, {"items", run(name, *model, ratings, k, exclude)}, {"ignored", ratings.ignored}});
   }
 
@@ -512,7 +513,10 @@ class Handler {
     }
     const std::size_t k = get_k(j);
     const ParsedRatings ratings = parse_ratings(*b_, j.at("ratings"));
-    const auto exclude = masked_items(*b_, parse_exclude(*b_, j), parse_genres(j), parse_years(j));  // once, for every model
+    auto excluded = parse_exclude(*b_, j);  // one by one, as in recommend_route
+    const GenreMask genres = parse_genres(j);
+    const YearRange years = parse_years(j);
+    const auto exclude = masked_items(*b_, std::move(excluded), genres, years);  // once, for every model
     json results = json::array();
     for (const auto& [name, model] : models) {
       results.push_back({{"model", name}, {"items", run(name, *model, ratings, k, exclude)}});
