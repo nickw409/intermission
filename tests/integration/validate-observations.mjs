@@ -17,7 +17,7 @@
 //   - the path is routed to this operation and no other: a literal template segment
 //     (/api/movies/search) wins over a parameter ({movieId}), as in recs-api's router;
 //   - a response whose contract declares no content has no body.
-// With --require-coverage, every operation (minus the listed phase-6 exclusions) must have been
+// With --require-coverage, every operation (minus the listed exclusions) must have been
 // observed with every documented status. A coverage table is printed either way.
 //
 // Uses the pinned ajv/yaml from tools/contracts (run `npm ci` there first).
@@ -39,10 +39,9 @@ const BASE = 'https://intermission.local/contracts/';
 const METHODS = ['get', 'put', 'post', 'delete', 'patch'];
 const OPENAPI_KEYWORDS = ['openapi', 'info', 'servers', 'security', 'tags', 'paths', 'components'];
 
-// Operations outside this gate: getFeedbackStats is phase 6 and not built yet. postFeedback is
-// built (not_interested) and observed, but not every documented status is exercised here (its
-// 413 and 429 are covered by the recs-api unit tests against the fixtures).
-const EXCLUDED = { public: new Set(['postFeedback', 'getFeedbackStats']), model: new Set() };
+// Operations outside this gate: getFeedbackStats (GET /api/feedback/stats) is the rest of
+// phase 6 and recs-api has no route for it yet. Remove it from this set when it is built.
+const EXCLUDED = { public: new Set(['getFeedbackStats']), model: new Set() };
 
 const args = process.argv.slice(2);
 const file = args.find((a) => !a.startsWith('--'));
@@ -153,7 +152,7 @@ const missing = [];
 console.log('coverage (operation: status=count; "-" = documented, not observed):');
 for (const [spec, map] of Object.entries(ops)) {
   for (const [id, info] of map) {
-    if (EXCLUDED[spec].has(id)) { console.log(`  ${spec} ${id}: excluded (phase 6)`); continue; }
+    if (EXCLUDED[spec].has(id)) { console.log(`  ${spec} ${id}: excluded (not built yet)`); continue; }
     const cells = Object.keys(info.op.responses).map((s) => {
       const n = seen.get(`${spec} ${id} ${s}`) ?? 0;
       const k = `${spec} ${id} ${s}`;
