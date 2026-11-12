@@ -14,14 +14,18 @@ deploy/release.sh <sha>
 
 1. builds `intermission-{api,model,train,web,backup}:<sha>` from a clean `git worktree` of the
    commit if they are not already loaded (`deploy/build.sh <sha>`; ~10 min cold, C++ dominates),
-2. writes `TAG=<sha>` to `deploy/.env`,
-3. `docker compose up -d caddy api model`, then checks that all three run the new tag,
-4. waits up to 120 s for `/healthz` through Caddy,
-5. runs `deploy/smoke.sh` (healthz, SPA headers, login as the smoke account, `/api/me`,
+2. runs the new image's `recs-model --check` against the artifact `CURRENT` points at (see
+   "Retrain detection" below) and **stops, changing nothing,** if it would not load or the check
+   cannot run,
+3. writes `TAG=<sha>` to `deploy/.env`,
+4. `docker compose up -d caddy api model`, then checks that all three run the new tag,
+5. waits up to 120 s for `/healthz` through Caddy,
+6. runs `deploy/smoke.sh` (healthz, SPA headers, login as the smoke account, `/api/me`,
    `/api/recommend`, logout),
-6. records the SHA in `deploy/history` (last 5).
+7. records the SHA in `deploy/history` (last 5),
+8. notes whether the serving artifact was trained by older training code (see below).
 
-If any step fails it prints the last 50 log lines and **rolls back automatically** to the
+If a step after the check fails it prints the last 50 log lines and **rolls back automatically** to the
 previous `TAG` (pass `--no-rollback` to keep the failed version up for debugging). Exit code is
 non-zero either way. Re-running the same SHA is safe: it just re-checks it.
 
@@ -39,7 +43,56 @@ any value still starts with `change-me` (the `.env.example` placeholders). Relea
 nightly and restore-drill also share one lock (`deploy/ops.lock`), so they never overlap; a
 release waits at most 2 minutes for it (`RELEASE_LOCK_WAIT`), then stops and names the holder.
 
-**Model artifacts that need a retrain first.** A content model saved before the profile-centering
+Development uses a separate compose project (`intermission-dev`), port 127.0.0.1:8088 and data
+directory `data/dev/` (see `deploy/compose.dev.yaml`), so it never touches production.
+
+### Retrain detection
+
+`release.sh` answers "does this release need a retrain?" in two parts:
+
+- **Required (the release stops).** Before touching anything it runs the new image's
+  `recs-model --check` as the one-off compose service `model-check` (`deploy/lib.sh`
+  `check_artifact`): the model image, user and artifacts (read-only), no network and no model
+  socket. It loads and verifies the artifact `CURRENT` names through the same code the server
+  uses, and exits:
+  - **0**: it loads; the release continues.
+  - **3**: that recs-model would refuse it (a model file format it no longer reads, or, on a
+    rollback, one newer than it knows). The release stops, the running version keeps serving, and
+    `RetrainRequired` fires (`intermission_job_last_status{task="artifact_check"}`). Retrain with
+    the new train image as below, then run `release.sh <sha>` again. A later passing check, or
+    any later successful release, clears the alert.
+  - **4**: there is no `CURRENT`. The release stops; train a first artifact (first-time setup).
+  - anything else, or the image does not start: the check could not run. The release stops with
+    the reason; no alert is recorded.
+- **Recommended (the release goes ahead).** The check prints the artifact's `git_sha` (the
+  commit whose train image built it). After a successful release, `release.sh` diffs the training
+  code between that commit and the release (`TRAINING_PATHS` in `lib.sh`: `core/`, `train/`,
+  `configs/`, `cmake/`, `CMakeLists.txt`, `CMakePresets.json`, `train.Dockerfile`). Any
+  difference, in either direction (a rollback can leave the artifact newer than the code), logs a
+  note and fires `RetrainRecommended` (severity info, `task="artifact_freshness"`). It is
+  deliberately broad: a comment edit in `core/` also counts. After retraining, re-run
+  `deploy/release.sh <running sha>` (quick: images are present) to re-check and clear it. An
+  artifact whose `git_sha` is not exactly one commit in this repository is reported as "cannot
+  tell" and records nothing.
+
+**Images built before `--check` existed** (every release up to and including `3cdeb1d`) cannot
+be asked. For a rollback to one of them, the preflight and the freshness check are skipped with a
+warning, so the protection against an artifact newer than the code (the format 3 KNN case below)
+does not apply: that case still fails at the smoke test and rolls back automatically. Only a
+target image that has `--check` is checked.
+
+Run training (`compose run --rm train train ... --set-current`) and `release.sh` one after the
+other, never at the same time: the training run does not take `ops.lock`, so `CURRENT` could
+change between the check and `compose up`.
+
+The check loads the full artifact next to the running recs-model, so it briefly needs as much
+memory again (`MODEL_MEM_LIMIT`, 4 GB by default). On the production artifact (ml-32m, six
+models) it took about a second. Alerts show at http://127.0.0.1:9090/alerts until a delivery
+channel exists (`monitoring.md`, "Known gaps").
+
+### Model artifacts that need a retrain first
+
+ A content model saved before the profile-centering
 change (Phase 1, `docs/phase-1.md` "Content centering (option b)") has no `content/centering.bin`.
 The new recs-model refuses it ("content artifact predates centering.bin; retrain"), and because an
 artifact loads as one unit, the whole artifact would be rejected. Before deploying that change (or
@@ -71,9 +124,6 @@ next artifact trained by the new image. Rollback in the other direction does not
 recs-model refuses a format 3 `knn/item_knn.bin` ("unsupported format version"). Once a format 3
 artifact is `CURRENT`, rolling the code back to a pre-format-3 SHA also needs `CURRENT` pointed
 at an older artifact (keep the previous artifact until the new one has been live for a while).
-
-Development uses a separate compose project (`intermission-dev`), port 127.0.0.1:8088 and data
-directory `data/dev/` (see `deploy/compose.dev.yaml`), so it never touches production.
 
 ## First-time setup (once per machine)
 

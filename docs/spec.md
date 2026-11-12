@@ -37,6 +37,7 @@ Build a movie recommender in C++ that people can use through a web UI: they crea
 | Packaging and deploy | Docker Compose, with images tagged by git SHA | Build once, deploy that exact build. Rollback means running the previous tag. |
 | Hosting | The owner's own machine | No budget for a server; opening an inbound firewall port is not allowed. |
 | Dataset | MovieLens (GroupLens) | Standard benchmark with ratings, timestamps, genres, tags, tag genome and TMDB links. |
+| Newer releases | Wikidata (CC0) catalog supplement, fetched at batch time | MovieLens 32M stops in 2023. Wikidata has no licence limits on training or storage. TMDB's terms forbid using its content for ML, and scraping is ruled out. Added 2026-11-12 at the owner's request. |
 | GPU | Not used until the optional final phase | Premature for this data size. |
 
 ## Primer: how recommenders work
@@ -133,6 +134,13 @@ Develop on `ml-latest-small` (about 100k ratings, so every test runs in seconds)
 5. Write a binary cache (header with magic, version, counts, checksum) so later runs skip CSV parsing.
 
 **Website users.** At retrain time, website users' ratings are appended as extra users with IDs after the MovieLens range. Their accounts and ratings live only in SQLite and are never written into any exported dataset.
+
+**Newer releases (Wikidata supplement).** Added 2026-11-12 at the owner's request; the design is in `docs/plans/2026-11-12-new-releases.md`.
+
+- `tools/fetch_wikidata.sh` runs on the host at batch time, never inside a service, and queries `query.wikidata.org` (CC0 data). It writes dated, checksummed snapshots to `data/raw/wikidata/YYYY-MM-DD/`. recs-train ingests them with no network access. Nothing at runtime depends on Wikidata.
+- Films with an earliest publication date (P577) from 2023-01-01 to the fetch date, at least 5 sitelinks, and an IMDb or TMDB ID join the catalog with `movieId = 1,000,000,000 + QID number`. Films already in `links.csv` are skipped. Genres map to the MovieLens genres through a reviewed mapping file.
+- Wikidata features (genre, director, cast, country, language) may be used by the content model for every movie that has them. TMDB content is never used for training, features or catalog membership.
+- Offline evaluation never loads supplement items, so the evaluation protocol is unchanged. Reports that use Wikidata features record the snapshot date and SHA-256.
 
 **Licensing.** The MovieLens license forbids commercial or revenue-bearing use without permission. Redistributing the data or transformations of it is only allowed under the same license, and you must not state or imply endorsement by the University of Minnesota or GroupLens. A free, non-commercial demo that serves recommendations fits within this. The site footer credits GroupLens and does not offer dataset or model-factor downloads. Read the [ml-32m README](https://files.grouplens.org/datasets/movielens/ml-32m-README.html) before going public.
 
@@ -572,7 +580,7 @@ Deliverables:
 3. Never change the evaluation protocol (split, relevance threshold, metrics) to improve a model's numbers. Protocol changes need the owner's sign-off and bump the report schema version.
 4. After each phase, write `docs/phase-N.md`: what was built, gate results, the headline metrics table, and anything surprising.
 5. All randomness is seeded and every seed is recorded in the report.
-6. Pin every dependency version. No network access at runtime except recs-api's TMDB fetches (posters and movie details).
+6. Pin every dependency version. No network access at runtime except recs-api's TMDB fetches (posters and movie details). The Wikidata fetch is a batch-time host script, not runtime access.
 7. Keep secrets (TMDB key) in environment variables loaded by systemd, never in the repo.
 8. Prefer clear code over clever code in librecs. This is a learning codebase, so each model's file starts with a comment block explaining the math, with references.
 
