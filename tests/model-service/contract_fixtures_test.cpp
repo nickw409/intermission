@@ -80,7 +80,15 @@ std::set<std::int64_t> ids_of(const json& arr) {
   return s;
 }
 
-// Invariants of an item list produced for request body `body`.
+// The fixture catalog's row for `id`.
+const recs::testing::CatalogRow& catalog_row(std::int64_t id) {
+  static const auto rows = recs::testing::fixture_catalog_rows();
+  const auto it = std::find_if(rows.begin(), rows.end(), [&](const auto& r) { return r.id == id; });
+  REQUIRE(it != rows.end());
+  return *it;
+}
+
+// Invariants of an item list produced for request body `body`, including its genre and year filters.
 void check_items(const json& items, const json& body) {
   CHECK(items.size() <= body.at("k").get<std::size_t>());
   std::set<std::int64_t> rated;
@@ -93,6 +101,17 @@ void check_items(const json& items, const json& body) {
     CHECK_FALSE(excluded.contains(id));
     CHECK(seen.insert(id).second);
     for (const auto& b : it.at("because")) CHECK(rated.contains(b.at("movie_id").get<std::int64_t>()));
+    const auto& row = catalog_row(id);
+    if (body.contains("genres") && !body["genres"].empty()) {
+      CHECK(std::any_of(body["genres"].begin(), body["genres"].end(), [&](const json& g) {
+        return std::find(row.genres.begin(), row.genres.end(), g.get<std::string>()) != row.genres.end();
+      }));
+    }
+    if (body.contains("year_from") || body.contains("year_to")) {
+      REQUIRE(row.year.has_value());
+      if (body.contains("year_from")) CHECK(*row.year >= body["year_from"].get<int>());
+      if (body.contains("year_to")) CHECK(*row.year <= body["year_to"].get<int>());
+    }
   }
 }
 
@@ -222,14 +241,17 @@ TEST_CASE("recs-model: transcribed schemas match model.yaml", "[model-service][c
   CHECK(required_checked >= 17);
   CHECK(enums_checked >= 5);
 
-  // The request schemas: every property that is a $ref appears as that line in model.yaml, and the
-  // genre list's bounds match.
+  // The request schemas: every property that is a $ref appears as that line in model.yaml (the
+  // line may go on with a description after the $ref), and the genre list's and release year's
+  // bounds match.
   for (const char* req : {"RecommendRequest", "CompareRequest"}) {
     const json& props = components.at(req).at("properties");
     CHECK(props.contains("genres"));
+    CHECK(props.contains("year_from"));
+    CHECK(props.contains("year_to"));
     for (const auto& [prop, sub] : props.items()) {
       if (!sub.contains("$ref")) continue;
-      const std::string line = prop + ": { $ref: '" + sub["$ref"].get<std::string>() + "' }";
+      const std::string line = "        " + prop + ": { $ref: '" + sub["$ref"].get<std::string>() + "'";
       INFO(req << ": " << line);
       CHECK(yaml.find(line) != std::string::npos);
     }
@@ -240,4 +262,8 @@ TEST_CASE("recs-model: transcribed schemas match model.yaml", "[model-service][c
   CHECK(components.at("Genre").at("enum").size() == 19);
   CHECK(yaml.find("    Genres:\n      type: array\n      maxItems: 19\n      uniqueItems: true\n") != std::string::npos);
   CHECK(yaml.find("items: { $ref: '#/components/schemas/Genre' }") != std::string::npos);
+  const json& year = components.at("ReleaseYear");
+  CHECK(year.at("minimum") == 1800);
+  CHECK(year.at("maximum") == 2100);
+  CHECK(yaml.find("    ReleaseYear:\n      type: integer\n      minimum: 1800\n      maximum: 2100\n") != std::string::npos);
 }
