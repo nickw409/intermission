@@ -80,6 +80,11 @@ type NotInterestedList struct {
 }
 
 func register(mux *http.ServeMux, d *app.Deps, now func() time.Time) {
+	registerWith(mux, d, now, nil)
+}
+
+// registerWith is register with a test hook that receives the undo limiter.
+func registerWith(mux *http.ServeMux, d *app.Deps, now func() time.Time, observe func(undo *ratelimit.Keyed)) {
 	logger := d.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -91,11 +96,14 @@ func register(mux *http.ServeMux, d *app.Deps, now func() time.Time) {
 	userBuckets := ratelimit.NewKeyed(ratelimit.FeedbackPerSession, clock)
 	perUser := ratelimit.Middleware(userBuckets, userKey)
 	undoBuckets := ratelimit.NewKeyed(ratelimit.DeletePerUser, clock)
-	perUserUndo := ratelimit.Middleware(undoBuckets, userKey)
+	perUserUndo := ratelimit.Middleware(undoBuckets, undoKey)
+	if observe != nil {
+		observe(undoBuckets)
+	}
 	// A deleted account's buckets go with it (its IDs are never reused).
 	d.DB.OnUserDeleted(func(uid int64) {
 		userBuckets.Retire(userBucket(uid))
-		undoBuckets.Retire(userBucket(uid))
+		undoBuckets.Retire(undoBucket(uid))
 	})
 	mux.Handle("POST /api/feedback", session(perSession(perUser(http.HandlerFunc(h.post)))))
 	mux.Handle("GET /api/feedback/not-interested", session(http.HandlerFunc(h.listNotInterested)))
@@ -112,6 +120,18 @@ func userKey(r *http.Request) (string, bool) {
 }
 
 func userBucket(uid int64) string { return "feedback-user:" + strconv.FormatInt(uid, 10) }
+
+// undoKey is the per-user key for the undo limiter, a separate budget from
+// POST /api/feedback.
+func undoKey(r *http.Request) (string, bool) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		return "", false
+	}
+	return undoBucket(uid), true
+}
+
+func undoBucket(uid int64) string { return "feedback-undo-user:" + strconv.FormatInt(uid, 10) }
 
 // parse decodes and validates a FeedbackRequest body. Every error is an
 // *apperr.Error (400 invalid_json or bad_request). The action is checked

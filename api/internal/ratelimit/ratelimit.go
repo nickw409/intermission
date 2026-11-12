@@ -34,7 +34,7 @@ var (
 	FeedbackPerSession = Config{Every: time.Minute / 60, Burst: 60}
 	// DeletePerUser: 60 calls per minute per user to each of DELETE
 	// /api/ratings/{movieId} and DELETE /api/feedback/not-interested/{movieId}.
-	// Each opens a write transaction, even when there is nothing to delete.
+	// A delete that removes something takes the single writer connection.
 	DeletePerUser = Config{Every: time.Minute / 60, Burst: 60}
 	// LoginGlobal caps login attempts across all accounts (each costs an
 	// Argon2id hash): 60 per minute.

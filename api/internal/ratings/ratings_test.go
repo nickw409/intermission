@@ -13,8 +13,10 @@ import (
 	"time"
 
 	"github.com/nickw409/intermission/api/internal/app"
+	"github.com/nickw409/intermission/api/internal/auth"
 	"github.com/nickw409/intermission/api/internal/db"
 	"github.com/nickw409/intermission/api/internal/moviecache/cachetest"
+	"github.com/nickw409/intermission/api/internal/ratelimit"
 )
 
 // fixedNow is the updated_at in contracts/fixtures/public/putRating.json.
@@ -445,5 +447,29 @@ func TestDeleteLimitIsPerUser(t *testing.T) {
 	_, bobTok := cachetest.NewUser(t, e.DB, "bob")
 	if rec := e.Do("DELETE", "/api/ratings/1", nil, bobTok); rec.Code != http.StatusNoContent {
 		t.Errorf("bob got %d", rec.Code)
+	}
+}
+
+// Deleting an account retires its DELETE bucket for good.
+func TestAccountDeletionRetiresDeleteBucket(t *testing.T) {
+	var buckets *ratelimit.Keyed
+	e := cachetest.NewEnv(t, nil, auth.Register, func(mux *http.ServeMux, d *app.Deps) {
+		registerWith(mux, d, func() time.Time { return fixedNow }, func(k *ratelimit.Keyed) { buckets = k })
+	})
+	uid, tok := cachetest.NewUser(t, e.DB, "alice")
+	if rec := e.Do("DELETE", "/api/ratings/1", nil, tok); rec.Code != http.StatusNoContent {
+		t.Fatalf("delete rating: %d", rec.Code)
+	}
+	if buckets.Len() != 1 {
+		t.Fatalf("buckets = %d after one delete, want 1", buckets.Len())
+	}
+	if rec := e.Do("DELETE", "/api/me", nil, tok); rec.Code != http.StatusNoContent {
+		t.Fatalf("delete account: %d %s", rec.Code, rec.Body.String())
+	}
+	if buckets.Len() != 0 {
+		t.Errorf("buckets = %d after the account was deleted, want 0", buckets.Len())
+	}
+	if ok, _ := buckets.Allow(userBucket(uid)); ok || buckets.Len() != 0 {
+		t.Error("a deleted user's bucket came back")
 	}
 }

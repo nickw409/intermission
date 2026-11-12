@@ -69,6 +69,11 @@ type handler struct {
 }
 
 func register(mux *http.ServeMux, d *app.Deps, now func() time.Time) {
+	registerWith(mux, d, now, nil)
+}
+
+// registerWith is register with a test hook that receives the DELETE limiter.
+func registerWith(mux *http.ServeMux, d *app.Deps, now func() time.Time, observe func(*ratelimit.Keyed)) {
 	logger := d.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -77,6 +82,9 @@ func register(mux *http.ServeMux, d *app.Deps, now func() time.Time) {
 	session := auth.RequireSession(d)
 	deleteBuckets := ratelimit.NewKeyed(ratelimit.DeletePerUser, ratelimit.WithClock(now))
 	perUser := ratelimit.Middleware(deleteBuckets, userKey)
+	if observe != nil {
+		observe(deleteBuckets)
+	}
 	// A deleted account's bucket goes with it (its IDs are never reused).
 	d.DB.OnUserDeleted(func(uid int64) { deleteBuckets.Retire(userBucket(uid)) })
 	mux.Handle("GET /api/ratings", session(http.HandlerFunc(h.list)))
@@ -289,6 +297,16 @@ func (h *handler) delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err = func() error {
+		// Nothing to delete is checked on the reader, so a no-op delete never
+		// takes the single writer connection.
+		var exists bool
+		if err := h.db.Reader.QueryRowContext(ctx,
+			"SELECT EXISTS (SELECT 1 FROM ratings WHERE user_id = ? AND movie_id = ?)", uid, movieID).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return nil
+		}
 		tx, err := h.db.Writer.BeginTx(ctx, nil)
 		if err != nil {
 			return err

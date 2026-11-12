@@ -149,7 +149,7 @@
       "response": {
         "status": 429,
         "headers": {
-          "Retry-After": "30"
+          "Retry-After": "1"
         },
         "body": {
           "error": {

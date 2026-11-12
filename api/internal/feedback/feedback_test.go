@@ -7,14 +7,15 @@ import (
 	"errors"
 	"net/http"
 	"slices"
-	"strconv"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/nickw409/intermission/api/internal/app"
+	"github.com/nickw409/intermission/api/internal/auth"
 	"github.com/nickw409/intermission/api/internal/db"
 	"github.com/nickw409/intermission/api/internal/moviecache/cachetest"
+	"github.com/nickw409/intermission/api/internal/ratelimit"
 )
 
 var fixedNow = time.Unix(1794259200, 0)
@@ -71,16 +72,9 @@ func TestContractFixtures(t *testing.T) {
 						t.Fatalf("request %d: %d", i, code)
 					}
 				}
-				// Retry-After depends on the bucket shape; check it by shape below.
-				delete(c.Response.Headers, "Retry-After")
 			}
 			before := cachetest.RatingsVersion(t, e.DB, uid)
-			rec := e.Replay(c, tok)
-			if c.Name == "rate_limited" {
-				if n, err := strconv.Atoi(rec.Header().Get("Retry-After")); err != nil || n < 1 || n > 60 {
-					t.Errorf("Retry-After %q", rec.Header().Get("Retry-After"))
-				}
-			}
+			e.Replay(c, tok)
 			after := cachetest.RatingsVersion(t, e.DB, uid)
 			stored := notInterestedRows(t, e.DB, uid)
 			if c.Name == "ok" {
@@ -457,5 +451,97 @@ func TestListNewestFirstWithPlaceholderTitles(t *testing.T) {
 	_, carolTok := cachetest.NewUser(t, e.DB, "carol")
 	if rec := e.Do("GET", "/api/feedback/not-interested", nil, carolTok); rec.Code != 200 || rec.Body.String() != `{"items":[]}` {
 		t.Errorf("empty: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// secondSession adds another live session for uid and returns its token.
+func secondSession(t *testing.T, e *cachetest.Env, uid int64) string {
+	t.Helper()
+	tok := base64.RawURLEncoding.EncodeToString(sha256.New().Sum([]byte("second"))[:32]) // 32 bytes, like a real token
+	sum := sha256.Sum256([]byte(tok))
+	now := time.Now().Unix()
+	if _, err := e.DB.Writer.Exec("INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+		sum[:], uid, now, now+3600); err != nil {
+		t.Fatal(err)
+	}
+	return tok
+}
+
+func undo(e *cachetest.Env, movie, token string) int {
+	return e.Do("DELETE", "/api/feedback/not-interested/"+movie, nil, token).Code
+}
+
+// The undo limit is per user: a second session shares the bucket and another
+// user is unaffected.
+func TestUndoLimitIsPerUser(t *testing.T) {
+	e := newEnv(t)
+	uid, tok := cachetest.NewUser(t, e.DB, "alice")
+	second := secondSession(t, e, uid)
+	for i := 0; i < 60; i++ {
+		if code := undo(e, "7", tok); code != http.StatusNoContent {
+			t.Fatalf("undo %d: %d", i, code)
+		}
+	}
+	if code := undo(e, "7", second); code != http.StatusTooManyRequests {
+		t.Errorf("second session got %d, want 429 from the per-user bucket", code)
+	}
+	_, bobTok := cachetest.NewUser(t, e.DB, "bob")
+	if code := undo(e, "7", bobTok); code != http.StatusNoContent {
+		t.Errorf("bob got %d", code)
+	}
+}
+
+// Undo and POST /api/feedback are separate budgets: running out of one leaves
+// the other alone, in both directions.
+func TestUndoAndPostLimitsAreSeparate(t *testing.T) {
+	e := newEnv(t)
+	_, alice := cachetest.NewUser(t, e.DB, "alice")
+	for i := 0; i < 60; i++ {
+		if code := post(e, `{"movieId":2959,"model":"als","action":"click"}`, alice); code != http.StatusNoContent {
+			t.Fatalf("post %d: %d", i, code)
+		}
+	}
+	if code := post(e, `{"movieId":2959,"model":"als","action":"click"}`, alice); code != http.StatusTooManyRequests {
+		t.Fatalf("post 61: %d, want 429", code)
+	}
+	if code := undo(e, "7", alice); code != http.StatusNoContent {
+		t.Errorf("undo after POST budget spent: %d", code)
+	}
+
+	_, bob := cachetest.NewUser(t, e.DB, "bob")
+	for i := 0; i < 60; i++ {
+		if code := undo(e, "7", bob); code != http.StatusNoContent {
+			t.Fatalf("undo %d: %d", i, code)
+		}
+	}
+	if code := undo(e, "7", bob); code != http.StatusTooManyRequests {
+		t.Fatalf("undo 61: %d, want 429", code)
+	}
+	if code := post(e, `{"movieId":2959,"model":"als","action":"click"}`, bob); code != http.StatusNoContent {
+		t.Errorf("POST after undo budget spent: %d", code)
+	}
+}
+
+// Deleting an account retires its undo bucket for good.
+func TestAccountDeletionRetiresUndoBucket(t *testing.T) {
+	var buckets *ratelimit.Keyed
+	e := cachetest.NewEnv(t, nil, auth.Register, func(mux *http.ServeMux, d *app.Deps) {
+		registerWith(mux, d, func() time.Time { return fixedNow }, func(k *ratelimit.Keyed) { buckets = k })
+	})
+	uid, tok := cachetest.NewUser(t, e.DB, "alice")
+	if code := undo(e, "7", tok); code != http.StatusNoContent {
+		t.Fatalf("undo: %d", code)
+	}
+	if buckets.Len() != 1 {
+		t.Fatalf("buckets = %d after one undo, want 1", buckets.Len())
+	}
+	if rec := e.Do("DELETE", "/api/me", nil, tok); rec.Code != http.StatusNoContent {
+		t.Fatalf("delete account: %d %s", rec.Code, rec.Body.String())
+	}
+	if buckets.Len() != 0 {
+		t.Errorf("buckets = %d after the account was deleted, want 0", buckets.Len())
+	}
+	if ok, _ := buckets.Allow(undoBucket(uid)); ok || buckets.Len() != 0 {
+		t.Error("a deleted user's undo bucket came back")
 	}
 }
