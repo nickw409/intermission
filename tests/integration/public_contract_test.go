@@ -314,6 +314,33 @@ func TestPublicContract(t *testing.T) {
 	// ---- logout and delete ----
 	bob := newPublicClient(t)
 	bob.expect("signup", "signup bob", "POST", "/api/auth/signup", map[string]string{"username": "bob", "password": pass, "invite_code": code}, 201, "")
+	// DELETE limits: 60 per minute per user on each of the two DELETE routes,
+	// separate budgets. bob's buckets are fresh, so his first 60 calls to each
+	// route succeed (refills only add tokens) and a 429 follows. Up to 120
+	// calls leave room for refills on a slow runner (one token per second).
+	for _, d := range []struct{ op, path string }{
+		{"deleteRating", "/api/ratings/1"},
+		{"deleteNotInterested", "/api/feedback/not-interested/1"},
+	} {
+		var deleteLimited response
+		for i := 0; i < 120; i++ {
+			resp := bob.call(d.op, fmt.Sprintf("%s until limited %d", d.op, i), "DELETE", d.path, nil, false)
+			if resp.Status == http.StatusTooManyRequests {
+				if i < 60 {
+					t.Errorf("%s: 429 on call %d, want the first 60 to succeed", d.op, i+1)
+				}
+				deleteLimited = resp
+				break
+			}
+			if resp.Status != http.StatusNoContent {
+				t.Errorf("%s call %d: status %d, want 204", d.op, i+1, resp.Status)
+			}
+		}
+		checkResp(t, d.op+" rate limited", deleteLimited, 429, "rate_limited")
+		if deleteLimited.Header.Get("Retry-After") == "" {
+			t.Errorf("%s: 429 without Retry-After", d.op)
+		}
+	}
 	bob.expect("logout", "logout bob", "POST", "/api/auth/logout", nil, 204, "")
 	bob.expect("getMe", "me after logout", "GET", "/api/me", nil, 401, "unauthorized")
 	checkResp(t, "logout no csrf", alice.call("logout", "logout no csrf", "POST", "/api/auth/logout", nil, true), 403, "csrf_rejected")

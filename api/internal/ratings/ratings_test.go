@@ -1,6 +1,8 @@
 package ratings
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,8 +13,10 @@ import (
 	"time"
 
 	"github.com/nickw409/intermission/api/internal/app"
+	"github.com/nickw409/intermission/api/internal/auth"
 	"github.com/nickw409/intermission/api/internal/db"
 	"github.com/nickw409/intermission/api/internal/moviecache/cachetest"
+	"github.com/nickw409/intermission/api/internal/ratelimit"
 )
 
 // fixedNow is the updated_at in contracts/fixtures/public/putRating.json.
@@ -88,6 +92,15 @@ func TestContractFixtures(t *testing.T) {
 				}
 				if c.Name == "model_unavailable" {
 					e.Fake.SetDown(true)
+				}
+				if c.Name == "rate_limited" {
+					// The production limit (60 per minute per user), exhausted
+					// by no-op deletes.
+					for i := 0; i < 60; i++ {
+						if rec := e.Do("DELETE", "/api/ratings/1", nil, tok); rec.Code != http.StatusNoContent {
+							t.Fatalf("delete %d: %d", i, rec.Code)
+						}
+					}
 				}
 				before := cachetest.RatingsVersion(t, e.DB, uid)
 				rec := e.Replay(c, tok)
@@ -408,5 +421,55 @@ func TestNoRatingPayloadInLogs(t *testing.T) {
 	}
 	if !strings.Contains(logs, `"route":"PUT /api/ratings/{movieId}"`) {
 		t.Fatalf("no access log:\n%s", logs)
+	}
+}
+
+// The DELETE limit is per user: a second session on the same account shares
+// the bucket, and another user is unaffected.
+func TestDeleteLimitIsPerUser(t *testing.T) {
+	e := newEnv(t)
+	uid, tok := cachetest.NewUser(t, e.DB, "alice")
+	second := base64.RawURLEncoding.EncodeToString(sha256.New().Sum([]byte("second"))[:32]) // 32 bytes, like a real token
+	sum := sha256.Sum256([]byte(second))
+	now := time.Now().Unix()
+	if _, err := e.DB.Writer.Exec("INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+		sum[:], uid, now, now+3600); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 60; i++ {
+		if rec := e.Do("DELETE", "/api/ratings/1", nil, tok); rec.Code != http.StatusNoContent {
+			t.Fatalf("delete %d: %d", i, rec.Code)
+		}
+	}
+	if rec := e.Do("DELETE", "/api/ratings/1", nil, second); rec.Code != http.StatusTooManyRequests {
+		t.Errorf("second session got %d, want 429 from the per-user bucket", rec.Code)
+	}
+	_, bobTok := cachetest.NewUser(t, e.DB, "bob")
+	if rec := e.Do("DELETE", "/api/ratings/1", nil, bobTok); rec.Code != http.StatusNoContent {
+		t.Errorf("bob got %d", rec.Code)
+	}
+}
+
+// Deleting an account retires its DELETE bucket for good.
+func TestAccountDeletionRetiresDeleteBucket(t *testing.T) {
+	var buckets *ratelimit.Keyed
+	e := cachetest.NewEnv(t, nil, auth.Register, func(mux *http.ServeMux, d *app.Deps) {
+		registerWith(mux, d, func() time.Time { return fixedNow }, func(k *ratelimit.Keyed) { buckets = k })
+	})
+	uid, tok := cachetest.NewUser(t, e.DB, "alice")
+	if rec := e.Do("DELETE", "/api/ratings/1", nil, tok); rec.Code != http.StatusNoContent {
+		t.Fatalf("delete rating: %d", rec.Code)
+	}
+	if buckets.Len() != 1 {
+		t.Fatalf("buckets = %d after one delete, want 1", buckets.Len())
+	}
+	if rec := e.Do("DELETE", "/api/me", nil, tok); rec.Code != http.StatusNoContent {
+		t.Fatalf("delete account: %d %s", rec.Code, rec.Body.String())
+	}
+	if buckets.Len() != 0 {
+		t.Errorf("buckets = %d after the account was deleted, want 0", buckets.Len())
+	}
+	if ok, _ := buckets.Allow(userBucket(uid)); ok || buckets.Len() != 0 {
+		t.Error("a deleted user's bucket came back")
 	}
 }

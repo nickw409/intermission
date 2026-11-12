@@ -187,6 +187,7 @@ export interface paths {
          */
         put: operations["putRating"];
         post?: never;
+        /** @description Rate limited to 60 per minute per user. */
         delete: operations["deleteRating"];
         options?: never;
         head?: never;
@@ -271,7 +272,10 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Undo "not interested". The movie can be recommended again. */
+        /**
+         * Undo "not interested". The movie can be recommended again.
+         * @description Rate limited to 60 per minute per user.
+         */
         delete: operations["deleteNotInterested"];
         options?: never;
         head?: never;
@@ -969,6 +973,7 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            429: components["responses"]["RateLimited"];
         };
     };
     recommend: {
@@ -1113,6 +1118,7 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            429: components["responses"]["RateLimited"];
         };
     };
     getFeedbackStats: {

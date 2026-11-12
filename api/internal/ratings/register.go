@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/nickw409/intermission/api/internal/app"
@@ -17,6 +18,7 @@ import (
 	"github.com/nickw409/intermission/api/internal/httpx"
 	"github.com/nickw409/intermission/api/internal/modelclient"
 	"github.com/nickw409/intermission/api/internal/moviecache"
+	"github.com/nickw409/intermission/api/internal/ratelimit"
 	"github.com/nickw409/intermission/api/internal/reqid"
 )
 
@@ -54,7 +56,7 @@ type putRequest struct {
 //
 //	GET    /api/ratings            (session)
 //	PUT    /api/ratings/{movieId}  (session)
-//	DELETE /api/ratings/{movieId}  (session)
+//	DELETE /api/ratings/{movieId}  (session, 60/min per user)
 func Register(mux *http.ServeMux, d *app.Deps) {
 	register(mux, d, time.Now)
 }
@@ -67,16 +69,39 @@ type handler struct {
 }
 
 func register(mux *http.ServeMux, d *app.Deps, now func() time.Time) {
+	registerWith(mux, d, now, nil)
+}
+
+// registerWith is register with a test hook that receives the DELETE limiter.
+func registerWith(mux *http.ServeMux, d *app.Deps, now func() time.Time, observe func(*ratelimit.Keyed)) {
 	logger := d.Logger
 	if logger == nil {
 		logger = slog.Default()
 	}
 	h := &handler{db: d.DB, movies: d.Movies, logger: logger, now: now}
 	session := auth.RequireSession(d)
+	deleteBuckets := ratelimit.NewKeyed(ratelimit.DeletePerUser, ratelimit.WithClock(now))
+	perUser := ratelimit.Middleware(deleteBuckets, userKey)
+	if observe != nil {
+		observe(deleteBuckets)
+	}
+	// A deleted account's bucket goes with it (its IDs are never reused).
+	d.DB.OnUserDeleted(func(uid int64) { deleteBuckets.Retire(userBucket(uid)) })
 	mux.Handle("GET /api/ratings", session(http.HandlerFunc(h.list)))
 	mux.Handle("PUT /api/ratings/{movieId}", session(http.HandlerFunc(h.put)))
-	mux.Handle("DELETE /api/ratings/{movieId}", session(http.HandlerFunc(h.delete)))
+	mux.Handle("DELETE /api/ratings/{movieId}", session(perUser(http.HandlerFunc(h.delete))))
 }
+
+// userKey is the per-user rate-limit key.
+func userKey(r *http.Request) (string, bool) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		return "", false
+	}
+	return userBucket(uid), true
+}
+
+func userBucket(uid int64) string { return "ratings-delete-user:" + strconv.FormatInt(uid, 10) }
 
 // parsePut decodes and validates a PutRatingRequest body. Every error is an
 // *apperr.Error (400 invalid_json or bad_request).
@@ -272,6 +297,16 @@ func (h *handler) delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err = func() error {
+		// Nothing to delete is checked on the reader, so a no-op delete never
+		// takes the single writer connection.
+		var exists bool
+		if err := h.db.Reader.QueryRowContext(ctx,
+			"SELECT EXISTS (SELECT 1 FROM ratings WHERE user_id = ? AND movie_id = ?)", uid, movieID).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return nil
+		}
 		tx, err := h.db.Writer.BeginTx(ctx, nil)
 		if err != nil {
 			return err
