@@ -669,6 +669,152 @@
           }
         }
       }
+    },
+    {
+      "name": "ok_years",
+      "request": {
+        "method": "POST",
+        "path": "/v1/recommend",
+        "query": {},
+        "headers": {},
+        "body": {
+          "model": "als",
+          "ratings": [
+            {
+              "movie_id": 260,
+              "rating": 5
+            },
+            {
+              "movie_id": 2571,
+              "rating": 4.5
+            },
+            {
+              "movie_id": 296,
+              "rating": 4.5
+            },
+            {
+              "movie_id": 1,
+              "rating": 4
+            },
+            {
+              "movie_id": 318,
+              "rating": 4
+            }
+          ],
+          "k": 3,
+          "exclude": [
+            260,
+            2571,
+            296,
+            1,
+            318
+          ],
+          "year_from": 1990,
+          "year_to": 1999
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "model": "als",
+          "items": [
+            {
+              "movie_id": 2959,
+              "score": 0.71,
+              "because": [
+                {
+                  "movie_id": 2571,
+                  "weight": 0.38
+                },
+                {
+                  "movie_id": 296,
+                  "weight": 0.3
+                }
+              ]
+            },
+            {
+              "movie_id": 593,
+              "score": 0.64,
+              "because": [
+                {
+                  "movie_id": 2571,
+                  "weight": 0.29
+                }
+              ]
+            },
+            {
+              "movie_id": 480,
+              "score": 0.52,
+              "because": [
+                {
+                  "movie_id": 260,
+                  "weight": 0.33
+                }
+              ]
+            }
+          ],
+          "ignored": 0
+        }
+      }
+    },
+    {
+      "name": "inverted_years",
+      "request": {
+        "method": "POST",
+        "path": "/v1/recommend",
+        "query": {},
+        "headers": {},
+        "body": {
+          "model": "als",
+          "ratings": [
+            {
+              "movie_id": 260,
+              "rating": 5
+            },
+            {
+              "movie_id": 2571,
+              "rating": 4.5
+            },
+            {
+              "movie_id": 296,
+              "rating": 4.5
+            },
+            {
+              "movie_id": 1,
+              "rating": 4
+            },
+            {
+              "movie_id": 318,
+              "rating": 4
+            }
+          ],
+          "k": 3,
+          "exclude": [
+            260,
+            2571,
+            296,
+            1,
+            318
+          ],
+          "year_from": 2000,
+          "year_to": 1990
+        }
+      },
+      "response": {
+        "status": 400,
+        "headers": {
+          "X-Model-Version": "2026-11-09T21-14-03Z"
+        },
+        "body": {
+          "error": {
+            "code": "bad_request",
+            "message": "year_from must not exceed year_to"
+          }
+        }
+      }
     }
   ]
 }

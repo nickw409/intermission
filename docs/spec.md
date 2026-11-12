@@ -333,8 +333,8 @@ Two APIs, each defined in an OpenAPI file under contracts/. Public endpoints are
 | GET | /api/ratings | session | The user's ratings, newest first |
 | PUT | /api/ratings/{movieId} | session | `{rating}` in 0.5 steps; creates or updates |
 | DELETE | /api/ratings/{movieId} | session | Removes a rating; idempotent; 60 per minute per user |
-| GET | /api/recommend?model=&k=&genres= | session | Top-k with score and explanation for one model, optionally limited to genres |
-| GET | /api/recommend/compare?models=pop,knn,als&k=&genres= | session | One list per model, for the side-by-side view |
+| GET | /api/recommend?model=&k=&genres=&year_from=&year_to= | session | Top-k with score and explanation for one model, optionally limited to genres and a release-year range |
+| GET | /api/recommend/compare?models=pop,knn,als&k=&genres=&year_from=&year_to= | session | One list per model, for the side-by-side view |
 | POST | /api/feedback | session | `{movieId, model, action}`. `not_interested` is stored now (2026-11-12, owner request): the movie is never recommended to that user again, by any model, and is left out of onboarding. Once per movie, at most 5,000 per user (the oldest drops off). `impression` and `click` are stored from phase 6 |
 | GET | /api/feedback/not-interested | session | The movies the user marked "not interested", newest first (Ratings page, with an undo) |
 | DELETE | /api/feedback/not-interested/{movieId} | session | Undo "not interested"; idempotent; 60 per minute per user |
@@ -367,7 +367,7 @@ recs-model speaks HTTP/1.1 JSON on the Unix socket `/run/recs/model.sock`, which
 
 | Method | Path | Body or query | Returns |
 | --- | --- | --- | --- |
-| POST | /v1/recommend | `{model, ratings: [{movie_id, rating}], k, exclude: [movie_id], genres: [genre]}` | `{items: [{movie_id, score, because: [{movie_id, weight}]}], ignored}` |
+| POST | /v1/recommend | `{model, ratings: [{movie_id, rating}], k, exclude: [movie_id], genres: [genre], year_from, year_to}` | `{items: [{movie_id, score, because: [{movie_id, weight}]}], ignored}` |
 | POST | /v1/compare | `{models: [...], ratings, k, exclude}` | One item list per model |
 | GET | /v1/similar/{movie\_id} | `?model=&k=` | Neighbor list with similarity |
 | POST | /v1/onboarding | `{n, exclude}` | Popular, genre-diverse movie IDs |
@@ -394,7 +394,7 @@ The frontend is a TypeScript single-page app (Vite + React), built to static fil
 
 1. **Sign up / log in.**
 2. **Onboarding:** a grid of about 30 movies from `/api/onboarding` with 0.5-step star ratings and a progress bar to 10 ratings. Searching for any movie to rate is also available here.
-3. **For you:** the user's top 20, from the default model (ALS once it exists) unless the user picks another. A model selector lists every loaded model, and genre chips (any of the MovieLens genres) narrow the list to movies with at least one chosen genre. Both choices are kept in the URL query and remembered per browser. Poster cards show the explanation ("Because you rated X, Y"), a rate control and "not interested". Added 2026-11-11 at the owner's request.
+3. **For you:** the user's top 20, from the default model (ALS once it exists) unless the user picks another. A model selector lists every loaded model, and genre chips (any of the MovieLens genres) narrow the list to movies with at least one chosen genre. A release-year range (from and to, inclusive, either end optional) narrows it further. All of these choices are kept in the URL query and remembered per browser. Poster cards show the explanation ("Because you rated X, Y"), a rate control and "not interested". Added 2026-11-11 at the owner's request.
 4. **Compare models:** three to five columns side by side, one per model, for the same user. Movies that appear in several columns are highlighted. This page is the core of "see it in action".
 5. **Movie page:** details, the user's rating control, and a similar-movies row with a model toggle.
 6. **My ratings:** sortable list with edit and delete.

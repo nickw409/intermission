@@ -217,6 +217,8 @@ paths:
         - { name: model, in: query, schema: { $ref: '#/components/schemas/ModelName' } }
         - { $ref: '#/components/parameters/K' }
         - { $ref: '#/components/parameters/Genres' }
+        - { $ref: '#/components/parameters/YearFrom' }
+        - { $ref: '#/components/parameters/YearTo' }
       responses:
         '200': { description: Recommendations., headers: { X-Model-Version: { $ref: '#/components/headers/ModelVersion' } }, content: { application/json: { schema: { $ref: '#/components/schemas/RecommendResponse' } } } }
         '400': { $ref: '#/components/responses/BadRequest' }
@@ -237,6 +239,8 @@ paths:
           schema: { type: string, maxLength: 64, pattern: '^[a-z_]+(,[a-z_]+){0,4}$', examples: ['pop,knn,als'] }
         - { $ref: '#/components/parameters/K' }
         - { $ref: '#/components/parameters/Genres' }
+        - { $ref: '#/components/parameters/YearFrom' }
+        - { $ref: '#/components/parameters/YearTo' }
       responses:
         '200': { description: Lists., headers: { X-Model-Version: { $ref: '#/components/headers/ModelVersion' } }, content: { application/json: { schema: { $ref: '#/components/schemas/CompareResponse' } } } }
         '400': { $ref: '#/components/responses/BadRequest' }
@@ -354,6 +358,18 @@ components:
       in: query
       description: Comma-separated MovieLens genre names (case-sensitive, no spaces, no duplicates, at most 19). Only movies with at least one of them are returned; fewer than k items may come back. Cold-start popularity results are filtered too. An empty value means no filter. An unknown or repeated name is 400 bad_request.
       schema: { type: string, maxLength: 200, pattern: '^([A-Za-z-]+(,[A-Za-z-]+){0,18})?$', examples: ['Horror,Thriller'] }
+    YearFrom:
+      name: year_from
+      in: query
+      description: Inclusive lower bound on the release year (the trailing "(YYYY)" of the MovieLens title). When year_from or year_to is given, movies without a year are not returned; fewer than k items may come back. Combines with genres (both must match). Cold-start popularity results are filtered too. Absent or empty (year_from=) means unbounded, as an empty genres means no filter. A value that is not a plain integer in range, a repeated parameter, or a year_from greater than year_to, is 400 bad_request.
+      allowEmptyValue: true
+      schema: { type: integer, minimum: 1800, maximum: 2100, examples: [1990] }
+    YearTo:
+      name: year_to
+      in: query
+      description: Inclusive upper bound on the release year; as year_from (empty means unbounded).
+      allowEmptyValue: true
+      schema: { type: integer, minimum: 1800, maximum: 2100, examples: [1999] }
     XRequestedWith: { name: X-Requested-With, in: header, required: true, schema: { type: string, const: recs } }
   headers:
     SetSession: { description: 'session=<token>; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000', schema: { type: string } }
