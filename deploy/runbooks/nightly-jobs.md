@@ -5,8 +5,8 @@
 1. `recs-api export-ratings`: website ratings → `data/exports/` (internal user ids only).
 2. `recs-train retrain` (only if the export succeeded): merge with MovieLens, train, evaluate,
    publish a new artifact and flip `CURRENT`; recs-model hot-swaps it. **Not implemented yet:**
-   the command is still a stub that exits with an error, so this step fails every night (and
-   `JobFailed` fires for it) while the backup still runs. Until it lands, new artifacts are
+   the command is still a stub that exits with an error, so once the timers are installed this
+   step fails every night (and `JobFailed` fires for it) while the backup still runs. Until it lands, new artifacts are
    trained by hand (`deploy.md`, "Model artifacts that need a retrain first").
 3. `deploy/backup.sh`: `VACUUM INTO` + integrity check; 7 daily + 4 weekly copies.
 
