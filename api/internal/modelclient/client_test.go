@@ -81,7 +81,7 @@ func TestEnumsMatchContract(t *testing.T) {
 		t.Errorf("MinYear..MaxYear %d..%d, model.yaml ReleaseYear %v", MinYear, MaxYear, yr)
 	}
 	for _, p := range []string{"YearFrom", "YearTo"} {
-		got := bounds(pub, p+`:\s*\n(?:\s+[a-z]+: [^\n]*\n)*?\s*schema: \{ type: integer, minimum: (\d+), maximum: (\d+)`)
+		got := bounds(pub, p+`:\s*\n(?:\s+[A-Za-z]+: [^\n]*\n)*?\s*schema: \{ type: integer, minimum: (\d+), maximum: (\d+)`)
 		if len(got) != 2 || atoiT(t, got[0]) != MinYear || atoiT(t, got[1]) != MaxYear {
 			t.Errorf("MinYear..MaxYear %d..%d, public.yaml %s %v", MinYear, MaxYear, p, got)
 		}
