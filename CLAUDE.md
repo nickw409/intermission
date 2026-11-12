@@ -63,6 +63,9 @@ The site is live (as of 2026-11-12). It went public through Tailscale Funnel on 
     - Never switch its branch: no `git checkout <branch>`, `git switch`, `git checkout -b`, and no `git rebase`, `git reset` or `git stash` that moves its `HEAD` or rewrites its working tree.
     - If a task needs its own branch, create it in your own worktree (`git worktree add`), never in the shared checkout.
     - If an operation would need a branch switch, stop and ask.
+    - **Keep its `main` current.** Run `git pull --ff-only origin main` in the shared checkout when you start a session and after you merge a PR. This is the one allowed command that moves its `HEAD`. If the pull refuses (local commits, or an incoming change touches an uncommitted file), stop and tell the owner. Never merge, rebase, reset or stash to force it.
+    - Sessions load this file, and agents read code for context, from the shared checkout, so a stale `main` means stale rules. When the exact current version matters, read it with `git fetch origin` and `git show origin/main:<path>`, and start new worktrees from `origin/main`.
+    - Pulling doesn't rebuild anything: binaries in its `build/` can lag `main`. Rebuild before borrowing them (for example for the integration tests).
 14. **Merging PRs.**
     - Agents may merge a PR once every CI check passes on its current head commit. Never use `--admin`, `--auto`, or any other way around a failing or pending check.
     - Merge with `gh pr merge <n> --merge` (merge commits, never squash or rebase) and without `--delete-branch`.
