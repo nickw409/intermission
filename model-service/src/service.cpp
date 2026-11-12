@@ -7,7 +7,7 @@
 //   3. validate the input again (recs-api validates too, but this service is the last line):
 //      body size, JSON nesting depth, exact object shapes (unknown fields are rejected, like the
 //      schema's additionalProperties: false), integer ranges, the 0.5 rating grid, list lengths,
-//      the genre enum;
+//      the genre enum, the release-year range (1800..2100, year_from <= year_to);
 //   4. run the handler, converting ApiError to the contract's Error shape and any other exception
 //      to a 500 `internal` — nothing escapes;
 //   5. record metrics and write one log line. Logs carry the route template, never the raw path,
@@ -27,6 +27,7 @@
 #include <iostream>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <random>
 #include <set>
 #include <unordered_set>
@@ -314,22 +315,56 @@ GenreMask parse_genres(const json& obj) {
   return mask;
 }
 
-// What recommend() must mask for this request: the caller's exclude list plus, under a genre
-// filter, every item with none of the wanted genres. Masking before recommend()'s top-k cut (not
-// filtering its output) means the result is the k best MATCHING items, in the order the unfiltered
-// ranking would put them. Shared by recommend and compare, so every model is filtered the same way
-// and no model needs to know about genres. O(n_items) with one bitwise AND per item.
-// Any future re-ranker (mmr, hybrid) must receive this pre-masked list too, so the genre filter is
+// The optional release-year range (year_from / year_to). Both bounds are inclusive and either may
+// be absent; with no bound the range is inactive.
+struct YearRange {
+  std::optional<int> from;
+  std::optional<int> to;
+
+  bool active() const { return from || to; }
+  // Under an active range a movie without a parsed year never matches (contracts/model.yaml).
+  bool matches(const std::optional<int>& year) const {
+    if (!active()) return true;
+    if (!year) return false;
+    return (!from || *year >= *from) && (!to || *year <= *to);
+  }
+};
+
+// One bound: absent, or a JSON Schema integer in [1800, 2100] (contracts/model.yaml: ReleaseYear).
+std::optional<int> parse_year(const json& obj, const std::string& field) {
+  if (!obj.contains(field)) return std::nullopt;
+  const auto y = as_int(obj.at(field), Limits::kMinReleaseYear, Limits::kMaxReleaseYear);
+  if (!y) bad_request(field + " must be an integer between 1800 and 2100");
+  return static_cast<int>(*y);
+}
+
+YearRange parse_years(const json& obj) {
+  YearRange r{parse_year(obj, "year_from"), parse_year(obj, "year_to")};
+  if (r.from && r.to && *r.from > *r.to) bad_request("year_from must not exceed year_to");
+  return r;
+}
+
+// What recommend() must mask for this request: the caller's exclude list plus every item that
+// fails a filter. An item passes when it has at least one wanted genre (or there is no genre
+// filter) AND its year lies in the range (or there is no range); the two filters combine as AND.
+// Masking before recommend()'s top-k cut (not filtering its output) means the result is the k best
+// MATCHING items, in the order the unfiltered ranking would put them. Shared by recommend and
+// compare, so every model is filtered the same way and no model needs to know about genres or
+// years. O(n_items): one bitwise AND and at most two comparisons per item.
+// Any future re-ranker (mmr, hybrid) must receive this pre-masked list too, so the filters are
 // applied before re-ranking: re-ranking first and filtering after would return fewer than k items
 // and a different order than re-ranking the matching set.
-std::vector<ItemIdx> masked_items(const Bundle& b, std::vector<ItemIdx> exclude, GenreMask wanted) {
-  if (wanted == 0) return exclude;
+std::vector<ItemIdx> masked_items(const Bundle& b, std::vector<ItemIdx> exclude, GenreMask wanted, const YearRange& years) {
+  if (wanted == 0 && !years.active()) return exclude;
   const std::uint32_t n = b.n_items();
+  const auto fails = [&](ItemIdx i) {
+    return (wanted != 0 && (b.genre_mask[i] & wanted) == 0) || !years.matches(b.catalog.movies[i].year);
+  };
   std::size_t non_matching = 0;
-  for (ItemIdx i = 0; i < n; ++i) non_matching += (b.genre_mask[i] & wanted) == 0;
+  for (ItemIdx i = 0; i < n; ++i) non_matching += fails(i);
   exclude.reserve(exclude.size() + non_matching);
   for (ItemIdx i = 0; i < n; ++i) {
-    if ((b.genre_mask[i] & wanted) == 0) exclude.push_back(i);
+    if (fails(i)) exclude.push_back(i);
   }
   return exclude;
 }
@@ -420,7 +455,7 @@ class Handler {
   Handler(const Bundle* bundle, Metrics& metrics) : b_(bundle), metrics_(metrics) {}
 
   // Fold-in + top-k + explanations for one model. Every cited item is one the user rated.
-  // `exclude` already carries the genre filter (masked_items), so top-k is taken over matching items.
+  // `exclude` already carries the genre and year filters (masked_items), so top-k is taken over matching items.
   json run(const std::string& name, const Model& m, const ParsedRatings& in, std::size_t k,
            const std::vector<ItemIdx>& exclude) {
     const auto t0 = std::chrono::steady_clock::now();
@@ -453,17 +488,17 @@ class Handler {
 
   std::string recommend_route(const Request& req) {
     const json j = parse_object(req.body);
-    check_fields(j, {"model", "ratings", "k", "exclude", "genres"}, {"model", "ratings", "k"});
+    check_fields(j, {"model", "ratings", "k", "exclude", "genres", "year_from", "year_to"}, {"model", "ratings", "k"});
     const auto [name, model] = resolve_model(*b_, j.at("model"));
     const std::size_t k = get_k(j);
     const ParsedRatings ratings = parse_ratings(*b_, j.at("ratings"));
-    const auto exclude = masked_items(*b_, parse_exclude(*b_, j), parse_genres(j));
+    const auto exclude = masked_items(*b_, parse_exclude(*b_, j), parse_genres(j), parse_years(j));
     return dump(json{{"model", name}, {"items", run(name, *model, ratings, k, exclude)}, {"ignored", ratings.ignored}});
   }
 
   std::string compare_route(const Request& req) {
     const json j = parse_object(req.body);
-    check_fields(j, {"models", "ratings", "k", "exclude", "genres"}, {"models", "ratings", "k"});
+    check_fields(j, {"models", "ratings", "k", "exclude", "genres", "year_from", "year_to"}, {"models", "ratings", "k"});
     const json& names = j.at("models");
     if (!names.is_array() || names.empty() || names.size() > Limits::kMaxCompareModels) {
       bad_request("models must list 1-5 distinct model names");
@@ -477,7 +512,7 @@ class Handler {
     }
     const std::size_t k = get_k(j);
     const ParsedRatings ratings = parse_ratings(*b_, j.at("ratings"));
-    const auto exclude = masked_items(*b_, parse_exclude(*b_, j), parse_genres(j));  // once, for every model
+    const auto exclude = masked_items(*b_, parse_exclude(*b_, j), parse_genres(j), parse_years(j));  // once, for every model
     json results = json::array();
     for (const auto& [name, model] : models) {
       results.push_back({{"model", name}, {"items", run(name, *model, ratings, k, exclude)}});
