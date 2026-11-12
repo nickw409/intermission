@@ -336,6 +336,8 @@ Two APIs, each defined in an OpenAPI file under contracts/. Public endpoints are
 | GET | /api/recommend?model=&k=&genres= | session | Top-k with score and explanation for one model, optionally limited to genres |
 | GET | /api/recommend/compare?models=pop,knn,als&k=&genres= | session | One list per model, for the side-by-side view |
 | POST | /api/feedback | session | `{movieId, model, action}`. `not_interested` is stored now (2026-11-12, owner request): the movie is never recommended to that user again, by any model, and is left out of onboarding. Once per movie, at most 5,000 per user (the oldest drops off). `impression` and `click` are stored from phase 6 |
+| GET | /api/feedback/not-interested | session | The movies the user marked "not interested", newest first (Ratings page, with an undo) |
+| DELETE | /api/feedback/not-interested/{movieId} | session | Undo "not interested"; idempotent |
 | GET | /api/models | none | Loaded models, artifact version, trained-at time |
 | GET | /api/reports | none | List of run reports (id, model, dataset, headline metrics) |
 | GET | /api/reports/{run\_id} | none | One full run report |

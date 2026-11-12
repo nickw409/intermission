@@ -1,12 +1,13 @@
 // For you's list: fetches /api/recommend for one model and genre filter, and shows the cards with
 // their explanation, rate control and "Not interested". A polite live region announces the count
 // whenever a new list arrives (it stays mounted while the list reloads, so the change is heard).
-import { useCallback, useState, type MouseEvent } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { api, ApiError, type Schemas } from '../../api/client';
 import { MovieCard } from '../../components/MovieCard';
 import { RateMovie } from '../../components/RateMovie';
 import { Empty, ErrorMessage, Loading } from '../../components/Status';
+import { friendlyMessage } from '../../lib/errors';
 import { feedbackHook } from '../../lib/feedback';
 import { displayTitle, joinTitles } from '../../lib/format';
 import { modelLabel, type ModelName } from '../../lib/models';
@@ -55,31 +56,102 @@ export function RecommendationList({
   const { state, reload } = useRecommendations(model, genresKey);
   const ratings = useOptimisticRatings();
   const [hidden, setHidden] = useState<ReadonlySet<number>>(new Set());
-  // Movies whose "Not interested" could not be saved: shown again, with an error. The error
-  // belongs to the list it happened on, so a new model or filter starts without it.
+  // Movies whose "Not interested" could not be saved: shown again, with an error.
   const [failed, setFailed] = useState<ReadonlySet<number>>(new Set());
+  // The movie just hidden, offered for undo, and a problem with an undo.
+  const [justHidden, setJustHidden] = useState<RecItem | null>(null);
+  const [undoProblem, setUndoProblem] = useState<string | null>(null);
+  // The card to focus once an undo has brought it back (read after the next render).
+  const focusAfterUndo = useRef<number | null>(null);
+  const undoRef = useRef<HTMLButtonElement>(null);
+  // Errors and the undo offer belong to the list they happened on, so a new model or filter
+  // starts without them (and a late failure from the old list is not shown on the new one).
   const listKey = `${model}?${genresKey}`;
-  const [failedFor, setFailedFor] = useState(listKey);
-  if (failedFor !== listKey) {
-    setFailedFor(listKey);
+  const listKeyRef = useRef(listKey);
+  const [shownFor, setShownFor] = useState(listKey);
+  if (shownFor !== listKey) {
+    setShownFor(listKey);
     setFailed(new Set());
+    setJustHidden(null);
+    setUndoProblem(null);
   }
-  const hide = (movieId: number) => {
-    setHidden((current) => new Set(current).add(movieId));
-    setFailed((current) => {
-      const next = new Set(current);
-      next.delete(movieId);
-      return next;
+  useEffect(() => {
+    listKeyRef.current = listKey;
+  }, [listKey]);
+
+  // Each movie's requests run one after another (a hide, its undo, a second hide...), so they
+  // reach the server in the order the user clicked. Only the newest click on a movie may change
+  // what its card shows when its request fails.
+  const queues = useRef(new Map<number, Promise<unknown>>());
+  const clicks = useRef(new Map<number, number>());
+  const enqueue = (movieId: number, request: () => Promise<void>) => {
+    const run = (queues.current.get(movieId) ?? Promise.resolve()).catch(() => undefined).then(request);
+    queues.current.set(movieId, run);
+    return run;
+  };
+  const click = (movieId: number) => {
+    const n = (clicks.current.get(movieId) ?? 0) + 1;
+    clicks.current.set(movieId, n);
+    const key = listKeyRef.current;
+    return { latest: () => clicks.current.get(movieId) === n, sameList: () => listKeyRef.current === key };
+  };
+  const setIn = (set: ReadonlySet<number>, movieId: number, present: boolean) => {
+    const next = new Set(set);
+    if (present) next.add(movieId);
+    else next.delete(movieId);
+    return next;
+  };
+
+  const notInterested = (item: RecItem, listModel: ModelName) => {
+    const me = click(item.movieId);
+    setHidden((current) => setIn(current, item.movieId, true));
+    setFailed((current) => setIn(current, item.movieId, false));
+    setJustHidden(item);
+    setUndoProblem(null);
+    enqueue(item.movieId, () => feedbackHook.notInterested({ movieId: item.movieId, model: listModel })).catch(() => {
+      if (!me.latest()) return; // undone (or clicked again) since: that click decides
+      // Not saved: the card comes back with an error, and there is nothing to undo.
+      setHidden((current) => setIn(current, item.movieId, false));
+      if (me.sameList()) setFailed((current) => setIn(current, item.movieId, true));
+      setJustHidden((current) => (current?.movieId === item.movieId ? null : current));
     });
   };
-  const unhide = (movieId: number) => {
-    setHidden((current) => {
-      const next = new Set(current);
-      next.delete(movieId);
-      return next;
-    });
-    setFailed((current) => new Set(current).add(movieId));
+
+  const undo = (item: RecItem) => {
+    const me = click(item.movieId);
+    setJustHidden(null);
+    setUndoProblem(null);
+    setHidden((current) => setIn(current, item.movieId, false));
+    setFailed((current) => setIn(current, item.movieId, false));
+    focusAfterUndo.current = item.movieId;
+    enqueue(item.movieId, () => feedbackHook.undoNotInterested(item.movieId)).then(
+      // The list may have been refetched without the movie meanwhile (after a rating): fetch it
+      // again so the movie can come back.
+      () => reload({ quiet: true }),
+      (error: unknown) => {
+        if (!me.latest()) return;
+        setHidden((current) => setIn(current, item.movieId, true));
+        if (me.sameList()) {
+          setUndoProblem(
+            `Couldn't undo "Not interested" for ${displayTitle(item.title)}. ${friendlyMessage(error)} You can also undo it on your Ratings page.`,
+          );
+        }
+      },
+    );
   };
+
+  // After hiding, focus goes to Undo; after an undo, to the card that came back (or the heading).
+  useEffect(() => {
+    if (justHidden) undoRef.current?.focus();
+  }, [justHidden]);
+  useEffect(() => {
+    const movieId = focusAfterUndo.current;
+    if (movieId === null || hidden.has(movieId)) return;
+    focusAfterUndo.current = null;
+    const link = document.querySelector<HTMLElement>(`.card-grid [data-movie-id="${movieId}"] a`);
+    if (link) link.focus();
+    else document.querySelector<HTMLElement>('main h1')?.focus();
+  }, [hidden]);
   useRefetchAfterRating(() => reload({ quiet: true }));
 
   const phrase = genrePhrase(parseGenres(genresKey));
@@ -102,8 +174,7 @@ export function RecommendationList({
         ratings={ratings}
         onClearGenres={onClearGenres}
         failed={failed}
-        onHide={hide}
-        onHideFailed={unhide}
+        onNotInterested={notInterested}
       />
     );
   }
@@ -112,6 +183,23 @@ export function RecommendationList({
       <p className="visually-hidden" aria-live="polite">
         {announcement}
       </p>
+      <div role="status" className="undo-region">
+        {justHidden && (
+          <div className="notice notice--inline">
+            <p>You won't see {displayTitle(justHidden.title)} in your recommendations.</p>
+            <button
+              ref={undoRef}
+              type="button"
+              className="button"
+              aria-label={`Undo not interested in ${displayTitle(justHidden.title)}`}
+              onClick={() => undo(justHidden)}
+            >
+              Undo
+            </button>
+          </div>
+        )}
+      </div>
+      {undoProblem && <ErrorMessage message={undoProblem} />}
       {body}
     </>
   );
@@ -125,8 +213,7 @@ function Results({
   ratings,
   onClearGenres,
   failed,
-  onHide,
-  onHideFailed,
+  onNotInterested,
 }: {
   data: RecommendResponse;
   items: RecItem[];
@@ -136,8 +223,7 @@ function Results({
   ratings: OptimisticRatings;
   onClearGenres: () => void;
   failed: ReadonlySet<number>;
-  onHide: (movieId: number) => void;
-  onHideFailed: (movieId: number) => void;
+  onNotInterested: (item: RecItem, model: ModelName) => void;
 }) {
   return (
     <>
@@ -163,14 +249,13 @@ function Results({
       ) : (
         <ul className="card-grid" aria-busy={busy || undefined} aria-label="Recommendations">
           {items.map((item) => (
-            <li key={item.movieId}>
+            <li key={item.movieId} data-movie-id={item.movieId}>
               <RecommendationCard
                 item={item}
                 model={data.model}
                 ratings={ratings}
                 hideFailed={failed.has(item.movieId)}
-                onHide={onHide}
-                onHideFailed={onHideFailed}
+                onNotInterested={onNotInterested}
               />
             </li>
           ))}
@@ -208,28 +293,18 @@ function RecommendationCard({
   model,
   ratings,
   hideFailed,
-  onHide,
-  onHideFailed,
+  onNotInterested,
 }: {
   item: RecItem;
   model: ModelName;
   ratings: OptimisticRatings;
   /** The last "Not interested" for this movie could not be saved. */
   hideFailed: boolean;
-  onHide: (movieId: number) => void;
-  onHideFailed: (movieId: number) => void;
+  onNotInterested: (item: RecItem, model: ModelName) => void;
 }) {
-  const notInterested = (event: MouseEvent<HTMLButtonElement>) => {
-    // Move focus to a neighbouring card before this one disappears.
-    const li = event.currentTarget.closest('li');
-    const neighbour = li?.nextElementSibling ?? li?.previousElementSibling;
-    const target = neighbour?.querySelector<HTMLElement>('a');
-    if (target) target.focus();
-    else document.querySelector<HTMLElement>('main h1')?.focus();
-    // Hide at once; if the server could not save it, the card comes back with an error.
-    onHide(item.movieId);
-    feedbackHook.notInterested({ movieId: item.movieId, model }).catch(() => onHideFailed(item.movieId));
-  };
+  // Hidden at once (focus moves to the Undo offer above the list); if the server could not save
+  // it, the card comes back with an error.
+  const notInterested = () => onNotInterested(item, model);
   return (
     <MovieCard movieId={item.movieId} title={item.title} year={item.year}>
       {item.because.length > 0 && (

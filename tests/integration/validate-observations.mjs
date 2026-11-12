@@ -39,8 +39,9 @@ const BASE = 'https://intermission.local/contracts/';
 const METHODS = ['get', 'put', 'post', 'delete', 'patch'];
 const OPENAPI_KEYWORDS = ['openapi', 'info', 'servers', 'security', 'tags', 'paths', 'components'];
 
-// Operations outside this gate: phase 6 (feedback) is not built yet; recs-api does not
-// register those routes.
+// Operations outside this gate: getFeedbackStats is phase 6 and not built yet. postFeedback is
+// built (not_interested) and observed, but not every documented status is exercised here (its
+// 413 and 429 are covered by the recs-api unit tests against the fixtures).
 const EXCLUDED = { public: new Set(['postFeedback', 'getFeedbackStats']), model: new Set() };
 
 const args = process.argv.slice(2);

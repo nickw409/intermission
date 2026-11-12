@@ -23,7 +23,7 @@ func dismiss(t *testing.T, d *db.DB, uid, movie int64) {
 		t.Fatal(err)
 	}
 	// What POST /api/feedback does in the same transaction (the end-to-end test
-// below goes through the real handler).
+	// below goes through the real handler).
 	if _, err := tx.Exec("UPDATE users SET ratings_version = ratings_version + 1 WHERE id = ?", uid); err != nil {
 		t.Fatal(err)
 	}
@@ -93,6 +93,18 @@ func TestNotInterestedMoviesAreExcluded(t *testing.T) {
 	}
 	if got := lastExclude(t, e); !slices.Equal(got, want) {
 		t.Errorf("compare exclude = %v, want %v", got, want)
+	}
+
+	// Undo: 4993 can be recommended again, and the cached list is not reused.
+	if rec := e.Do("DELETE", "/api/feedback/not-interested/4993", nil, tok); rec.Code != 204 {
+		t.Fatalf("undo: %d %s", rec.Code, rec.Body.String())
+	}
+	e.Fake.ResetCalls()
+	if rec := get(e, "/api/recommend?model=als", tok); rec.Code != 200 {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	if got := lastExclude(t, e); !slices.Equal(got, []int64{260, 2571, 296, 1, 318}) {
+		t.Errorf("exclude after undo = %v", got)
 	}
 }
 

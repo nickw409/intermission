@@ -16,6 +16,7 @@ import (
 	"github.com/nickw409/intermission/api/internal/db"
 	"github.com/nickw409/intermission/api/internal/httpx"
 	"github.com/nickw409/intermission/api/internal/modelclient"
+	"github.com/nickw409/intermission/api/internal/moviecache"
 	"github.com/nickw409/intermission/api/internal/ratelimit"
 	"github.com/nickw409/intermission/api/internal/reqid"
 )
@@ -48,7 +49,9 @@ type request struct {
 
 // Register adds this package's routes to mux. Called once from main.go.
 //
-//	POST /api/feedback  (session, 60/min per session and per user)
+//	POST   /api/feedback                             (session, 60/min per session and per user)
+//	GET    /api/feedback/not-interested              (session)
+//	DELETE /api/feedback/not-interested/{movieId}    (session; undo)
 //
 // The per-user bucket has the same shape as the per-session one, so more
 // sessions on one account don't add up to more writes.
@@ -58,8 +61,22 @@ func Register(mux *http.ServeMux, d *app.Deps) {
 
 type handler struct {
 	db     *db.DB
+	movies *moviecache.Cache
 	logger *slog.Logger
 	now    func() time.Time
+}
+
+// NotInterested is the NotInterested schema in contracts/public.yaml.
+type NotInterested struct {
+	MovieID  int64  `json:"movieId"`
+	Title    string `json:"title"`
+	Year     *int   `json:"year"`
+	HiddenAt int64  `json:"hidden_at"` // Unix seconds
+}
+
+// NotInterestedList is the NotInterestedList schema.
+type NotInterestedList struct {
+	Items []NotInterested `json:"items"`
 }
 
 func register(mux *http.ServeMux, d *app.Deps, now func() time.Time) {
@@ -67,7 +84,7 @@ func register(mux *http.ServeMux, d *app.Deps, now func() time.Time) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	h := &handler{db: d.DB, logger: logger, now: now}
+	h := &handler{db: d.DB, movies: d.Movies, logger: logger, now: now}
 	session := auth.RequireSession(d)
 	clock := ratelimit.WithClock(now)
 	perSession := ratelimit.Middleware(ratelimit.NewKeyed(ratelimit.FeedbackPerSession, clock), auth.SessionKey)
@@ -76,6 +93,8 @@ func register(mux *http.ServeMux, d *app.Deps, now func() time.Time) {
 	// A deleted account's bucket goes with it (its IDs are never reused).
 	d.DB.OnUserDeleted(func(uid int64) { userBuckets.Retire(userBucket(uid)) })
 	mux.Handle("POST /api/feedback", session(perSession(perUser(http.HandlerFunc(h.post)))))
+	mux.Handle("GET /api/feedback/not-interested", session(http.HandlerFunc(h.listNotInterested)))
+	mux.Handle("DELETE /api/feedback/not-interested/{movieId}", session(http.HandlerFunc(h.undoNotInterested)))
 }
 
 // userKey is the per-user rate-limit key.
@@ -129,11 +148,7 @@ func (h *handler) post(w http.ResponseWriter, r *http.Request) {
 	}
 	if action == ActionNotInterested {
 		if err := h.notInterested(ctx, uid, movieID, model, h.now().Unix()); err != nil {
-			var ae *apperr.Error
-			if !errors.As(err, &ae) && !errors.Is(err, context.Canceled) {
-				h.logger.ErrorContext(ctx, "feedback: save failed", "request_id", reqid.FromContext(ctx), "err", err)
-			}
-			apperr.Write(w, err)
+			h.fail(w, r, "save", err)
 			return
 		}
 	}
@@ -200,4 +215,125 @@ func bumpVersion(ctx context.Context, tx *sql.Tx, uid int64) error {
 		return errNoUser
 	}
 	return nil
+}
+
+// listNotInterested serves GET /api/feedback/not-interested: newest first,
+// titles from the movie cache only. recs-model is never asked: a movie the
+// user hid was on a recommendation list, so it is in the cache; anything else
+// (a movie dropped by a new dataset, or an ID a client made up) gets a
+// placeholder title. So the list works while recs-model is down, and stored
+// IDs can't be used to make this request call recs-model (security review).
+func (h *handler) listNotInterested(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	uid, ok := auth.UserID(ctx)
+	if !ok {
+		apperr.Write(w, errNoUser)
+		return
+	}
+	rows, err := h.db.Reader.QueryContext(ctx,
+		"SELECT movie_id, ts FROM feedback WHERE user_id = ? AND action = 'not_interested' ORDER BY ts DESC, rowid DESC", uid)
+	if err != nil {
+		h.fail(w, r, "list not interested", err)
+		return
+	}
+	defer rows.Close()
+	out := NotInterestedList{Items: []NotInterested{}}
+	for rows.Next() {
+		var it NotInterested
+		if err := rows.Scan(&it.MovieID, &it.HiddenAt); err != nil {
+			h.fail(w, r, "scan not interested", err)
+			return
+		}
+		out.Items = append(out.Items, it)
+	}
+	if err := rows.Err(); err != nil {
+		h.fail(w, r, "list not interested", err)
+		return
+	}
+	ids := make([]int64, len(out.Items))
+	for i, it := range out.Items {
+		ids[i] = it.MovieID
+	}
+	cached, err := h.movies.Lookup(ctx, ids)
+	if err != nil {
+		h.fail(w, r, "look up titles", err)
+		return
+	}
+	for i := range out.Items {
+		it := &out.Items[i]
+		if m, ok := cached[it.MovieID]; ok {
+			it.Title, it.Year = m.Title, m.Year
+		} else {
+			it.Title = "Movie " + strconv.FormatInt(it.MovieID, 10)
+		}
+	}
+	apperr.WriteJSON(w, http.StatusOK, out)
+}
+
+// undoNotInterested serves DELETE /api/feedback/not-interested/{movieId}:
+// idempotent 204; bumps ratings_version (so the next list can include the
+// movie again) only when a row was deleted.
+func (h *handler) undoNotInterested(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	uid, ok := auth.UserID(ctx)
+	if !ok {
+		apperr.Write(w, errNoUser)
+		return
+	}
+	movieID, err := moviecache.ParseMovieID(r.PathValue("movieId"))
+	if err != nil {
+		apperr.Write(w, err)
+		return
+	}
+	err = h.undo(ctx, uid, movieID)
+	if err != nil {
+		h.fail(w, r, "undo not interested", err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// undo removes uid's "not interested" row for movieID and bumps
+// ratings_version, in one write transaction. Nothing to remove is a no-op,
+// checked on the reader first so a repeated undo never takes the single
+// writer connection.
+func (h *handler) undo(ctx context.Context, uid, movieID int64) error {
+	var exists bool
+	if err := h.db.Reader.QueryRowContext(ctx,
+		"SELECT EXISTS (SELECT 1 FROM feedback WHERE user_id = ? AND movie_id = ? AND action = 'not_interested')",
+		uid, movieID).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	tx, err := h.db.Writer.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx,
+		"DELETE FROM feedback WHERE user_id = ? AND movie_id = ? AND action = 'not_interested'", uid, movieID)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return err
+	} else if n == 0 {
+		return nil // removed by a concurrent undo since the check
+	}
+	if err := bumpVersion(ctx, tx, uid); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// fail logs an internal error (never a request body) and writes it: an
+// *apperr.Error as is, anything else as 500. A canceled request is not logged.
+func (h *handler) fail(w http.ResponseWriter, r *http.Request, what string, err error) {
+	var ae *apperr.Error
+	if !errors.As(err, &ae) && !errors.Is(err, context.Canceled) {
+		h.logger.ErrorContext(r.Context(), "feedback: "+what+" failed", "request_id", reqid.FromContext(r.Context()), "err", err)
+	}
+	apperr.Write(w, err)
 }

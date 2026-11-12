@@ -3,8 +3,10 @@ package feedback
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strconv"
 	"sync"
 	"testing"
@@ -324,5 +326,127 @@ func TestPerUserLimitAcrossSessions(t *testing.T) {
 	_, bobTok := cachetest.NewUser(t, e.DB, "bob")
 	if code := post(e, `{"movieId":2959,"model":"als","action":"click"}`, bobTok); code != http.StatusNoContent {
 		t.Errorf("bob got %d", code)
+	}
+}
+
+// ---------------------------------------------------------------- list and undo
+
+func seedNotInterested(t *testing.T, d *db.DB, uid, movie, ts int64) {
+	t.Helper()
+	if _, err := d.Writer.Exec("INSERT INTO feedback (user_id, movie_id, model, action, ts) VALUES (?, ?, 'als', 'not_interested', ?)", uid, movie, ts); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestListAndUndoContractFixtures(t *testing.T) {
+	for _, op := range []string{"listNotInterested", "deleteNotInterested"} {
+		for _, c := range cachetest.PublicCases(t, op) {
+			t.Run(op+"/"+c.Name, func(t *testing.T) {
+				e := newEnv(t)
+				uid, tok := cachetest.NewUser(t, e.DB, "alice")
+				cachetest.SeedMovies(t, e.DB, cachetest.Movie(2959, "Fight Club", 1999), cachetest.Movie(1, "Toy Story", 1995))
+				seedNotInterested(t, e.DB, uid, 1, 1794258000)
+				seedNotInterested(t, e.DB, uid, 2959, 1794259200)
+				before := cachetest.RatingsVersion(t, e.DB, uid)
+				e.Replay(c, tok)
+				after := cachetest.RatingsVersion(t, e.DB, uid)
+				undone := op == "deleteNotInterested" && c.Name == "ok"
+				if (after == before+1) != undone || after < before {
+					t.Errorf("ratings_version %d -> %d", before, after)
+				}
+				want := []int64{1, 2959}
+				if undone {
+					want = []int64{1}
+				}
+				if got := notInterestedRows(t, e.DB, uid); !slices.Equal(got, want) {
+					t.Errorf("rows %v, want %v", got, want)
+				}
+			})
+		}
+	}
+}
+
+func TestUndo(t *testing.T) {
+	e := newEnv(t)
+	uid, tok := cachetest.NewUser(t, e.DB, "alice")
+	bob, _ := cachetest.NewUser(t, e.DB, "bob")
+	seedNotInterested(t, e.DB, uid, 5, 1)
+	seedNotInterested(t, e.DB, bob, 5, 1)
+	if _, err := e.DB.Writer.Exec("INSERT INTO feedback (user_id, movie_id, model, action, ts) VALUES (?, 5, 'als', 'click', 1)", uid); err != nil {
+		t.Fatal(err)
+	}
+	v0 := cachetest.RatingsVersion(t, e.DB, uid)
+	if rec := e.Do("DELETE", "/api/feedback/not-interested/5", nil, tok); rec.Code != http.StatusNoContent || rec.Body.Len() != 0 {
+		t.Fatalf("%d %q", rec.Code, rec.Body.String())
+	}
+	if got := notInterestedRows(t, e.DB, uid); len(got) != 0 {
+		t.Errorf("alice rows %v", got)
+	}
+	if got := notInterestedRows(t, e.DB, bob); len(got) != 1 {
+		t.Errorf("bob's row went too: %v", got)
+	}
+	if n := countFeedback(t, e.DB); n != 2 { // bob's not_interested and alice's click
+		t.Errorf("%d rows left", n)
+	}
+	v1 := cachetest.RatingsVersion(t, e.DB, uid)
+	if v1 != v0+1 {
+		t.Errorf("version %d -> %d, want +1", v0, v1)
+	}
+	// Again: nothing to undo, still 204, no bump.
+	if rec := e.Do("DELETE", "/api/feedback/not-interested/5", nil, tok); rec.Code != http.StatusNoContent {
+		t.Fatalf("repeat: %d", rec.Code)
+	}
+	if v := cachetest.RatingsVersion(t, e.DB, uid); v != v1 {
+		t.Errorf("repeat bumped %d -> %d", v1, v)
+	}
+	// Marking it again after an undo works.
+	if code := post(e, `{"movieId":5,"model":"knn","action":"not_interested"}`, tok); code != http.StatusNoContent {
+		t.Fatal(code)
+	}
+	if got := notInterestedRows(t, e.DB, uid); !slices.Equal(got, []int64{5}) {
+		t.Errorf("rows %v", got)
+	}
+	for _, bad := range []string{"0", "-1", "abc", "99999999999"} {
+		if rec := e.Do("DELETE", "/api/feedback/not-interested/"+bad, nil, tok); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: %d", bad, rec.Code)
+		}
+	}
+}
+
+func TestListNewestFirstWithPlaceholderTitles(t *testing.T) {
+	e := newEnv(t)
+	uid, tok := cachetest.NewUser(t, e.DB, "alice")
+	bob, _ := cachetest.NewUser(t, e.DB, "bob")
+	cachetest.SeedMovies(t, e.DB, cachetest.Movie(10, "Ten", 2000))
+	seedNotInterested(t, e.DB, uid, 10, 5)
+	seedNotInterested(t, e.DB, uid, 424242, 9) // not in the cache and unknown to recs-model
+	seedNotInterested(t, e.DB, uid, 2959, 5)   // known to recs-model but not cached: not fetched
+	e.Fake.ResetCalls()
+	seedNotInterested(t, e.DB, bob, 11, 7)
+	if _, err := e.DB.Writer.Exec("INSERT INTO feedback (user_id, movie_id, model, action, ts) VALUES (?, 12, 'als', 'click', 8)", uid); err != nil {
+		t.Fatal(err)
+	}
+	rec := e.Do("GET", "/api/feedback/not-interested", nil, tok)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	var got NotInterestedList
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	// Newest first; equal times by insertion, newest first (2959 after 10).
+	if len(got.Items) != 3 || got.Items[0].MovieID != 424242 || got.Items[0].Title != "Movie 424242" || got.Items[0].Year != nil ||
+		got.Items[1].MovieID != 2959 || got.Items[1].Title != "Movie 2959" ||
+		got.Items[2].MovieID != 10 || got.Items[2].Title != "Ten" || got.Items[2].HiddenAt != 5 {
+		t.Errorf("items %+v", got.Items)
+	}
+	// Titles come from the cache only: recs-model is never asked.
+	if calls := e.Fake.Calls(); len(calls) != 0 {
+		t.Errorf("recs-model calls: %+v", calls)
+	}
+	// An empty list is [], not null.
+	_, carolTok := cachetest.NewUser(t, e.DB, "carol")
+	if rec := e.Do("GET", "/api/feedback/not-interested", nil, carolTok); rec.Code != 200 || rec.Body.String() != `{"items":[]}` {
+		t.Errorf("empty: %d %s", rec.Code, rec.Body.String())
 	}
 }

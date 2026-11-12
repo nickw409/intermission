@@ -258,6 +258,27 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '413': { $ref: '#/components/responses/TooLarge' }
         '429': { $ref: '#/components/responses/RateLimited' }
+  /api/feedback/not-interested:
+    get:
+      tags: [ratings]
+      operationId: listNotInterested
+      summary: Movies the user marked "not interested", newest first (the Ratings page lists them with an undo). Titles come from recs-api's movie cache only (recs-model is never asked), so this works while recs-model is down; a movie missing from the cache is titled "Movie <id>".
+      security: [{ session: [] }]
+      responses:
+        '200': { description: Movies., content: { application/json: { schema: { $ref: '#/components/schemas/NotInterestedList' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/feedback/not-interested/{movieId}:
+    delete:
+      tags: [ratings]
+      operationId: deleteNotInterested
+      summary: Undo "not interested". The movie can be recommended again.
+      security: [{ session: [] }]
+      parameters: [{ $ref: '#/components/parameters/MovieId' }, { $ref: '#/components/parameters/XRequestedWith' }]
+      responses:
+        '204': { description: Undone (also when the movie was not marked). }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
   /api/feedback/stats:
     get:
       tags: [recommendations]
@@ -454,6 +475,21 @@ components:
       required: [items]
       properties:
         items: { type: array, items: { $ref: '#/components/schemas/Rating' } }
+    NotInterested:
+      type: object
+      additionalProperties: false
+      required: [movieId, title, year, hidden_at]
+      properties:
+        movieId: { type: integer }
+        title: { type: string }
+        year: { type: [integer, 'null'] }
+        hidden_at: { type: integer, description: Unix seconds }
+    NotInterestedList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/NotInterested' } }
     PutRatingRequest:
       type: object
       additionalProperties: false
