@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -16,6 +17,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <nlohmann/json.hpp>
 
+#include "../../fuzz/core/model_check.hpp"
 #include "../../fuzz/core/score_check.hpp"
 #include "../data/temp_dir.hpp"
 #include "recs/dataset.hpp"
@@ -254,12 +256,12 @@ TEST_CASE("pop load rejects inconsistent scores.bin", "[security][fuzz][populari
   };
 
   // pop_count: m must be 0.
-  rejects("pop_count", pop_file(1, 10.0, 3.5, {2, 1}, {2.0f, 1.0f}), "m");
-  rejects("pop_count", pop_file(1, 1e-300, 3.5, {2, 1}, {2.0f, 1.0f}), "m");
+  rejects("pop_count", pop_file(1, 10.0, 3.5, {2, 1}, {2.0f, 1.0f}), "m must be 0");
+  rejects("pop_count", pop_file(1, 1e-300, 3.5, {2, 1}, {2.0f, 1.0f}), "m must be 0");
   // pop_count: every score equals its count.
-  rejects("pop_count", pop_file(1, 0.0, 3.5, {2, 1}, {2.0f, 7.0f}), "count");
-  rejects("pop_count", pop_file(1, 0.0, 3.5, {2, 1}, {2.0f, 1.5f}), "count");
-  rejects("pop_count", pop_file(1, 0.0, 3.5, {2, 1}, {2.0f, -1.0f}), "count");
+  rejects("pop_count", pop_file(1, 0.0, 3.5, {2, 1}, {2.0f, 7.0f}), "score 1 differs from its count");
+  rejects("pop_count", pop_file(1, 0.0, 3.5, {2, 1}, {2.0f, 1.5f}), "score 1 differs from its count");
+  rejects("pop_count", pop_file(1, 0.0, 3.5, {2, 1}, {2.0f, -1.0f}), "score 1 differs from its count");
 
   for (const auto& [name, variant, m] : {std::tuple{"pop", 0u, 10.0}, std::tuple{"pop_count", 1u, 0.0}}) {
     INFO(name);
@@ -269,10 +271,10 @@ TEST_CASE("pop load rejects inconsistent scores.bin", "[security][fuzz][populari
     // The global mean must lie in the rating range when there are ratings ...
     for (const double c : {0.0, 0.49, -1.0, 5.01, 1e300, -1e300}) {
       INFO("C = " << c);
-      rejects(name, pop_file(variant, m, c, counts, scores), "global mean");
+      rejects(name, pop_file(variant, m, c, counts, scores), "global mean is outside the rating range");
     }
     // ... and be exactly 0 when there are none (fit() on an empty training set).
-    rejects(name, pop_file(variant, m, 3.5, {0, 0}, {0.0f, 0.0f}), "global mean");
+    rejects(name, pop_file(variant, m, 3.5, {0, 0}, {0.0f, 0.0f}), "global mean is nonzero with no ratings");
     // The edges of the range, and the empty case, load.
     loads(name, pop_file(variant, m, 0.5, counts, variant == 1 ? scores : std::vector<float>{0.5f, 0.5f, 0.5f}));
     loads(name, pop_file(variant, m, 5.0, counts, variant == 1 ? scores : std::vector<float>{5.0f, 5.0f, 5.0f}));
@@ -283,19 +285,40 @@ TEST_CASE("pop load rejects inconsistent scores.bin", "[security][fuzz][populari
   // there are no ratings at all).
   for (const float s : {0.0f, 0.49f, 5.01f, -3.0f, 1e30f, -1e30f}) {
     INFO("pop score = " << s);
-    rejects("pop", pop_file(0, 10.0, 3.5, {2, 1}, {4.0f, s}), "score");
+    rejects("pop", pop_file(0, 10.0, 3.5, {2, 1}, {4.0f, s}), "score 1 is outside the rating range");
   }
-  rejects("pop", pop_file(0, 10.0, 0.0, {0, 0}, {0.0f, 1.0f}), "score");
+  rejects("pop", pop_file(0, 10.0, 0.0, {0, 0}, {0.0f, 1.0f}), "score 1 is nonzero with no ratings");
 
-  // Files written by fit() + save() still load, for both variants, including an empty training set.
+  // Files written by fit() + save() still load, for both variants, including an empty training set,
+  // and for pop with m = 0 (unrated items score exactly C) and with a very large finite m (every
+  // score is then ~C).
+  const auto round_trip = [&](const char* name, const recs::Dataset& ds, const recs::Config& cfg) {
+    INFO(name << " " << cfg.dump() << " on " << ds.name);
+    auto fitted = recs::make_model(name);
+    fitted->fit(ds, cfg, {});
+    fitted->save(dir.path());
+    CHECK(pop_load_error(name, dir).empty());
+  };
+  for (const auto& ds : {small_dataset(), recs::make_dataset("pop-empty", 2, 3, {})}) {
+    round_trip("pop", ds, recs::Config::object());
+    round_trip("pop_count", ds, recs::Config::object());
+    round_trip("pop", ds, recs::Config{{"m", 0.0}});
+    round_trip("pop", ds, recs::Config{{"m", 1e300}});
+  }
+}
+
+// PR #104 review: save() must refuse what load() would reject. Ratings outside [0.5, 5] put C (and
+// pop scores) outside the rating range, so fit() + save() on them used to write a file the stricter
+// load() refuses.
+TEST_CASE("pop save rejects a file load would reject", "[security][popularity]") {
+  TempDir dir("pop-save-consistent");
+  const auto ds = recs::make_dataset("pop-out-of-range", 2, 2, {{0, 0, 9.0f, 1}, {1, 1, 8.0f, 2}});
   for (const char* name : {"pop", "pop_count"}) {
     INFO(name);
-    for (const auto& ds : {small_dataset(), recs::make_dataset("pop-empty", 2, 3, {})}) {
-      auto fitted = recs::make_model(name);
-      fitted->fit(ds, recs::Config::object(), {});
-      fitted->save(dir.path());
-      CHECK(pop_load_error(name, dir).empty());
-    }
+    auto m = recs::make_model(name);
+    m->fit(ds, recs::Config::object(), {});
+    CHECK_THROWS_AS(m->save(dir.path()), std::invalid_argument);
+    CHECK_THROWS_WITH(m->save(dir.path()), ContainsSubstring("global mean is outside the rating range"));
   }
 }
 
@@ -307,4 +330,40 @@ TEST_CASE("pop_count stores m = 0 even with a null config", "[security][populari
   fitted->fit(small_dataset(), recs::Config(), {});
   fitted->save(dir.path());
   CHECK(pop_load_error("pop_count", dir).empty());
+}
+
+// PR #104 review: content explain() could return a +inf weight from a model that loads. With
+// user_mean centering and the ratings the fuzz harness uses (4.5 and 2.0, so w = +-1.25), item
+// vectors v_0 = {f0: 1} and v_1 = {f0: 1, f1: 1.4e-45} cancel in f0, leaving a profile of norm
+// ~1.4e-45. Each contribution c_j = w_j (v_j . v_0) / (|p| |v_0|) is then ~9e44, which overflows
+// float; the +inf one passed the "weight > 0" filter. explain() now drops non-finite contributions.
+TEST_CASE("content explain gives no +inf weight when the profile nearly cancels", "[security][fuzz][content]") {
+  TempDir dir("content-explain-inf");
+  constexpr float kDenormMin = std::numeric_limits<float>::denorm_min();  // 1.4e-45
+  std::vector<recs::MovieMeta> movies(2);
+  for (std::size_t i = 0; i < movies.size(); ++i) {
+    movies[i].movie_id = static_cast<std::int64_t>(i + 1);
+    movies[i].title = "Movie " + std::to_string(i + 1);
+  }
+  auto ds = recs::make_dataset("content-explain-inf", 2, 2,
+                               {{0, 0, 4.0f, 1}, {0, 1, 3.0f, 2}, {1, 0, 2.0f, 3}, {1, 1, 5.0f, 4}}, movies);
+  recs::GenomeMatrix g;
+  g.n_items = 2;
+  g.n_tags = 2;
+  g.tag_names = {"f0", "f1"};
+  g.relevance = {1.0f, 0.0f,          // v_0
+                 1.0f, kDenormMin};   // v_1
+  ds.genome = g;
+  auto fitted = recs::make_model("content");
+  fitted->fit(ds, recs::Config{{"centering", "user_mean"}}, {});
+  fitted->save(dir.path());
+  auto m = recs::make_model("content");
+  REQUIRE_NOTHROW(m->load(dir.path()));
+
+  const auto u = m->fold_in(std::vector<recs::Rating>{{0, 4.5f, 0}, {1, 2.0f, 0}});
+  for (const recs::ItemIdx item : {0u, 1u}) {
+    INFO("explain item " << item);
+    for (const auto& b : m->explain(u, item).because) CHECK(std::isfinite(b.weight));
+  }
+  CHECK(recs::fuzz::check_loaded_model(*m).empty());
 }

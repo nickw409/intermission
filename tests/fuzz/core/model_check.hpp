@@ -2,15 +2,19 @@
 // profile and check every output. Kept free of libFuzzer and file helpers, like score_check.hpp,
 // so the unit tests can run it on hand-made models (tests/core/security/fuzz_model_check_test.cpp).
 //
-// The calls: fold_in() on two ratings (the first and last item), score() (checked before and after
-// mask_unrankable(), since the mask overwrites masked items with -inf and would hide a bad score
-// from eval's prediction path, which does not mask), explain() for the first and last item, and,
-// if the model supports it, similar() for the first and last item (#95). Every score, explanation
-// weight and similarity must pass score_allowed(): finite or -infinity, never NaN or +infinity.
-// The structural rules of recs/model.hpp are checked as well: explain() cites at most 3 items, all
-// of them rated by the user; similar(item, k) returns at most k items, all of them < n_items().
+// The calls: fold_in() on two ratings (the first and last item); score(), checked before and after
+// mask_unrankable() (the mask overwrites masked items with -inf, which would hide a bad score from
+// eval's prediction path, which does not mask); explain() for the first and last item (rated) and,
+// with at least 3 items, item 1 (unrated); and, if the model supports it, similar() for the first
+// and last item (#95).
 //
-// A call that throws a std::exception is a clean refusal, not a failure: the call is skipped.
+// Rules from recs/model.hpp: no NaN score; explain() cites at most 3 items, all of them in
+// u.ratings, sorted by weight descending; a model with supports_similar() implements similar().
+// Harness policy on top (what recs-model needs to serve the output): every score, explanation
+// weight and similarity passes score_allowed(), i.e. is finite or -infinity, never +infinity;
+// similar(item, k) returns at most k items, all of them < n_items().
+//
+// Any other std::exception from a call is a clean refusal, not a failure: that call is skipped.
 #pragma once
 
 #include <algorithm>
@@ -49,11 +53,19 @@ inline std::string check_explain(const Model& m, const UserState& u, ItemIdx ite
         std::any_of(u.ratings.begin(), u.ratings.end(), [&](const Rating& r) { return r.item == b.item; });
     if (!rated) return "explain() cited an item the user did not rate";
   }
+  for (std::size_t k = 1; k < e.because.size(); ++k) {
+    if (e.because[k].weight > e.because[k - 1].weight) return "explain() weights are not in descending order";
+  }
   return "";
 }
 
 inline std::string check_similar(const Model& m, ItemIdx item, std::size_t k) {
-  const std::vector<Scored> s = m.similar(item, k);
+  std::vector<Scored> s;
+  try {
+    s = m.similar(item, k);
+  } catch (const NotImplemented&) {
+    return "similar() threw NotImplemented although supports_similar() is true";
+  }
   if (s.size() > k) return "similar() returned more than k items";
   for (const Scored& x : s) {
     if (!score_allowed(x.score)) return "similar() gave a NaN or +inf score";
@@ -62,7 +74,8 @@ inline std::string check_similar(const Model& m, ItemIdx item, std::size_t k) {
   return "";
 }
 
-/// Runs one check; a std::exception from the model is a clean refusal and counts as a pass.
+/// Runs one check; a std::exception from the model is a clean refusal and counts as a pass
+/// (check_similar() handles NotImplemented itself, before it gets here).
 template <typename F>
 std::string unless_refused(F&& check) {
   try {
@@ -79,7 +92,9 @@ std::string unless_refused(F&& check) {
 inline std::string check_loaded_model(const Model& m) {
   const std::uint32_t n = m.n_items();
   if (n == 0 || n > (1u << 20)) return "";
-  const ItemIdx probes[] = {0, n - 1};
+  const std::vector<ItemIdx> rated_probes{0, n - 1};
+  std::vector<ItemIdx> explain_probes = rated_probes;
+  if (n >= 3) explain_probes.push_back(1);  // an item the profile does not rate
   std::vector<Rating> ratings;
   ratings.push_back({0, 4.5f});
   if (n > 1) ratings.push_back({n - 1, 2.0f});
@@ -95,12 +110,12 @@ inline std::string check_loaded_model(const Model& m) {
   }
   if (folded) {
     bad = detail::unless_refused([&] { return detail::check_scores(m, u); });
-    for (const ItemIdx item : probes) {
+    for (const ItemIdx item : explain_probes) {
       if (bad.empty()) bad = detail::unless_refused([&] { return detail::check_explain(m, u, item); });
     }
   }
   if (m.supports_similar()) {
-    for (const ItemIdx item : probes) {
+    for (const ItemIdx item : rated_probes) {
       if (bad.empty()) bad = detail::unless_refused([&] { return detail::check_similar(m, item, 10); });
     }
   }

@@ -79,7 +79,8 @@
 // EXPLANATION
 //   The score splits exactly into per-rated-movie contributions:
 //       score(u, i) = sum_j c_j,   c_j = w_uj (v_j . v_i) / (|p_u| |v_i|)
-//   explain() cites the (at most 3) rated movies with the largest positive c_j.
+//   explain() cites the (at most 3) rated movies with the largest positive c_j. A c_j that
+//   overflows float (a profile that nearly cancels, |p_u| ~ 1e-45) is not cited.
 //
 // SIMILAR ITEMS
 //   similar(i, k): the k movies with the largest positive cosine cos(v_i, v_j), j != i.
@@ -465,7 +466,10 @@ class ContentModel final : public Model {
       const double c = w * sparse_dot(features_.row_indices(r.item), features_.row_values(r.item), ii, iv) /
                        (p_norm * norms_[item]);
       const auto weight = static_cast<float>(c);
-      if (weight > 0.0f) e.because.push_back({r.item, weight});
+      // The c_j sum to the score, a cosine in [-1, 1], but a single c_j can be huge when the
+      // profile nearly cancels (|p_u| tiny), and it overflows float to infinity. That says nothing
+      // about the movie, so it is not cited (an Explanation weight is never +inf or NaN).
+      if (std::isfinite(weight) && weight > 0.0f) e.because.push_back({r.item, weight});
     }
     std::sort(e.because.begin(), e.because.end(), [](const Because& a, const Because& b) {
       if (a.weight != b.weight) return a.weight > b.weight;
