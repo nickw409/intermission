@@ -597,6 +597,10 @@ export interface components {
         K: number;
         /** @description Comma-separated MovieLens genre names (case-sensitive, no spaces, no duplicates, at most 19). Only movies with at least one of them are returned; fewer than k items may come back. Cold-start popularity results are filtered too. An empty value means no filter. An unknown or repeated name is 400 bad_request. */
         Genres: string;
+        /** @description Inclusive lower bound on the release year (the trailing "(YYYY)" of the MovieLens title). When year_from or year_to is given, movies without a year are not returned; fewer than k items may come back. Combines with genres (both must match). Cold-start popularity results are filtered too. Absent means unbounded. A value that is not a plain integer in range, or a year_from greater than year_to, is 400 bad_request. */
+        YearFrom: number;
+        /** @description Inclusive upper bound on the release year; as year_from. */
+        YearTo: number;
         XRequestedWith: "recs";
     };
     requestBodies: never;
@@ -930,6 +934,10 @@ export interface operations {
                 k?: components["parameters"]["K"];
                 /** @description Comma-separated MovieLens genre names (case-sensitive, no spaces, no duplicates, at most 19). Only movies with at least one of them are returned; fewer than k items may come back. Cold-start popularity results are filtered too. An empty value means no filter. An unknown or repeated name is 400 bad_request. */
                 genres?: components["parameters"]["Genres"];
+                /** @description Inclusive lower bound on the release year (the trailing "(YYYY)" of the MovieLens title). When year_from or year_to is given, movies without a year are not returned; fewer than k items may come back. Combines with genres (both must match). Cold-start popularity results are filtered too. Absent means unbounded. A value that is not a plain integer in range, or a year_from greater than year_to, is 400 bad_request. */
+                year_from?: components["parameters"]["YearFrom"];
+                /** @description Inclusive upper bound on the release year; as year_from. */
+                year_to?: components["parameters"]["YearTo"];
             };
             header?: never;
             path?: never;
@@ -961,6 +969,10 @@ export interface operations {
                 k?: components["parameters"]["K"];
                 /** @description Comma-separated MovieLens genre names (case-sensitive, no spaces, no duplicates, at most 19). Only movies with at least one of them are returned; fewer than k items may come back. Cold-start popularity results are filtered too. An empty value means no filter. An unknown or repeated name is 400 bad_request. */
                 genres?: components["parameters"]["Genres"];
+                /** @description Inclusive lower bound on the release year (the trailing "(YYYY)" of the MovieLens title). When year_from or year_to is given, movies without a year are not returned; fewer than k items may come back. Combines with genres (both must match). Cold-start popularity results are filtered too. Absent means unbounded. A value that is not a plain integer in range, or a year_from greater than year_to, is 400 bad_request. */
+                year_from?: components["parameters"]["YearFrom"];
+                /** @description Inclusive upper bound on the release year; as year_from. */
+                year_to?: components["parameters"]["YearTo"];
             };
             header?: never;
             path?: never;
