@@ -55,6 +55,11 @@ Planning is complete; no code exists yet. Wave 0 (the spine) is next.
     - Never switch its branch: no `git checkout <branch>`, `git switch`, `git checkout -b`, and no `git rebase`, `git reset` or `git stash` that moves its `HEAD` or rewrites its working tree.
     - If a task needs its own branch, create it in your own worktree (`git worktree add`), never in the shared checkout.
     - If an operation would need a branch switch, stop and ask.
+14. **Merging PRs.**
+    - Agents may merge a PR once every CI check passes on its current head commit. Never use `--admin`, `--auto`, or any other way around a failing or pending check.
+    - Merge with `gh pr merge <n> --merge` (merge commits, never squash or rebase) and without `--delete-branch`.
+    - If the branch is behind `main`, merge `origin/main` into it inside its worktree, push, and wait for CI on the new head. Never rebase or force-push a pushed branch.
+    - Delete a branch only after `gh pr view <n> --json state` reports `MERGED`. Deleting the remote branch of an open PR closes the PR. Never chain cleanup after `gh pr merge` with `;`. Check the state first, then remove the worktree, the local branch and the remote branch.
 
 ## Layout
 
