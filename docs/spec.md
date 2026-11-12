@@ -360,7 +360,7 @@ Two APIs, each defined in an OpenAPI file under contracts/. Public endpoints are
 
 With fewer than 5 ratings, `cold_start` is true and the server returns popularity results plus a prompt to rate more.
 
-**Posters.** `links.csv` maps movieId to a TMDB ID. The server fetches poster paths from the TMDB API with a key kept in an environment variable, never sent to the browser. Images are cached on disk with a size cap and LRU eviction. On failure the endpoint returns a generated placeholder, never a 5xx. The UI shows TMDB's required attribution. Check TMDB's current API terms before going public.
+**Posters.** `links.csv` maps movieId to a TMDB ID. The server fetches poster paths from the TMDB API with a key kept in an environment variable, never sent to the browser. Images are cached on disk with a size cap and LRU eviction. On failure the endpoint returns a generated placeholder, never a 5xx. A movie without a poster is not asked about again for 10 minutes; after a TMDB 429 or 5xx, only for 30 seconds, and the placeholder's Cache-Control never outlasts that (no-store when the global upstream budget is spent). Movie details follow the same rules. The UI shows TMDB's required attribution. Check TMDB's current API terms before going public.
 
 **Movie details.** The same TMDB client, key, hosts and global upstream budget serve `/api/movies/{id}/details`: one TMDB request (`/3/movie/{tmdbId}?append_to_response=credits`) per uncached movie, cleaned (valid UTF-8, no control or bidi characters, lengths capped, at most 10 cast and 3 directors) and cached on disk as JSON beside the posters with its own 64 MiB cap. Failures give empty details with 200, never a 5xx. TMDB text is untrusted and is rendered as plain text only.
 

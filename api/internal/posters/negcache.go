@@ -47,14 +47,36 @@ func (n *negCache) has(id int64) bool {
 	return true
 }
 
-// add remembers id for ttl.
-func (n *negCache) add(id int64) {
+// add remembers id for the cache's ttl.
+func (n *negCache) add(id int64) { n.addFor(id, n.ttl) }
+
+// remaining reports whether id is remembered and, if so, for how much
+// longer.
+func (n *negCache) remaining(id int64) (time.Duration, bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	el, ok := n.until[id]
+	if !ok {
+		return 0, false
+	}
+	left := el.Value.(*negItem).expires.Sub(n.now())
+	if left <= 0 {
+		n.order.Remove(el)
+		delete(n.until, id)
+		return 0, false
+	}
+	return left, true
+}
+
+// addFor remembers id for ttl. Entries are dropped oldest-added first when
+// the cache is full, whatever their ttl.
+func (n *negCache) addFor(id int64, ttl time.Duration) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	if el, ok := n.until[id]; ok {
 		n.order.Remove(el)
 	}
-	n.until[id] = n.order.PushBack(&negItem{id: id, expires: n.now().Add(n.ttl)})
+	n.until[id] = n.order.PushBack(&negItem{id: id, expires: n.now().Add(ttl)})
 	for n.order.Len() > n.max {
 		oldest := n.order.Front()
 		n.order.Remove(oldest)

@@ -474,7 +474,7 @@ func TestDetailsEmptyTMDBAnswerNotCached(t *testing.T) {
 	if !isEmptyDetails(decodeDetails(t, rec), 7) {
 		t.Fatal(rec.Body.String())
 	}
-	if got := rec.Header().Get("Cache-Control"); got != emptyMaxAge {
+	if got := rec.Header().Get("Cache-Control"); got != maxAge(maxAgeFailure) {
 		t.Errorf("Cache-Control %q", got)
 	}
 	if _, err := os.Stat(filepath.Join(e.dir, "details", "7.json")); err == nil {
@@ -484,26 +484,6 @@ func TestDetailsEmptyTMDBAnswerNotCached(t *testing.T) {
 	decodeDetails(t, e.details("7"))
 	if e.tmdb.apiHits.Load() != hits {
 		t.Fatal("empty answer not remembered")
-	}
-}
-
-// TMDB rate limiting or failing is not remembered: the next view retries.
-func TestDetailsTMDBBusyNotRemembered(t *testing.T) {
-	for _, status := range []int{429, 500, 503} {
-		t.Run(fmt.Sprint(status), func(t *testing.T) {
-			e := detailsEnv(t, setup{key: testKey}, fellowship)
-			e.tmdb.setAPI(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "busy", status) })
-			if d := decodeDetails(t, e.details("7")); !isEmptyDetails(d, 7) {
-				t.Fatalf("%+v", d)
-			}
-			e.tmdb.setAPI(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, fellowship("1007")) })
-			if d := decodeDetails(t, e.details("7")); deref(d.Overview) != "Movie 1007." {
-				t.Fatalf("after TMDB %d the movie stayed empty", status)
-			}
-			if strings.Contains(e.Logs.String(), testKey) {
-				t.Fatal("TMDB key in logs")
-			}
-		})
 	}
 }
 

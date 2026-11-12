@@ -71,11 +71,52 @@ var UpstreamLimit = ratelimit.Config{Every: 100 * time.Millisecond, Burst: 20}
 var LookupLimit = ratelimit.Config{Every: 25 * time.Millisecond, Burst: 100}
 
 // Negative cache: how long a movie without a poster is remembered, and how
-// many such movies at most.
+// many such movies at most. A movie whose fetch met a busy TMDB (429 or
+// 5xx) is remembered only for busyTTL: long enough that a client looping on
+// it can't hammer TMDB, short enough that the poster shows up soon after
+// TMDB recovers.
 const (
 	negativeTTL     = 10 * time.Minute
+	busyTTL         = 30 * time.Second
 	negativeEntries = 50_000
 )
+
+// Cache-Control for placeholders and empty details. Browsers may keep them
+// no longer than the server would: maxAgeFailure for a lasting answer ("no
+// poster"), maxAgeTransient for a timeout, a busy TMDB or a failed movie
+// lookup, and no-store when our own upstream budget was spent.
+const (
+	maxAgeFailure   = 300 // seconds
+	maxAgeTransient = 30  // seconds
+	noStore         = "no-store"
+)
+
+// failureCacheControl is the Cache-Control for an answer that failed with err.
+func failureCacheControl(err error) string {
+	var tr transient
+	switch {
+	case errors.Is(err, errLimited) || errors.Is(err, context.Canceled):
+		return noStore
+	case isBusy(err) || errors.Is(err, context.DeadlineExceeded) || isTimeout(err) || errors.As(err, &tr):
+		return maxAge(maxAgeTransient)
+	}
+	return maxAge(maxAgeFailure)
+}
+
+// rememberedCacheControl is the Cache-Control for an answer served from the
+// negative cache with left still to go: never past the entry's expiry.
+func rememberedCacheControl(left time.Duration) string {
+	secs := int((left + time.Second - 1) / time.Second) // round up
+	return maxAge(min(max(secs, 1), maxAgeFailure))
+}
+
+func maxAge(secs int) string { return "public, max-age=" + strconv.Itoa(secs) }
+
+// isBusy reports whether err is TMDB answering 429 or 5xx.
+func isBusy(err error) bool {
+	var se statusError
+	return errors.As(err, &se) && (se.code == http.StatusTooManyRequests || se.code >= 500)
+}
 
 // placeholderSVG is served whenever a real poster can't be (contracts/
 // fixtures/public/getPoster.json, ok_placeholder).
@@ -193,8 +234,12 @@ func (h *handler) serve(w http.ResponseWriter, r *http.Request) {
 		writeJPEG(w, img)
 		return
 	}
-	if h.key == "" || h.negative.has(id) {
-		writePlaceholder(w)
+	if h.key == "" {
+		writePlaceholder(w, maxAge(maxAgeFailure))
+		return
+	}
+	if left, ok := h.negative.remaining(id); ok {
+		writePlaceholder(w, rememberedCacheControl(left))
 		return
 	}
 	// The fetch is shared by every request for this movie that arrives while
@@ -214,7 +259,7 @@ func (h *handler) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if call.err != nil {
-		writePlaceholder(w)
+		writePlaceholder(w, failureCacheControl(call.err))
 		return
 	}
 	writeJPEG(w, call.img)
@@ -244,6 +289,11 @@ func (h *handler) noteFailure(ctx context.Context, what string, id int64, err er
 	case errors.Is(err, context.Canceled):
 		// Defensive: ctx is detached (WithoutCancel), but a cancellation
 		// must never be remembered as "nothing to fetch".
+	case isBusy(err):
+		// TMDB rate limits us or is failing: remembered briefly.
+		neg.addFor(id, busyTTL)
+		h.logger.WarnContext(ctx, what+": TMDB unavailable", "request_id", reqid.FromContext(ctx),
+			"movie_id", id, "err", h.scrub(err))
 	case errors.Is(err, context.DeadlineExceeded) || isTimeout(err):
 		// TMDB was slow: worth retrying soon, so logged but not
 		// negatively cached (the upstream limiter bounds retries).
@@ -495,11 +545,12 @@ func writeJPEG(w http.ResponseWriter, img []byte) {
 	_, _ = w.Write(img)
 }
 
-// writePlaceholder serves the SVG. It is cached briefly so a poster that
-// failed is retried later. The CSP keeps the SVG inert if opened directly.
-func writePlaceholder(w http.ResponseWriter) {
+// writePlaceholder serves the SVG with cacheControl (short, so a poster
+// that failed is retried later). The CSP keeps the SVG inert if opened
+// directly.
+func writePlaceholder(w http.ResponseWriter, cacheControl string) {
 	w.Header().Set("Content-Type", "image/svg+xml")
-	w.Header().Set("Cache-Control", "public, max-age=300")
+	w.Header().Set("Cache-Control", cacheControl)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; sandbox")
 	w.WriteHeader(http.StatusOK)
