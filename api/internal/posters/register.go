@@ -28,7 +28,8 @@ import (
 //
 //  1. The movie ID is parsed (digits only) and the disk cache checked.
 //     IDs in the short-lived negative cache (no poster to be had: unknown
-//     movie, no TMDB id, no TMDB poster, a failed fetch) stop here too.
+//     movie, no TMDB id, no TMDB poster, a failed fetch; 10 minutes, or
+//     30 seconds after a busy TMDB) stop here too.
 //  2. A token is taken from a global lookup limiter, then the TMDB ID comes
 //     from the movie cache (moviecache; recs-model fills misses). The
 //     limiter comes first so a loop over random IDs can't turn into a flood
@@ -67,15 +68,74 @@ var UpstreamLimit = ratelimit.Config{Every: 100 * time.Millisecond, Burst: 20}
 
 // LookupLimit is the global budget for poster requests that miss both disk
 // caches and need a movie lookup: 40 per second, bursts of 100 (a page of
-// posters nobody has viewed yet).
+// posters nobody has viewed yet). Every negative-cache entry costs one
+// lookup token, so negativeEntries must stay above what LookupLimit allows
+// in negativeTTL (TestNegativeCacheOutlastsLookupBudget); otherwise a flood
+// of unknown IDs could push live entries out early.
 var LookupLimit = ratelimit.Config{Every: 25 * time.Millisecond, Burst: 100}
 
 // Negative cache: how long a movie without a poster is remembered, and how
-// many such movies at most.
+// many such movies at most. A movie whose fetch met a busy TMDB (429 or
+// 5xx) is remembered only for busyTTL: long enough that a client looping on
+// it can't hammer TMDB, short enough that the poster shows up soon after
+// TMDB recovers.
 const (
 	negativeTTL     = 10 * time.Minute
+	busyTTL         = 30 * time.Second
 	negativeEntries = 50_000
 )
+
+// Cache-Control for placeholders and empty details. Browsers may keep them
+// no longer than the server would: maxAgeFailure for a lasting answer ("no
+// poster"), maxAgeTransient for a timeout, a busy TMDB, a failed movie
+// lookup or a fetch that panicked, and no-store when one of our own global
+// budgets (lookup or upstream) was spent.
+const (
+	maxAgeFailure   = 300 // seconds
+	maxAgeTransient = 30  // seconds
+	noStore         = "no-store"
+)
+
+// failureCacheControl is the Cache-Control for an answer that failed with err.
+func failureCacheControl(err error) string {
+	var tr transient
+	switch {
+	case errors.Is(err, errLimited) || errors.Is(err, context.Canceled):
+		return noStore
+	case isBusy(err) || errors.Is(err, context.DeadlineExceeded) || isTimeout(err) || errors.As(err, &tr):
+		return maxAge(maxAgeTransient)
+	}
+	return maxAge(maxAgeFailure)
+}
+
+// rememberedCacheControl is the Cache-Control for an answer served from the
+// negative cache with left still to go: never past the entry's expiry
+// (rounded down; no-store under a second), and at most maxAgeFailure.
+func rememberedCacheControl(left time.Duration) string {
+	secs := int(left / time.Second)
+	if secs < 1 {
+		return noStore
+	}
+	return maxAge(min(secs, maxAgeFailure))
+}
+
+func maxAge(secs int) string { return "public, max-age=" + strconv.Itoa(secs) }
+
+// isBusy reports whether err is TMDB answering with a temporary failure:
+// timeout, too early, too many requests, or a server or gateway error.
+// Lasting failures (404, 501 Not Implemented, ...) are not busy.
+func isBusy(err error) bool {
+	var se statusError
+	if !errors.As(err, &se) {
+		return false
+	}
+	switch se.code {
+	case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests,
+		http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	}
+	return false
+}
 
 // placeholderSVG is served whenever a real poster can't be (contracts/
 // fixtures/public/getPoster.json, ok_placeholder).
@@ -193,8 +253,12 @@ func (h *handler) serve(w http.ResponseWriter, r *http.Request) {
 		writeJPEG(w, img)
 		return
 	}
-	if h.key == "" || h.negative.has(id) {
-		writePlaceholder(w)
+	if h.key == "" {
+		writePlaceholder(w, maxAge(maxAgeFailure))
+		return
+	}
+	if left, ok := h.negative.remaining(id); ok {
+		writePlaceholder(w, rememberedCacheControl(left))
 		return
 	}
 	// The fetch is shared by every request for this movie that arrives while
@@ -214,7 +278,7 @@ func (h *handler) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if call.err != nil {
-		writePlaceholder(w)
+		writePlaceholder(w, failureCacheControl(call.err))
 		return
 	}
 	writeJPEG(w, call.img)
@@ -244,6 +308,11 @@ func (h *handler) noteFailure(ctx context.Context, what string, id int64, err er
 	case errors.Is(err, context.Canceled):
 		// Defensive: ctx is detached (WithoutCancel), but a cancellation
 		// must never be remembered as "nothing to fetch".
+	case isBusy(err):
+		// TMDB rate limits us or is failing: remembered briefly.
+		neg.addFor(id, busyTTL)
+		h.logger.WarnContext(ctx, what+": TMDB unavailable", "request_id", reqid.FromContext(ctx),
+			"movie_id", id, "err", h.scrub(err))
 	case errors.Is(err, context.DeadlineExceeded) || isTimeout(err):
 		// TMDB was slow: worth retrying soon, so logged but not
 		// negatively cached (the upstream limiter bounds retries).
@@ -297,7 +366,9 @@ func (g *flightGroup) do(id int64, fn func() ([]byte, error)) *flight {
 					if name == "" {
 						name = "posters"
 					}
-					c.img, c.err = nil, fmt.Errorf("%s fetch panicked: %v", name, v)
+					// transient: browsers keep the placeholder only briefly,
+					// as nothing was remembered server-side.
+					c.img, c.err = nil, transient{fmt.Errorf("%s fetch panicked: %v", name, v)}
 					logger := g.logger
 					if logger == nil {
 						logger = slog.Default()
@@ -322,8 +393,9 @@ func (g *flightGroup) do(id int64, fn func() ([]byte, error)) *flight {
 // Outcomes of fetch other than success. errNoPoster (no TMDB id, unknown
 // movie, no poster) is remembered in the negative cache and not logged;
 // errLimited is neither; a transient error (the movie lookup itself
-// failed, e.g. recs-model down) is logged but not remembered; any other
-// error (a TMDB failure) is logged and remembered.
+// failed, e.g. recs-model down) is logged but not remembered; a busy TMDB
+// (isBusy) is logged and remembered for busyTTL; any other error (a lasting
+// TMDB failure) is logged and remembered for negativeTTL.
 var (
 	errNoPoster = errors.New("no poster")
 	errLimited  = errors.New("rate limited")
@@ -495,11 +567,12 @@ func writeJPEG(w http.ResponseWriter, img []byte) {
 	_, _ = w.Write(img)
 }
 
-// writePlaceholder serves the SVG. It is cached briefly so a poster that
-// failed is retried later. The CSP keeps the SVG inert if opened directly.
-func writePlaceholder(w http.ResponseWriter) {
+// writePlaceholder serves the SVG with cacheControl (short, so a poster
+// that failed is retried later). The CSP keeps the SVG inert if opened
+// directly.
+func writePlaceholder(w http.ResponseWriter, cacheControl string) {
 	w.Header().Set("Content-Type", "image/svg+xml")
-	w.Header().Set("Cache-Control", "public, max-age=300")
+	w.Header().Set("Cache-Control", cacheControl)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; sandbox")
 	w.WriteHeader(http.StatusOK)
