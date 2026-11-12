@@ -17,7 +17,6 @@ import (
 
 	"github.com/nickw409/intermission/api/internal/apperr"
 	"github.com/nickw409/intermission/api/internal/moviecache"
-	"github.com/nickw409/intermission/api/internal/reqid"
 )
 
 // How movie details are served (GET /api/movies/{movieId}/details):
@@ -43,9 +42,10 @@ import (
 // Any failure serves the empty MovieDetails (all null, no directors, no
 // cast) with 200, so the movie page just shows less. Nothing here ever
 // answers 5xx. A TMDB answer with nothing usable is treated like "no
-// details" (remembered for negativeTTL, never written to disk). A TMDB 429
-// or 5xx is not remembered, and an empty answer caused by our own upstream
-// budget is sent no-store, so neither outlives the moment.
+// details" (remembered for negativeTTL, never written to disk). Failures
+// are remembered and cached by browsers exactly as for posters (busyTTL
+// for a TMDB 429 or 5xx, no-store when our own budget ran out; see
+// failureCacheControl).
 
 // Limits on details.
 const (
@@ -76,8 +76,6 @@ const (
 	detailsTTL = 30 * 24 * time.Hour
 
 	detailsMaxAge = "public, max-age=86400"
-	emptyMaxAge   = "public, max-age=300"
-	noStore       = "no-store"
 )
 
 // MovieDetails is the MovieDetails schema (contracts/public.yaml).
@@ -132,8 +130,12 @@ func (h *handler) serveDetails(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if h.key == "" || h.detailsNegative.has(id) {
-		writeDetails(w, emptyDetails(id), emptyMaxAge)
+	if h.key == "" {
+		writeDetails(w, emptyDetails(id), maxAge(maxAgeFailure))
+		return
+	}
+	if left, ok := h.detailsNegative.remaining(id); ok {
+		writeDetails(w, emptyDetails(id), rememberedCacheControl(left))
 		return
 	}
 	call := h.detailFlights.do(id, func() ([]byte, error) {
@@ -146,17 +148,12 @@ func (h *handler) serveDetails(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if call.err != nil {
-		cc := emptyMaxAge
-		if errors.Is(call.err, errLimited) {
-			// Our own budget ran out: ask again on the next view.
-			cc = noStore
-		}
-		writeDetails(w, emptyDetails(id), cc)
+		writeDetails(w, emptyDetails(id), failureCacheControl(call.err))
 		return
 	}
 	d, ok := decodeCached(call.img, id, h.now())
 	if !ok {
-		writeDetails(w, emptyDetails(id), emptyMaxAge)
+		writeDetails(w, emptyDetails(id), maxAge(maxAgeTransient))
 		return
 	}
 	writeDetails(w, d, detailsMaxAge)
@@ -170,14 +167,6 @@ func (h *handler) fetchDetailsAndRecord(ctx context.Context, id int64) ([]byte, 
 		err = errNoDetails
 	}
 	if err != nil {
-		var se statusError
-		if errors.As(err, &se) && (se.code == http.StatusTooManyRequests || se.code >= 500) {
-			// TMDB is busy or failing: worth asking again soon, so logged
-			// but not remembered.
-			h.logger.WarnContext(ctx, "details: TMDB unavailable", "request_id", reqid.FromContext(ctx),
-				"movie_id", id, "status", se.code)
-			return nil, err
-		}
 		h.noteFailure(ctx, "details", id, err, h.detailsNegative)
 		return nil, err
 	}
