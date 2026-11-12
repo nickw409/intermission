@@ -1,0 +1,91 @@
+{
+  "operationId": "getMovieDetails",
+  "cases": [
+    {
+      "name": "ok",
+      "request": {
+        "method": "GET",
+        "path": "/api/movies/4993/details",
+        "query": {},
+        "headers": {}
+      },
+      "response": {
+        "status": 200,
+        "headers": {},
+        "body": {
+          "movieId": 4993,
+          "overview": "A quiet hobbit inherits a dangerous ring and sets out with eight companions to destroy it before its maker can reclaim it.",
+          "tagline": "One ring to rule them all.",
+          "runtime_minutes": 179,
+          "release_date": "2001-12-18",
+          "directors": [
+            "Peter Jackson"
+          ],
+          "cast": [
+            {
+              "name": "Elijah Wood",
+              "character": "Frodo Baggins"
+            },
+            {
+              "name": "Ian McKellen",
+              "character": "Gandalf"
+            },
+            {
+              "name": "Viggo Mortensen",
+              "character": "Aragorn"
+            },
+            {
+              "name": "Sean Astin",
+              "character": "Samwise Gamgee"
+            },
+            {
+              "name": "Cate Blanchett",
+              "character": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "ok_unavailable",
+      "request": {
+        "method": "GET",
+        "path": "/api/movies/999999999/details",
+        "query": {},
+        "headers": {}
+      },
+      "response": {
+        "status": 200,
+        "headers": {},
+        "body": {
+          "movieId": 999999999,
+          "overview": null,
+          "tagline": null,
+          "runtime_minutes": null,
+          "release_date": null,
+          "directors": [],
+          "cast": []
+        }
+      }
+    },
+    {
+      "name": "bad_movie_id",
+      "request": {
+        "method": "GET",
+        "path": "/api/movies/abc/details",
+        "query": {},
+        "headers": {}
+      },
+      "response": {
+        "status": 400,
+        "headers": {},
+        "body": {
+          "error": {
+            "code": "bad_request",
+            "message": "movieId must be a positive integer"
+          }
+        }
+      }
+    }
+  ]
+}

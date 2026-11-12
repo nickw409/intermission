@@ -337,6 +337,7 @@ Two APIs, each defined in an OpenAPI file under contracts/. Public endpoints are
 | GET | /api/movies/search?q=&limit= | none | Case- and accent-insensitive title prefix and substring match. Ranks prefix matches first, then by popularity |
 | GET | /api/movies/{id} | none | Title, year, genres, rating count, mean rating, TMDB ID |
 | GET | /api/movies/{id}/similar?model=&k= | none | Item-to-item neighbors (item-KNN or content model) |
+| GET | /api/movies/{id}/details | none | Plot summary, tagline, runtime, release date, directors and top-billed cast from TMDB, cached on disk; empty (never 5xx) when TMDB has nothing or is unavailable. Added 2026-11-12 at the owner's request |
 | GET | /api/onboarding?n= | session | Popular, genre-diverse movies the user hasn't rated |
 | GET | /api/ratings | session | The user's ratings, newest first |
 | PUT | /api/ratings/{movieId} | session | `{rating}` in 0.5 steps; creates or updates |
@@ -368,6 +369,8 @@ Two APIs, each defined in an OpenAPI file under contracts/. Public endpoints are
 With fewer than 5 ratings, `cold_start` is true and the server returns popularity results plus a prompt to rate more.
 
 **Posters.** `links.csv` maps movieId to a TMDB ID. The server fetches poster paths from the TMDB API with a key kept in an environment variable, never sent to the browser. Images are cached on disk with a size cap and LRU eviction. On failure the endpoint returns a generated placeholder, never a 5xx. The UI shows TMDB's required attribution. Check TMDB's current API terms before going public.
+
+**Movie details.** The same TMDB client, key, hosts and global upstream budget serve `/api/movies/{id}/details`: one TMDB request (`/3/movie/{tmdbId}?append_to_response=credits`) per uncached movie, cleaned (valid UTF-8, no control or bidi characters, lengths capped, at most 10 cast and 3 directors) and cached on disk as JSON beside the posters with its own 64 MiB cap. Failures give empty details with 200, never a 5xx. TMDB text is untrusted and is rendered as plain text only.
 
 ### Internal model API (recs-model)
 
@@ -404,7 +407,7 @@ The frontend is a TypeScript single-page app (Vite + React), built to static fil
 2. **Onboarding:** a grid of about 30 movies from `/api/onboarding` with 0.5-step star ratings and a progress bar to 10 ratings. Searching for any movie to rate is also available here.
 3. **For you:** the user's top 20, from the default model (ALS once it exists) unless the user picks another. A model selector lists every loaded model, and genre chips (any of the MovieLens genres) narrow the list to movies with at least one chosen genre. A release-year range (from and to, inclusive, either end optional) narrows it further. All of these choices are kept in the URL query and remembered per browser. Poster cards show the explanation ("Because you rated X, Y"), a rate control and "not interested". Added 2026-11-11 at the owner's request.
 4. **Compare models:** three to five columns side by side, one per model, for the same user. Movies that appear in several columns are highlighted. This page is the core of "see it in action".
-5. **Movie page:** details, the user's rating control, and a similar-movies row with a model toggle.
+5. **Movie page:** details (title, year, genres, ratings, and from TMDB the plot summary, tagline, runtime, release date, directors and cast), the user's rating control, and a similar-movies row with a model toggle.
 6. **My ratings:** sortable list with edit and delete.
 7. **Evaluation:** charts from `/api/reports`.
 8. **How it works:** a short explanation of each model, linking to its Evaluation results.
@@ -577,7 +580,7 @@ Deliverables:
 3. Never change the evaluation protocol (split, relevance threshold, metrics) to improve a model's numbers. Protocol changes need the owner's sign-off and bump the report schema version.
 4. After each phase, write `docs/phase-N.md`: what was built, gate results, the headline metrics table, and anything surprising.
 5. All randomness is seeded and every seed is recorded in the report.
-6. Pin every dependency version. No network access at runtime except the TMDB poster fetch. The Wikidata fetch is a batch-time host script, not runtime access.
+6. Pin every dependency version. No network access at runtime except recs-api's TMDB fetches (posters and movie details). The Wikidata fetch is a batch-time host script, not runtime access.
 7. Keep secrets (TMDB key) in environment variables loaded by systemd, never in the repo.
 8. Prefer clear code over clever code in librecs. This is a learning codebase, so each model's file starts with a comment block explaining the math, with references.
 

@@ -9,6 +9,7 @@ export const operations = {
   searchMovies: { method: 'GET', path: '/api/movies/search' },
   getMovie: { method: 'GET', path: '/api/movies/{movieId}' },
   getSimilar: { method: 'GET', path: '/api/movies/{movieId}/similar' },
+  getMovieDetails: { method: 'GET', path: '/api/movies/{movieId}/details' },
   getOnboarding: { method: 'GET', path: '/api/onboarding' },
   listRatings: { method: 'GET', path: '/api/ratings' },
   putRating: { method: 'PUT', path: '/api/ratings/{movieId}' },

@@ -50,7 +50,7 @@ The site is live (as of 2026-11-12). It went public through Tailscale Funnel on 
    - Every SQL statement is prepared, with bound parameters.
    - Never log passwords, tokens, cookies or rating payloads.
    - Secrets (the TMDB key) come from environment variables, never from the repo.
-8. **Dependencies.** Pin every dependency version: FetchContent tags, `go.sum`, `package-lock.json`. There is no runtime network access except the TMDB poster fetch.
+8. **Dependencies.** Pin every dependency version: FetchContent tags, `go.sum`, `package-lock.json`. There is no runtime network access except recs-api's TMDB fetches (posters and movie details).
 9. **Learning codebase.** Prefer clear code over clever code. Each model's `.cpp` starts with a comment block explaining the math, with references.
 10. **Data.** Never commit MovieLens data, `data/`, or anything derived from it. Model factors and datasets are never offered for download (license).
 11. **Public repo.**

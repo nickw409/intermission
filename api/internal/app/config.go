@@ -53,8 +53,8 @@ type Config struct {
 	SignupMode         SignupMode // RECS_SIGNUP_MODE: invite | open
 	ReportsDir         string     // RECS_REPORTS_DIR: run reports written by recs-train
 	ExportsDir         string     // RECS_EXPORTS_DIR: export-ratings output
-	PosterCacheDir     string     // RECS_POSTER_CACHE_DIR
-	PosterCacheMaxByte int64      // RECS_POSTER_CACHE_MAX_BYTES
+	PosterCacheDir     string     // RECS_POSTER_CACHE_DIR; movie details are cached in its details/ subdirectory
+	PosterCacheMaxByte int64      // RECS_POSTER_CACHE_MAX_BYTES: posters only; details have a fixed 64 MiB cap on top
 	TMDBAPIKey         Secret     // TMDB_API_KEY: optional; posters fall back to placeholders without it
 	LogLevel           slog.Level // RECS_LOG_LEVEL: debug | info | warn | error
 }

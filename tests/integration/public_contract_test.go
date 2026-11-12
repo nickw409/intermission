@@ -141,6 +141,18 @@ func TestPublicContract(t *testing.T) {
 		t.Errorf("poster content type %q", ct)
 	}
 	anon.expect("getPoster", "poster bad id", "GET", "/api/posters/abc", nil, 400, "bad_request")
+	// No TMDB key in the stack: details are the empty answer, still 200.
+	r = anon.expect("getMovieDetails", "details without TMDB", "GET", "/api/movies/1/details", nil, 200, "")
+	var details struct {
+		MovieID  int64   `json:"movieId"`
+		Overview *string `json:"overview"`
+		Cast     []any   `json:"cast"`
+	}
+	r.JSON(t, &details)
+	if details.MovieID != 1 || details.Overview != nil || details.Cast == nil || len(details.Cast) != 0 {
+		t.Errorf("details without TMDB: %+v", details)
+	}
+	anon.expect("getMovieDetails", "details bad id", "GET", "/api/movies/abc/details", nil, 400, "bad_request")
 
 	// ---- session-only routes without a session ----
 	anon.expect("getMe", "me no session", "GET", "/api/me", nil, 401, "unauthorized")
