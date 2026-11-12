@@ -3,6 +3,7 @@ module github.com/nickw409/intermission/api
 go 1.26.0
 
 require (
+	github.com/rivo/uniseg v0.4.7
 	golang.org/x/crypto v0.58.0
 	golang.org/x/time v0.16.0
 	modernc.org/sqlite v1.62.0

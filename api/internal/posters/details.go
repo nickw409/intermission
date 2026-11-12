@@ -17,6 +17,7 @@ import (
 
 	"github.com/nickw409/intermission/api/internal/apperr"
 	"github.com/nickw409/intermission/api/internal/moviecache"
+	"github.com/rivo/uniseg"
 )
 
 // How movie details are served (GET /api/movies/{movieId}/details):
@@ -298,20 +299,52 @@ func clean(id int64, raw tmdbDetails) MovieDetails {
 	return d
 }
 
-// cleanText returns s made safe to show as plain text, or nil if nothing is
-// left. Invalid UTF-8, control characters and invisible format characters
-// (bidi controls, zero-width spaces, BOMs, tags; Unicode category Cf) are
-// dropped, except the zero-width joiner and non-joiner that some scripts
-// and emoji need. Runs of combining marks are capped at maxCombiningRun.
-// Tabs become spaces; newlines are kept (as \n) only if multiline. Text
-// longer than max runes is cut to max runes, the last being an ellipsis.
+// cleanText returns s made safe to show as plain text (see sanitizeText),
+// or nil if nothing is left. Text longer than max runes is cut at a
+// grapheme cluster boundary to at most max runes, the last being an
+// ellipsis. If not even the first grapheme cluster fits before the
+// ellipsis, the result is nil too: a lone "…" would show nothing.
 func cleanText(s *string, max int, multiline bool) *string {
 	if s == nil {
 		return nil
 	}
+	out := sanitizeText(*s, multiline)
+	if out == "" {
+		return nil
+	}
+	if utf8.RuneCountInString(out) > max {
+		prefix := strings.TrimRightFunc(graphemePrefix(out, max-1), unicode.IsSpace)
+		if prefix == "" {
+			return nil
+		}
+		out = prefix + "…"
+	}
+	return &out
+}
+
+// sanitizeText drops invalid UTF-8, control characters and invisible
+// format characters (bidi controls, zero-width spaces, BOMs, tags; Unicode
+// category Cf) from s, except the zero-width joiner and non-joiner that
+// some scripts and emoji need. Runs of combining marks are capped at
+// maxCombiningRun. Tabs become spaces; newlines are kept (as \n) only if
+// multiline. Leading and trailing white space is trimmed.
+func sanitizeText(s string, multiline bool) string {
 	var b strings.Builder
-	marks := 0 // combining marks since the last base character
-	for _, r := range strings.ToValidUTF8(*s, "") {
+	// marks counts the combining marks kept since the last kept base
+	// character. A dropped character doesn't reset it, or a control
+	// character between two runs would let them add up past the cap.
+	marks := 0
+	for _, r := range strings.ToValidUTF8(s, "") {
+		switch {
+		case r == '\n' || r == '\t':
+			if !multiline || r == '\t' {
+				r = ' '
+			}
+		case r == zwnj || r == zwj:
+			// kept
+		case unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == utf8.RuneError:
+			continue // dropped (\r included, so CRLF becomes \n)
+		}
 		if unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r) {
 			if marks++; marks > maxCombiningRun {
 				continue
@@ -319,30 +352,28 @@ func cleanText(s *string, max int, multiline bool) *string {
 		} else {
 			marks = 0
 		}
-		switch {
-		case r == '\n' || r == '\t':
-			if multiline && r == '\n' {
-				b.WriteRune('\n')
-			} else {
-				b.WriteRune(' ')
-			}
-		case r == zwnj || r == zwj:
-			b.WriteRune(r)
-		case unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == utf8.RuneError:
-			// dropped (\r included, so CRLF becomes \n)
-		default:
-			b.WriteRune(r)
+		b.WriteRune(r)
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// graphemePrefix returns the longest prefix of s that is made of whole
+// grapheme clusters (what a reader sees as one character, Unicode UAX #29)
+// and has at most n runes. Cutting at a rune could split an emoji ZWJ
+// sequence, a flag's pair of regional indicators, a skin-tone modifier or
+// variation selector from its emoji, or an accent from its letter. If the
+// first cluster alone is longer than n runes, the prefix is empty.
+func graphemePrefix(s string, n int) string {
+	end, runes, state := 0, 0, -1
+	for rest := s; rest != ""; {
+		var cluster string
+		cluster, rest, _, state = uniseg.FirstGraphemeClusterInString(rest, state)
+		if runes += utf8.RuneCountInString(cluster); runes > n {
+			break
 		}
+		end += len(cluster)
 	}
-	out := strings.TrimSpace(b.String())
-	if out == "" {
-		return nil
-	}
-	if utf8.RuneCountInString(out) > max {
-		runes := []rune(out)[:max-1]
-		out = strings.TrimRightFunc(string(runes), unicode.IsSpace) + "…"
-	}
-	return &out
+	return s[:end]
 }
 
 const (
