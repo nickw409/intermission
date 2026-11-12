@@ -32,6 +32,10 @@ var (
 	RecommendPerSession = Config{Every: time.Minute / 30, Burst: 30}
 	// FeedbackPerSession: 60 POST /api/feedback calls per minute per session.
 	FeedbackPerSession = Config{Every: time.Minute / 60, Burst: 60}
+	// DeletePerUser: 60 calls per minute per user to each of DELETE
+	// /api/ratings/{movieId} and DELETE /api/feedback/not-interested/{movieId}.
+	// Each opens a write transaction, even when there is nothing to delete.
+	DeletePerUser = Config{Every: time.Minute / 60, Burst: 60}
 	// LoginGlobal caps login attempts across all accounts (each costs an
 	// Argon2id hash): 60 per minute.
 	LoginGlobal = Config{Every: time.Second, Burst: 30}

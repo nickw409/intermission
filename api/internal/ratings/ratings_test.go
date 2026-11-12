@@ -1,6 +1,8 @@
 package ratings
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -88,6 +90,15 @@ func TestContractFixtures(t *testing.T) {
 				}
 				if c.Name == "model_unavailable" {
 					e.Fake.SetDown(true)
+				}
+				if c.Name == "rate_limited" {
+					// The production limit (60 per minute per user), exhausted
+					// by no-op deletes.
+					for i := 0; i < 60; i++ {
+						if rec := e.Do("DELETE", "/api/ratings/1", nil, tok); rec.Code != http.StatusNoContent {
+							t.Fatalf("delete %d: %d", i, rec.Code)
+						}
+					}
 				}
 				before := cachetest.RatingsVersion(t, e.DB, uid)
 				rec := e.Replay(c, tok)
@@ -408,5 +419,31 @@ func TestNoRatingPayloadInLogs(t *testing.T) {
 	}
 	if !strings.Contains(logs, `"route":"PUT /api/ratings/{movieId}"`) {
 		t.Fatalf("no access log:\n%s", logs)
+	}
+}
+
+// The DELETE limit is per user: a second session on the same account shares
+// the bucket, and another user is unaffected.
+func TestDeleteLimitIsPerUser(t *testing.T) {
+	e := newEnv(t)
+	uid, tok := cachetest.NewUser(t, e.DB, "alice")
+	second := base64.RawURLEncoding.EncodeToString(sha256.New().Sum([]byte("second"))[:32]) // 32 bytes, like a real token
+	sum := sha256.Sum256([]byte(second))
+	now := time.Now().Unix()
+	if _, err := e.DB.Writer.Exec("INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+		sum[:], uid, now, now+3600); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 60; i++ {
+		if rec := e.Do("DELETE", "/api/ratings/1", nil, tok); rec.Code != http.StatusNoContent {
+			t.Fatalf("delete %d: %d", i, rec.Code)
+		}
+	}
+	if rec := e.Do("DELETE", "/api/ratings/1", nil, second); rec.Code != http.StatusTooManyRequests {
+		t.Errorf("second session got %d, want 429 from the per-user bucket", rec.Code)
+	}
+	_, bobTok := cachetest.NewUser(t, e.DB, "bob")
+	if rec := e.Do("DELETE", "/api/ratings/1", nil, bobTok); rec.Code != http.StatusNoContent {
+		t.Errorf("bob got %d", rec.Code)
 	}
 }

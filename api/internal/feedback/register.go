@@ -51,7 +51,7 @@ type request struct {
 //
 //	POST   /api/feedback                             (session, 60/min per session and per user)
 //	GET    /api/feedback/not-interested              (session)
-//	DELETE /api/feedback/not-interested/{movieId}    (session; undo)
+//	DELETE /api/feedback/not-interested/{movieId}    (session, 60/min per user; undo)
 //
 // The per-user bucket has the same shape as the per-session one, so more
 // sessions on one account don't add up to more writes.
@@ -90,11 +90,16 @@ func register(mux *http.ServeMux, d *app.Deps, now func() time.Time) {
 	perSession := ratelimit.Middleware(ratelimit.NewKeyed(ratelimit.FeedbackPerSession, clock), auth.SessionKey)
 	userBuckets := ratelimit.NewKeyed(ratelimit.FeedbackPerSession, clock)
 	perUser := ratelimit.Middleware(userBuckets, userKey)
-	// A deleted account's bucket goes with it (its IDs are never reused).
-	d.DB.OnUserDeleted(func(uid int64) { userBuckets.Retire(userBucket(uid)) })
+	undoBuckets := ratelimit.NewKeyed(ratelimit.DeletePerUser, clock)
+	perUserUndo := ratelimit.Middleware(undoBuckets, userKey)
+	// A deleted account's buckets go with it (its IDs are never reused).
+	d.DB.OnUserDeleted(func(uid int64) {
+		userBuckets.Retire(userBucket(uid))
+		undoBuckets.Retire(userBucket(uid))
+	})
 	mux.Handle("POST /api/feedback", session(perSession(perUser(http.HandlerFunc(h.post)))))
 	mux.Handle("GET /api/feedback/not-interested", session(http.HandlerFunc(h.listNotInterested)))
-	mux.Handle("DELETE /api/feedback/not-interested/{movieId}", session(http.HandlerFunc(h.undoNotInterested)))
+	mux.Handle("DELETE /api/feedback/not-interested/{movieId}", session(perUserUndo(http.HandlerFunc(h.undoNotInterested))))
 }
 
 // userKey is the per-user rate-limit key.

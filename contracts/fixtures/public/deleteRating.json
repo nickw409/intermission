@@ -84,6 +84,31 @@
           }
         }
       }
+    },
+    {
+      "name": "rate_limited",
+      "request": {
+        "method": "DELETE",
+        "path": "/api/ratings/1",
+        "query": {},
+        "headers": {
+          "Origin": "https://intermission.example",
+          "X-Requested-With": "recs",
+          "Cookie": "session=fixture-session-token"
+        }
+      },
+      "response": {
+        "status": 429,
+        "headers": {
+          "Retry-After": "1"
+        },
+        "body": {
+          "error": {
+            "code": "rate_limited",
+            "message": "too many requests"
+          }
+        }
+      }
     }
   ]
 }

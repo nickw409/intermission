@@ -347,6 +347,15 @@ func TestListAndUndoContractFixtures(t *testing.T) {
 				cachetest.SeedMovies(t, e.DB, cachetest.Movie(2959, "Fight Club", 1999), cachetest.Movie(1, "Toy Story", 1995))
 				seedNotInterested(t, e.DB, uid, 1, 1794258000)
 				seedNotInterested(t, e.DB, uid, 2959, 1794259200)
+				if c.Name == "rate_limited" {
+					// The production limit (60 per minute per user), exhausted
+					// by no-op undos.
+					for i := 0; i < 60; i++ {
+						if rec := e.Do("DELETE", "/api/feedback/not-interested/7", nil, tok); rec.Code != http.StatusNoContent {
+							t.Fatalf("undo %d: %d", i, rec.Code)
+						}
+					}
+				}
 				before := cachetest.RatingsVersion(t, e.DB, uid)
 				e.Replay(c, tok)
 				after := cachetest.RatingsVersion(t, e.DB, uid)

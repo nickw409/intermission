@@ -198,6 +198,7 @@ paths:
     delete:
       tags: [ratings]
       operationId: deleteRating
+      description: Rate limited to 60 per minute per user.
       security: [{ session: [] }]
       parameters: [{ $ref: '#/components/parameters/MovieId' }, { $ref: '#/components/parameters/XRequestedWith' }]
       responses:
@@ -205,6 +206,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
   /api/recommend:
     get:
       tags: [recommendations]
@@ -272,6 +274,7 @@ paths:
       tags: [ratings]
       operationId: deleteNotInterested
       summary: Undo "not interested". The movie can be recommended again.
+      description: Rate limited to 60 per minute per user.
       security: [{ session: [] }]
       parameters: [{ $ref: '#/components/parameters/MovieId' }, { $ref: '#/components/parameters/XRequestedWith' }]
       responses:
@@ -279,6 +282,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
   /api/feedback/stats:
     get:
       tags: [recommendations]

@@ -306,7 +306,7 @@ Migrations are numbered SQL files applied at startup inside a transaction, with 
 - **Passwords:** 10–128 characters, hashed with Argon2id from `golang.org/x/crypto/argon2` (t=3, m=64 MiB, p=4, 16-byte random salt, 32-byte key, per RFC 9106) and compared with `subtle.ConstantTimeCompare`. A semaphore caps concurrent hashes at 4, so a login flood can't exhaust memory. Login failures return the same error and take the same time whether or not the username exists.
 - **Sessions:** 32 random bytes from `crypto/rand`, base64url-encoded, in a cookie with `HttpOnly; Secure; SameSite=Lax; Path=/`. Sessions expire after 30 days, rotate on login, and are deleted on logout.
 - **CSRF:** wrap all mutating routes in Go's http.CrossOriginProtection, and additionally require an `Origin` header matching the site's own origin and the custom header `X-Requested-With: recs`. Reject otherwise.
-- **Rate limits:** a token bucket per account for login (5 per minute), per session and per user for `/recommend` (30 per minute) and for `POST /api/feedback` (60 per minute), plus a global cap. Check during deployment whether Funnel passes the client IP. If it does, add per-IP limits for signup and login. If it doesn't, rely on the global caps.
+- **Rate limits:** a token bucket per account for login (5 per minute), per session and per user for `/recommend` (30 per minute) and for `POST /api/feedback` (60 per minute), per user for each of `DELETE /api/ratings/{movieId}` and `DELETE /api/feedback/not-interested/{movieId}` (60 per minute), plus a global cap. Check during deployment whether Funnel passes the client IP. If it does, add per-IP limits for signup and login. If it doesn't, rely on the global caps.
 - **Input limits:** request bodies up to 64 KB, at most 5,000 ratings per user. Every SQL statement is a prepared statement with bound parameters. No string-built SQL anywhere.
 - **Account deletion:** `DELETE /api/me` removes the user and cascades to everything they own. Their ratings drop out at the next retrain.
 - **Concurrency:** two database/sql pools on the same file, a write pool capped at one connection (SetMaxOpenConns(1)) and a read pool, `busy_timeout` 5,000 ms, writes in short transactions.
@@ -332,12 +332,12 @@ Two APIs, each defined in an OpenAPI file under contracts/. Public endpoints are
 | GET | /api/onboarding?n= | session | Popular, genre-diverse movies the user hasn't rated |
 | GET | /api/ratings | session | The user's ratings, newest first |
 | PUT | /api/ratings/{movieId} | session | `{rating}` in 0.5 steps; creates or updates |
-| DELETE | /api/ratings/{movieId} | session | Removes a rating |
+| DELETE | /api/ratings/{movieId} | session | Removes a rating; idempotent; 60 per minute per user |
 | GET | /api/recommend?model=&k=&genres= | session | Top-k with score and explanation for one model, optionally limited to genres |
 | GET | /api/recommend/compare?models=pop,knn,als&k=&genres= | session | One list per model, for the side-by-side view |
 | POST | /api/feedback | session | `{movieId, model, action}`. `not_interested` is stored now (2026-11-12, owner request): the movie is never recommended to that user again, by any model, and is left out of onboarding. Once per movie, at most 5,000 per user (the oldest drops off). `impression` and `click` are stored from phase 6 |
 | GET | /api/feedback/not-interested | session | The movies the user marked "not interested", newest first (Ratings page, with an undo) |
-| DELETE | /api/feedback/not-interested/{movieId} | session | Undo "not interested"; idempotent |
+| DELETE | /api/feedback/not-interested/{movieId} | session | Undo "not interested"; idempotent; 60 per minute per user |
 | GET | /api/models | none | Loaded models, artifact version, trained-at time |
 | GET | /api/reports | none | List of run reports (id, model, dataset, headline metrics) |
 | GET | /api/reports/{run\_id} | none | One full run report |
