@@ -50,6 +50,26 @@ groups:
           summary: '{{ $labels.task }} failed on its last run'
           runbook: deploy/runbooks/nightly-jobs.md
 
+      # deploy/release.sh stopped before changing anything: the new recs-model refuses the current
+      # model artifact (recs-model --check). The site is unaffected, but that release waits for a
+      # retrain with its own train image. Clears when a later release's check passes.
+      - alert: RetrainRequired
+        expr: max by (task) (intermission_job_last_status{task="artifact_check"}) != 0
+        labels: { severity: warn }
+        annotations:
+          summary: 'A release is blocked: its recs-model cannot load the current model artifact (retrain first)'
+          runbook: deploy/runbooks/deploy.md
+
+      # The serving artifact loads, but core/, train/ or configs/ changed since it was trained, so
+      # the site does not yet use the newer training code. Clears when a release finds it up to date
+      # (after a retrain, re-run deploy/release.sh with the running SHA).
+      - alert: RetrainRecommended
+        expr: max by (task) (intermission_job_last_status{task="artifact_freshness"}) != 0
+        labels: { severity: info }
+        annotations:
+          summary: 'Training code changed since the serving model artifact was trained (retrain recommended)'
+          runbook: deploy/runbooks/deploy.md
+
       - alert: NightlyJobStale
         expr: time() - max by (task) (intermission_job_last_success_timestamp_seconds{task=~"export|retrain|backup"}) > 36 * 3600
         labels: { severity: warn }

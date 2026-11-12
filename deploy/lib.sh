@@ -119,11 +119,49 @@ require_data_dirs() {
   done
 }
 
+# check_artifact TAG: ask TAG's recs-model whether it would serve the artifact production's
+# CURRENT names (recs-model --check), with the model service's own mounts, user and hardening:
+# no network, artifacts read-only. Prints the check's version=, git_sha= and models= lines on
+# stdout; exits non-zero if that recs-model would refuse the artifact (a retrain is needed first).
+# A shell TAG overrides the env file's, so the running services are untouched.
+# Images built before --check existed (any rollback target older than it) cannot be asked: the
+# check is skipped with a warning and nothing is printed, rather than blocking every such rollback.
+check_artifact() {
+  local help
+  help="$(TAG="$1" compose run --rm --no-deps -T model --help 2>/dev/null)" || true
+  if [[ "$help" != *--check* ]]; then
+    log "WARNING: recs-model:$1 predates --check; skipping the artifact preflight"
+    return 0
+  fi
+  TAG="$1" compose run --rm --no-deps -T model --check --artifacts /srv/data/artifacts
+}
+
+# The source that decides what `recs-train train` writes into an artifact. Broad on purpose (all
+# of core/, not just the models): an unneeded retrain costs machine time, a missed one leaves the
+# site on a model the code has moved past.
+TRAINING_PATHS=(core train configs)
+
+# training_changed FROM TO: whether TRAINING_PATHS differ between commit FROM (the git_sha an
+# artifact was trained at) and commit TO (the release). Exit 0: changed, so a retrain is
+# recommended; 1: unchanged; 2: cannot tell (FROM is not a commit id in this repository).
+training_changed() {
+  local from="$1" to="$2" rc=0
+  [[ "$from" =~ ^[0-9a-f]{7,40}$ ]] || return 2
+  git -C "$REPO_DIR" rev-parse --verify --quiet --end-of-options "${from}^{commit}" >/dev/null || return 2
+  git -C "$REPO_DIR" diff --quiet "$from" "$to" -- "${TRAINING_PATHS[@]}" || rc=$?
+  case "$rc" in
+    0) return 1 ;;
+    1) return 0 ;;
+    *) return 2 ;;
+  esac
+}
+
 # origin_host ORIGIN: host[:port] part of scheme://host[:port].
 origin_host() { local o="${1#*://}"; printf '%s\n' "${o%%/*}"; }
 
 # job_status JOB CODE: record a job result for node-exporter's textfile collector
-# (alerts: JobFailed, NightlyJobStale, RestoreDrillStale). Never fails the caller.
+# (alerts: JobFailed, NightlyJobStale, RestoreDrillStale; release.sh's artifact_check and
+# artifact_freshness: RetrainRequired, RetrainRecommended). Never fails the caller.
 job_status() {
   local job="$1" code="$2" dir now
   dir="$(data_dir)/ops/textfile"

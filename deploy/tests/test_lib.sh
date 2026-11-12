@@ -4,6 +4,7 @@
 #   - deploy/.env is forced to mode 0600
 #   - short_sha only accepts commits that exist in this repository
 #   - one shared lock serialises release/backup/nightly/restore-drill; nested calls pass
+#   - training_changed: which commit pairs recommend a retrain
 #
 #   deploy/tests/test_lib.sh
 # ok/bad always succeed, so `cond && ok || bad` is a safe if-then-else; snippets passed to
@@ -89,6 +90,28 @@ out="$(run_lib 'acquire_lock outer 1; bash -c "source \"$DEPLOY_DIR/lib.sh\"; ac
 grep -q NESTED <<<"$out" && ok "nested script reuses the held lock" || bad "nested acquire failed: $out"
 out="$(run_lib 'acquire_lock again 1; echo GOT')"
 grep -q GOT <<<"$out" && ok "lock free again after the holder exits" || bad "lock not released: $out"
+
+echo "== training_changed"
+# A throwaway repository: base commit, then one commit outside the training source, then one
+# inside it. REPO_DIR is reassigned after lib.sh is sourced.
+repo="$tmp/repo"
+git init -q "$repo"
+g() { git -C "$repo" -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false "$@"; }
+mkdir -p "$repo/core" "$repo/web" "$repo/configs"
+echo a > "$repo/core/model.cpp"; echo a > "$repo/web/app.tsx"; echo a > "$repo/configs/knn.json"
+g add -A && g commit -q -m base
+base="$(g rev-parse --short=7 HEAD)"
+echo b > "$repo/web/app.tsx"; g commit -q -am web
+web="$(g rev-parse --short=7 HEAD)"
+echo b > "$repo/configs/knn.json"; g commit -q -am configs
+cfg="$(g rev-parse --short=7 HEAD)"
+tc() { run_lib "REPO_DIR='$repo'; training_changed $1 $2 && echo RC0 || echo RC\$?"; }
+[[ "$(tc "$base" "$web")" == RC1 ]] && ok "web-only change: no retrain" || bad "web-only change gave $(tc "$base" "$web")"
+[[ "$(tc "$base" "$cfg")" == RC0 ]] && ok "configs change: retrain recommended" || bad "configs change gave $(tc "$base" "$cfg")"
+[[ "$(tc "$web" "$web")" == RC1 ]] && ok "same commit: no retrain" || bad "same commit gave $(tc "$web" "$web")"
+[[ "$(tc unknown "$cfg")" == RC2 ]] && ok "git_sha unknown: cannot tell" || bad "unknown gave $(tc unknown "$cfg")"
+[[ "$(tc deadbee "$cfg")" == RC2 ]] && ok "commit not in repo: cannot tell" || bad "missing commit gave $(tc deadbee "$cfg")"
+[[ "$(tc "'-p'" "$cfg")" == RC2 ]] && ok "option-like git_sha refused" || bad "option-like gave $(tc "'-p'" "$cfg")"
 
 if [[ $fails -gt 0 ]]; then
   echo "FAIL: $fails lib check(s) failed" >&2

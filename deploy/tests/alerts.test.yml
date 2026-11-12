@@ -66,3 +66,45 @@ tests:
             exp_annotations:
               summary: 'Nightly backup has not succeeded for 36 hours'
               runbook: deploy/runbooks/nightly-jobs.md
+
+  # Release preflight (deploy/release.sh): a blocked release fires RetrainRequired; a stale but
+  # loadable artifact fires RetrainRecommended; neither fires JobFailed (not a scheduled job).
+  - interval: 1m
+    input_series:
+      - series: 'intermission_job_last_status{task="artifact_check"}'
+        values: '1x10'
+      - series: 'intermission_job_last_status{task="artifact_freshness"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: RetrainRequired
+        exp_alerts:
+          - exp_labels: { severity: warn, task: artifact_check }
+            exp_annotations:
+              summary: 'A release is blocked: its recs-model cannot load the current model artifact (retrain first)'
+              runbook: deploy/runbooks/deploy.md
+      - eval_time: 2m
+        alertname: RetrainRecommended
+        exp_alerts:
+          - exp_labels: { severity: info, task: artifact_freshness }
+            exp_annotations:
+              summary: 'Training code changed since the serving model artifact was trained (retrain recommended)'
+              runbook: deploy/runbooks/deploy.md
+      - eval_time: 2m
+        alertname: JobFailed
+        exp_alerts: []
+
+  # Both clear once a release records success.
+  - interval: 1m
+    input_series:
+      - series: 'intermission_job_last_status{task="artifact_check"}'
+        values: '0x10'
+      - series: 'intermission_job_last_status{task="artifact_freshness"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: RetrainRequired
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: RetrainRecommended
+        exp_alerts: []
