@@ -10,9 +10,11 @@ import (
 	"math"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/nickw409/intermission/api/internal/contractsdir"
 	"github.com/nickw409/intermission/api/internal/modelclient"
@@ -334,20 +336,22 @@ func batchFromCatalog(fx *Fixture, body []byte) *Case {
 	return answer(200, out)
 }
 
-// parseBatchIDs validates a movies/batch body the way recs-model does and
-// returns its IDs, or the error code and message recs-model would answer with.
+// parseBatchIDs validates a movies/batch body the way recs-model does
+// (model-service parse_object, check_fields and batch_route) and returns its
+// IDs, or the error code and message recs-model would answer with.
 func parseBatchIDs(body []byte) (ids []int64, code, msg string) {
 	const badJSON, badRequest = "invalid_json", "bad_request"
-	if !json.Valid(body) {
+	if !utf8.Valid(body) || !nestingOK(body) || !json.Valid(body) {
 		return nil, badJSON, "request body is not valid JSON"
 	}
 	var obj map[string]json.RawMessage
 	if json.Unmarshal(body, &obj) != nil || obj == nil {
 		return nil, badRequest, "request body must be a JSON object"
 	}
-	for key := range obj {
+	// recs-model reports the first unexpected field in key order.
+	for _, key := range slices.Sorted(maps.Keys(obj)) {
 		if key != "ids" {
-			return nil, badRequest, "unexpected field"
+			return nil, badRequest, "unexpected field" + echoToken(key)
 		}
 	}
 	raw, ok := obj["ids"]
@@ -357,7 +361,7 @@ func parseBatchIDs(body []byte) (ids []int64, code, msg string) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	var list []any
-	if dec.Decode(&list) != nil || list == nil || len(list) == 0 || len(list) > modelclient.MaxBatchIDs {
+	if dec.Decode(&list) != nil || len(list) == 0 || len(list) > modelclient.MaxBatchIDs {
 		return nil, badRequest, "ids must contain 1-200 movie ids"
 	}
 	for _, v := range list {
@@ -368,6 +372,57 @@ func parseBatchIDs(body []byte) (ids []int64, code, msg string) {
 		ids = append(ids, id)
 	}
 	return ids, "", ""
+}
+
+// maxJSONDepth is recs-model's Limits::kMaxJsonDepth.
+const maxJSONDepth = 8
+
+// nestingOK reports whether no array or object in s nests deeper than
+// maxJSONDepth and there are never more closers than openers, as
+// model-service nesting_ok does before parsing.
+func nestingOK(s []byte) bool {
+	depth := 0
+	inString, escaped := false, false
+	for _, c := range s {
+		if inString {
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inString = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inString = true
+		case '[', '{':
+			if depth++; depth > maxJSONDepth {
+				return false
+			}
+		case ']', '}':
+			if depth--; depth < 0 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// echoToken quotes a caller-supplied token for an error message only if it is
+// at most 40 bytes of printable ASCII, as model-service echo_token does.
+func echoToken(s string) string {
+	if len(s) > 40 {
+		return ""
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] >= 0x7f {
+			return ""
+		}
+	}
+	return ` "` + s + `"`
 }
 
 // movieID reports whether v is a JSON integer (3.0 counts, as in JSON Schema)

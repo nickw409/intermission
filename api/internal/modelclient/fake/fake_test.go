@@ -578,19 +578,36 @@ func TestMoviesBatchFallbackRejectsInvalid(t *testing.T) {
 		t.Fatalf("max ID: %v", err)
 	}
 
-	// Over HTTP, bodies the typed client cannot send.
+	// Over HTTP, including bodies the typed client cannot send.
 	srv := NewServerFor(f)
 	defer srv.Close()
-	for _, tc := range []struct{ body, code string }{
-		{`{"ids":[1.5]}`, "bad_request"},
-		{`{"ids":["260"]}`, "bad_request"},
-		{`{"ids":null}`, "bad_request"},
-		{`{"ids":260}`, "bad_request"},
-		{`{}`, "bad_request"},
-		{`{"ids":[260],"extra":1}`, "bad_request"},
-		{`[260]`, "bad_request"},
-		{`{"ids":[260]`, "invalid_json"},
-		{`{"ids":[260]} {}`, "invalid_json"},
+	const (
+		badJSON  = "request body is not valid JSON"
+		badCount = "ids must contain 1-200 movie ids"
+		badID    = "movie_id must be an integer between 1 and 2147483647"
+	)
+	longKey := strings.Repeat("k", 41)
+	for _, tc := range []struct{ body, code, msg string }{
+		{`{"ids":[-5]}`, "bad_request", badID},
+		{`{"ids":[2147483648]}`, "bad_request", badID},
+		{`{"ids":[260,0]}`, "bad_request", badID},
+		{`{"ids":[1.5]}`, "bad_request", badID},
+		{`{"ids":["260"]}`, "bad_request", badID},
+		{`{"ids":[[[[[[[1]]]]]]]}`, "bad_request", badID}, // depth 8: parsed, then rejected
+		{`{"ids":null}`, "bad_request", badCount},
+		{`{"ids":260}`, "bad_request", badCount},
+		{`{"ids":[]}`, "bad_request", badCount}, // the empty_ids case
+		{`{}`, "bad_request", `missing field "ids"`},
+		{`{"ids":[260],"extra":1}`, "bad_request", `unexpected field "extra"`},
+		{`{"zz":1,"ids":[260],"aa":1}`, "bad_request", `unexpected field "aa"`},
+		{`{"ids":[260],"` + longKey + `":1}`, "bad_request", "unexpected field"},
+		{`{"ids":[260],"caf\u00e9":1}`, "bad_request", "unexpected field"},
+		{`[260]`, "bad_request", "request body must be a JSON object"},
+		{`{"ids":[260]`, "invalid_json", badJSON},
+		{`{"ids":[260]} {}`, "invalid_json", badJSON},
+		{"{\"ids\":[260],\"\xff\":1}", "invalid_json", badJSON},
+		{`{"ids":[[[[[[[[1]]]]]]]]}`, "invalid_json", badJSON}, // depth 9
+		{`]{"ids":[260]}`, "invalid_json", badJSON},
 	} {
 		resp, err := http.Post(srv.URL+"/v1/movies/batch", "application/json", strings.NewReader(tc.body))
 		if err != nil {
@@ -599,9 +616,22 @@ func TestMoviesBatchFallbackRejectsInvalid(t *testing.T) {
 		b, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		var eb modelclient.ErrorBody
-		if resp.StatusCode != 400 || json.Unmarshal(b, &eb) != nil || eb.Error.Code != tc.code {
-			t.Errorf("%s: %d %s, want 400 %s", tc.body, resp.StatusCode, b, tc.code)
+		if resp.StatusCode != 400 || json.Unmarshal(b, &eb) != nil || eb.Error.Code != tc.code || eb.Error.Message != tc.msg {
+			t.Errorf("%q: %d %s, want 400 %s %q", tc.body, resp.StatusCode, b, tc.code, tc.msg)
 		}
+	}
+
+	// An integral float is an integer, as in JSON Schema and recs-model.
+	hr, err := http.Post(srv.URL+"/v1/movies/batch", "application/json", strings.NewReader(`{"ids":[260.0, 999999998]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(hr.Body)
+	hr.Body.Close()
+	var br modelclient.BatchResponse
+	if hr.StatusCode != 200 || json.Unmarshal(b, &br) != nil || len(br.Movies) != 1 || br.Movies[0].MovieID != 260 ||
+		!slices.Equal(br.Missing, []int64{999999998}) {
+		t.Errorf("260.0: %d %s", hr.StatusCode, b)
 	}
 }
 

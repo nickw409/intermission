@@ -8,6 +8,7 @@ import { fixtureFor, handlerFor, responseFor } from '../../mocks/handlers';
 import { axeViolations } from '../../test/axe';
 import { renderApp } from '../../test/render';
 import { server } from '../../test/setup';
+import { FILTER_DEBOUNCE_MS } from './settledView';
 
 const BANNER = 'Recommendations are temporarily unavailable';
 const LOTR = 'The Lord of the Rings: The Fellowship of the Ring';
@@ -613,7 +614,7 @@ describe('For you: model selector and categories', () => {
     expect(searchOf(router).get('genres')).toBe('Horror');
   });
 
-  it('sends one request when a chip is toggled while a model change is loading', async () => {
+  it('sends a chip toggled after a model change one debounce later, as a second request', async () => {
     server.use(recommendWith(20));
     renderApp('/');
     await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
@@ -622,11 +623,51 @@ describe('For you: model selector and categories', () => {
     user.selectOptions(modelSelect(), 'knn');
     await flushUntil(() => recommend.length > 0, 'the request to start');
     user.click(chip('Horror'));
+    await advance(FILTER_DEBOUNCE_MS - 1);
+    expect(recommend).toHaveLength(1);
+    await advance(1);
+    await flushUntil(() => recommend.length > 1, 'the second request to start');
     await advance(5000);
     expect(recommend.map(queryOf)).toEqual([
       { model: 'knn', k: '20' },
       { model: 'knn', k: '20', genres: 'Horror' },
     ]);
+  });
+
+  it('sends one request per model when the model changes twice while a chip toggle is settling', async () => {
+    server.use(recommendWith(20));
+    renderApp('/');
+    await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
+    const recommend = recordRequests('/api/recommend');
+    const user = useFakeClock();
+    user.click(chip('Horror'));
+    await advance(100);
+    user.selectOptions(modelSelect(), 'knn');
+    await flushUntil(() => recommend.length > 0, 'the knn request to start');
+    await advance(100);
+    user.selectOptions(modelSelect(), 'mf');
+    await flushUntil(() => recommend.length > 1, 'the mf request to start');
+    await advance(5000);
+    expect(recommend.map(queryOf)).toEqual([
+      { model: 'knn', k: '20', genres: 'Horror' },
+      { model: 'mf', k: '20', genres: 'Horror' },
+    ]);
+  });
+
+  it('sends nothing for a pending filter once the user has left the page', async () => {
+    server.use(recommendWith(20));
+    const { router } = renderApp('/');
+    await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
+    const recommend = recordRequests('/api/recommend');
+    const user = useFakeClock();
+    user.click(chip('Horror'));
+    await advance(100);
+    await act(async () => {
+      await router.navigate('/how-it-works');
+    });
+    expect(screen.queryByRole('group', { name: 'Categories' })).not.toBeInTheDocument();
+    await advance(5000);
+    expect(recommend).toHaveLength(0);
   });
 
   it('remembers genres but not a model the user never picked', async () => {
@@ -903,9 +944,6 @@ async function letDebounceSettle() {
   });
 }
 
-/** The page's filter debounce (index.tsx FILTER_DEBOUNCE_MS). */
-const FILTER_DEBOUNCE_MS = 350;
-
 /** Switches to fake timers (the page must have loaded), so the debounce tests do not depend on how
  * busy the machine is. Those tests drive the page with fireEvent: user-event (through Testing
  * Library's async wrapper) waits on a real setTimeout, which a fake clock never fires. */
@@ -977,6 +1015,22 @@ describe('For you: release years', () => {
     await flushUntil(() => !screen.getByRole('list', { name: 'Recommendations' }).hasAttribute('aria-busy'), 'the list');
     expect(screen.getByRole('main')).toHaveTextContent('Picks from Implicit ALS · 1990–1999');
     expect(clearYearsButton()).toBeEnabled();
+  });
+
+  it('sends one request when the model changes while a typed range is still settling', async () => {
+    server.use(recommendWith(20));
+    const { router } = renderApp('/');
+    await screen.findByRole('heading', { level: 2, name: 'Movie 1' });
+    const recommend = recordRequests('/api/recommend');
+    const user = useFakeClock();
+    user.type(yearInput('From'), '1990');
+    await advance(100);
+    user.selectOptions(modelSelect(), 'knn');
+    await flushUntil(() => recommend.length > 0, 'the request to start');
+    expect(recommend.map(queryOf)).toEqual([{ model: 'knn', k: '20', year_from: '1990' }]);
+    await advance(5000);
+    expect(recommend).toHaveLength(1);
+    expect(searchOf(router).get('year_from')).toBe('1990');
   });
 
   it('combines the years with the genres', async () => {

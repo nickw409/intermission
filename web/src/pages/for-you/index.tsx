@@ -4,7 +4,7 @@
 // choices are remembered per browser (see choice.ts). Each poster card explains itself ("Because you
 // rated …"), can be rated in place, and can be dismissed with "Not interested". The list refetches
 // 500 ms after a rating change is saved, so newly rated movies drop out and the rest re-rank.
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router';
 import { api } from '../../api/client';
 import { RequireSession } from '../../components/RequireSession';
@@ -26,26 +26,9 @@ import {
 } from './choice';
 import { GenreChips, ModelSelect, YearRangeInputs } from './Controls';
 import { RecommendationList } from './RecommendationList';
+import { useSettledView } from './settledView';
 import '../../components/components.css';
 import './for-you.css';
-
-/** Chip toggles and year typing settle this long before the list is fetched (recommend calls are
- * rate limited). */
-const FILTER_DEBOUNCE_MS = 350;
-
-/** The model and filter the list should show. The filter (as its query string, see filterParams)
- * waits FILTER_DEBOUNCE_MS for the chips and typing to settle. A model change applies at once and
- * takes the pending filter with it, so a model change during the wait sends one request, not two. */
-function useSettledView(model: ModelName, filterKey: string): { model: ModelName; filterKey: string } {
-  const [settled, setSettled] = useState({ model, filterKey });
-  if (settled.model !== model) setSettled({ model, filterKey });
-  useEffect(() => {
-    if (settled.filterKey === filterKey) return;
-    const timer = setTimeout(() => setSettled((s) => ({ ...s, filterKey })), FILTER_DEBOUNCE_MS);
-    return () => clearTimeout(timer);
-  }, [settled.filterKey, filterKey]);
-  return settled;
-}
 
 export default function ForYouPage() {
   return (
