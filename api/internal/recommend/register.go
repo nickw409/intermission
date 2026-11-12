@@ -17,6 +17,7 @@ import (
 	"github.com/nickw409/intermission/api/internal/apperr"
 	"github.com/nickw409/intermission/api/internal/auth"
 	"github.com/nickw409/intermission/api/internal/db"
+	"github.com/nickw409/intermission/api/internal/feedback"
 	"github.com/nickw409/intermission/api/internal/modelclient"
 	"github.com/nickw409/intermission/api/internal/moviecache"
 	"github.com/nickw409/intermission/api/internal/ratelimit"
@@ -186,7 +187,7 @@ type userRatings struct {
 	version int64                  // users.ratings_version
 	created int64                  // users.created_at, fixed for the account's life
 	ratings []modelclient.RatingIn // newest first
-	ids     []int64                // the rated movie IDs, same order (exclude list)
+	ids     []int64                // exclude list: the rated movie IDs (same order), then the "not interested" ones
 }
 
 // recommend serves GET /api/recommend.
@@ -540,7 +541,34 @@ func (h *handler) loadRatings(ctx context.Context, uid int64) (userRatings, erro
 		u.ratings = append(u.ratings, ri)
 		u.ids = append(u.ids, ri.MovieID)
 	}
-	return u, rows.Err()
+	if err := rows.Err(); err != nil {
+		return u, err
+	}
+	// Movies marked "not interested" (POST /api/feedback) are never
+	// recommended again. That write bumps ratings_version, so the version read
+	// above covers these rows too. A movie both rated and dismissed is listed
+	// once.
+	rated := make(map[int64]bool, len(u.ids))
+	for _, id := range u.ids {
+		rated[id] = true
+	}
+	dismissed, err := tx.QueryContext(ctx,
+		"SELECT DISTINCT movie_id FROM feedback WHERE user_id = ? AND action = 'not_interested' ORDER BY movie_id LIMIT ?",
+		uid, feedback.MaxNotInterested)
+	if err != nil {
+		return u, err
+	}
+	defer dismissed.Close()
+	for dismissed.Next() {
+		var id int64
+		if err := dismissed.Scan(&id); err != nil {
+			return u, err
+		}
+		if !rated[id] {
+			u.ids = append(u.ids, id)
+		}
+	}
+	return u, dismissed.Err()
 }
 
 func joinModels(models []modelclient.ModelName) string {
