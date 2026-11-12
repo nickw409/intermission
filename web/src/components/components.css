@@ -384,6 +384,21 @@
   overflow-x: auto;
 }
 
+.not-interested {
+  margin-top: var(--space-8);
+}
+
+.not-interested__list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.not-interested__list li {
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--border);
+}
+
 .ratings-table {
   width: 100%;
   border-collapse: collapse;

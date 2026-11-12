@@ -149,6 +149,8 @@ func TestPublicContract(t *testing.T) {
 	anon.expect("listRatings", "ratings no session", "GET", "/api/ratings", nil, 401, "unauthorized")
 	anon.expect("putRating", "put rating no session", "PUT", "/api/ratings/1", `{"rating":4}`, 401, "unauthorized")
 	anon.expect("deleteRating", "delete rating no session", "DELETE", "/api/ratings/1", nil, 401, "unauthorized")
+	anon.expect("listNotInterested", "not interested list no session", "GET", "/api/feedback/not-interested", nil, 401, "unauthorized")
+	anon.expect("deleteNotInterested", "undo not interested no session", "DELETE", "/api/feedback/not-interested/1", nil, 401, "unauthorized")
 	anon.expect("recommend", "recommend no session", "GET", "/api/recommend", nil, 401, "unauthorized")
 	anon.expect("compare", "compare no session", "GET", "/api/recommend/compare?models=pop,knn", nil, 401, "unauthorized")
 	anon.expect("logout", "logout no session", "POST", "/api/auth/logout", nil, 401, "unauthorized")
@@ -221,6 +223,24 @@ func TestPublicContract(t *testing.T) {
 	alice.expect("deleteRating", "delete rating not rated", "DELETE", "/api/ratings/29", nil, 204, "")
 	alice.expect("deleteRating", "delete rating bad id", "DELETE", "/api/ratings/abc", nil, 400, "bad_request")
 	checkResp(t, "delete rating no csrf", alice.call("deleteRating", "delete rating no csrf", "DELETE", "/api/ratings/2", nil, true), 403, "csrf_rejected")
+
+	// ---- not interested: mark, list, undo ----
+	alice.expect("postFeedback", "not interested 5", "POST", "/api/feedback", `{"movieId":5,"model":"knn","action":"not_interested"}`, 204, "")
+	r = alice.expect("listNotInterested", "not interested list", "GET", "/api/feedback/not-interested", nil, 200, "")
+	var hidden struct {
+		Items []struct {
+			MovieID int64 `json:"movieId"`
+			Title   string
+		}
+	}
+	r.JSON(t, &hidden)
+	if len(hidden.Items) != 1 || hidden.Items[0].MovieID != 5 || hidden.Items[0].Title == "" {
+		t.Errorf("not interested list: %+v", hidden)
+	}
+	alice.expect("deleteNotInterested", "undo not interested", "DELETE", "/api/feedback/not-interested/5", nil, 204, "")
+	alice.expect("deleteNotInterested", "undo not interested again", "DELETE", "/api/feedback/not-interested/5", nil, 204, "")
+	alice.expect("deleteNotInterested", "undo not interested bad id", "DELETE", "/api/feedback/not-interested/abc", nil, 400, "bad_request")
+	checkResp(t, "undo not interested no csrf", alice.call("deleteNotInterested", "undo not interested no csrf", "DELETE", "/api/feedback/not-interested/5", nil, true), 403, "csrf_rejected")
 	r = alice.expect("listRatings", "ratings", "GET", "/api/ratings", nil, 200, "")
 	var rl struct{ Items []json.RawMessage }
 	r.JSON(t, &rl)

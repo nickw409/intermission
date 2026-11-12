@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 	"unicode/utf8"
@@ -268,7 +269,8 @@ func (h *handler) similar(w http.ResponseWriter, r *http.Request) {
 }
 
 // onboarding serves GET /api/onboarding: popular, genre-diverse movies the
-// user hasn't rated (rated movies are sent as exclude and filtered again).
+// user hasn't rated or marked "not interested" (those are sent as exclude and
+// filtered again).
 func (h *handler) onboarding(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	uid, ok := auth.UserID(ctx)
@@ -285,6 +287,16 @@ func (h *handler) onboarding(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.internal(w, r, "onboarding: read ratings", err)
 		return
+	}
+	dismissed, err := db.NotInterestedMovies(ctx, h.db.Reader, uid)
+	if err != nil {
+		h.internal(w, r, "onboarding: read not interested", err)
+		return
+	}
+	for _, id := range dismissed {
+		if !slices.Contains(rated, id) {
+			rated = append(rated, id)
+		}
 	}
 	resp, _, err := h.model.Onboarding(ctx, modelclient.OnboardingRequest{N: n, Exclude: rated})
 	if err != nil {

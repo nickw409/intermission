@@ -244,6 +244,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/feedback/not-interested": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Movies the user marked "not interested", newest first (the Ratings page lists them with an undo). Titles come from recs-api's movie cache only (recs-model is never asked), so this works while recs-model is down; a movie missing from the cache is titled "Movie <id>". */
+        get: operations["listNotInterested"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/feedback/not-interested/{movieId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Undo "not interested". The movie can be recommended again. */
+        delete: operations["deleteNotInterested"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/feedback/stats": {
         parameters: {
             query?: never;
@@ -427,6 +461,16 @@ export interface components {
         RatingValue: number;
         RatingList: {
             items: components["schemas"]["Rating"][];
+        };
+        NotInterested: {
+            movieId: number;
+            title: string;
+            year: number | null;
+            /** @description Unix seconds */
+            hidden_at: number;
+        };
+        NotInterestedList: {
+            items: components["schemas"]["NotInterested"][];
         };
         PutRatingRequest: {
             rating: components["schemas"]["RatingValue"];
@@ -1023,6 +1067,52 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             413: components["responses"]["TooLarge"];
             429: components["responses"]["RateLimited"];
+        };
+    };
+    listNotInterested: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Movies. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotInterestedList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    deleteNotInterested: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-Requested-With": components["parameters"]["XRequestedWith"];
+            };
+            path: {
+                movieId: components["parameters"]["MovieId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Undone (also when the movie was not marked). */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
         };
     };
     getFeedbackStats: {

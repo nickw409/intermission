@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react';
+import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { describe, expect, it } from 'vitest';
@@ -175,5 +175,67 @@ describe('My ratings page', () => {
     await user.click(within(row('Toy Story')).getByRole('button', { name: 'Delete rating for Toy Story' }));
     await screen.findByText('Deleted your rating for Toy Story.');
     expect(await axeViolations()).toEqual([]);
+  });
+
+  describe('Not interested', () => {
+    it('lists the hidden movies, newest first, and undoes one', async () => {
+      const user = userEvent.setup();
+      await openPage();
+      const section = await screen.findByRole('region', { name: 'Not interested' });
+      const links = within(section).getAllByRole('link').map((l) => l.textContent);
+      expect(links).toEqual(['Fight Club', 'Toy Story']);
+      const deletes = recordRequests('/api/feedback/not-interested/2959', 'DELETE');
+      await user.click(within(section).getByRole('button', { name: 'Undo not interested in Fight Club' }));
+      expect(within(section).queryByRole('link', { name: 'Fight Club' })).not.toBeInTheDocument();
+      // Focus moves to the next movie's Undo.
+      expect(within(section).getByRole('button', { name: 'Undo not interested in Toy Story' })).toHaveFocus();
+      await waitFor(() => expect(deletes).toHaveLength(1));
+      expect(await within(section).findByText('Fight Club can be recommended to you again.')).toBeInTheDocument();
+    });
+
+    it('keeps the section, with its message, after the last movie is undone', async () => {
+      const user = userEvent.setup();
+      server.use(http.delete('/api/feedback/not-interested/:movieId', () => new HttpResponse(null, { status: 204 })));
+      await openPage();
+      const section = await screen.findByRole('region', { name: 'Not interested' });
+      await user.click(within(section).getByRole('button', { name: 'Undo not interested in Fight Club' }));
+      await user.click(within(section).getByRole('button', { name: 'Undo not interested in Toy Story' }));
+      expect(await within(section).findByText('Toy Story can be recommended to you again.')).toBeInTheDocument();
+      expect(within(section).queryByRole('listitem')).not.toBeInTheDocument();
+      // Nothing left to focus in the list: the heading takes it.
+      expect(within(section).getByRole('heading', { name: 'Not interested' })).toHaveFocus();
+    });
+
+    it('puts the movie back and says so when the undo fails', async () => {
+      const user = userEvent.setup();
+      server.use(http.delete('/api/feedback/not-interested/:movieId', () => errorBody('internal', 500)));
+      await openPage();
+      const section = await screen.findByRole('region', { name: 'Not interested' });
+      // The first (newest) one, so putting it back must restore the order.
+      await user.click(within(section).getByRole('button', { name: 'Undo not interested in Fight Club' }));
+      expect(await within(section).findByRole('alert')).toHaveTextContent(/Couldn't undo "Not interested" for Fight Club/);
+      expect(within(section).getAllByRole('link').map((l) => l.textContent)).toEqual(['Fight Club', 'Toy Story']);
+    });
+
+    it('is not shown when nothing is hidden', async () => {
+      let answered = false;
+      server.use(
+        http.get('/api/feedback/not-interested', () => {
+          answered = true;
+          return HttpResponse.json({ items: [] });
+        }),
+      );
+      await openPage();
+      await waitFor(() => expect(answered).toBe(true));
+      // One more turn for the empty answer to render.
+      await act(async () => {});
+      expect(screen.queryByRole('region', { name: 'Not interested' })).not.toBeInTheDocument();
+    });
+
+    it('has no accessibility violations', async () => {
+      const { container } = await openPage();
+      await screen.findByRole('region', { name: 'Not interested' });
+      expect(await axeViolations(container)).toEqual([]);
+    });
   });
 });

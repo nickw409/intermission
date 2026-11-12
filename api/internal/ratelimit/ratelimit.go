@@ -30,6 +30,8 @@ var (
 	LoginPerAccount = Config{Every: time.Minute / 5, Burst: 5}
 	// RecommendPerSession: 30 /api/recommend calls per minute per session.
 	RecommendPerSession = Config{Every: time.Minute / 30, Burst: 30}
+	// FeedbackPerSession: 60 POST /api/feedback calls per minute per session.
+	FeedbackPerSession = Config{Every: time.Minute / 60, Burst: 60}
 	// LoginGlobal caps login attempts across all accounts (each costs an
 	// Argon2id hash): 60 per minute.
 	LoginGlobal = Config{Every: time.Second, Burst: 30}

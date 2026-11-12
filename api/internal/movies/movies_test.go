@@ -274,6 +274,28 @@ func TestOnboardingExcludesRated(t *testing.T) {
 	}
 }
 
+// Movies marked "not interested" are left out of onboarding as well, sent as
+// exclude and filtered again.
+func TestOnboardingExcludesNotInterested(t *testing.T) {
+	m := &stubModel{onboard: []int64{2959, 356, 4993}}
+	e := cachetest.NewEnv(t, m, Register)
+	uid, tok := cachetest.NewUser(t, e.DB, "bob")
+	rate(t, e.DB, uid, 260, 4, 2)
+	for _, row := range []struct{ movie, ts int64 }{{2959, 5}, {260, 6}} { // 260 is also rated: listed once
+		if _, err := e.DB.Writer.Exec("INSERT INTO feedback (user_id, movie_id, model, action, ts) VALUES (?, ?, 'als', 'not_interested', ?)", uid, row.movie, row.ts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cachetest.SeedMovies(t, e.DB, cachetest.Movie(2959, "FC", 1999), cachetest.Movie(356, "FG", 1994), cachetest.Movie(4993, "LOTR", 2001))
+	rec := e.Do("GET", "/api/onboarding?n=3", nil, tok)
+	if rec.Code != 200 || strings.Contains(rec.Body.String(), `"movieId":2959`) || !strings.Contains(rec.Body.String(), `"movieId":356`) {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	if !slices.Equal(m.lastOnb.Exclude, []int64{260, 2959}) {
+		t.Fatalf("exclude %v", m.lastOnb.Exclude)
+	}
+}
+
 // ---------------------------------------------------------------- degradation
 
 // Phase 2 gate: with recs-model hanging (not just refusing), every model
