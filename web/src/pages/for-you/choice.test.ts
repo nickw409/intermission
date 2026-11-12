@@ -42,6 +42,8 @@ describe('parseYear', () => {
     ['words', 'nineties'],
     ['a fraction', 1990.5],
     ['an out-of-range number', 1700],
+    ['the number just below the range', 1799],
+    ['the number just above the range', 2101],
     ['null', null],
     ['an array', ['1990']],
   ])('rejects %s', (_, value) => {

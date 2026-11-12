@@ -41,6 +41,31 @@ std::string read_text(const std::filesystem::path& p) {
   return ss.str();
 }
 
+// What may follow `prop: { $ref: '<ref>'` on a model.yaml request-property line: either just the
+// closing ` }`, or `, description: <text> }` where <text> is one YAML scalar and nothing else.
+// A plain (unquoted) scalar in a flow mapping ends at ", ", so a plain description without ", " cannot
+// hide another keyword; a single-quoted one must close right before " }" with only doubled quotes
+// ('') inside.
+bool ref_line_tail_ok(const std::string& tail) {
+  if (tail == " }") return true;
+  const std::string lead = ", description: ";
+  const std::string close = " }";
+  if (tail.size() < lead.size() + close.size() + 1 || tail.compare(0, lead.size(), lead) != 0 ||
+      tail.compare(tail.size() - close.size(), close.size(), close) != 0) {
+    return false;
+  }
+  const std::string text = tail.substr(lead.size(), tail.size() - lead.size() - close.size());
+  if (text.front() != '\'') return text.find(", ") == std::string::npos && text.find('{') == std::string::npos;
+  if (text.size() < 2 || text.back() != '\'') return false;
+  const std::string inner = text.substr(1, text.size() - 2);
+  for (std::size_t i = 0; i < inner.size(); ++i) {
+    if (inner[i] != '\'') continue;
+    if (i + 1 >= inner.size() || inner[i + 1] != '\'') return false;  // a lone quote ends the scalar
+    ++i;
+  }
+  return true;
+}
+
 Request to_request(const json& r) {
   Request req;
   req.method = r.at("method");
@@ -241,19 +266,30 @@ TEST_CASE("recs-model: transcribed schemas match model.yaml", "[model-service][c
   CHECK(required_checked >= 17);
   CHECK(enums_checked >= 5);
 
-  // The request schemas: every property that is a $ref appears as that line in model.yaml (the
-  // line may go on with a description after the $ref), and the genre list's and release year's
-  // bounds match.
-  for (const char* req : {"RecommendRequest", "CompareRequest"}) {
+  // The request schemas: every property that is a $ref appears as that line in its own schema's
+  // block of model.yaml. After the $ref the line may carry a description and nothing else, so an
+  // added keyword (a tighter maximum, say), which applies next to a $ref in OpenAPI 3.1, is caught.
+  // The genre list's and release year's bounds are checked below.
+  for (const std::string req : {"RecommendRequest", "CompareRequest"}) {
+    const std::size_t start = yaml.find("\n    " + req + ":\n");
+    REQUIRE(start != std::string::npos);
+    std::size_t end = start + 1;  // the next schema: a line indented exactly four spaces
+    do {
+      end = yaml.find("\n    ", end + 1);
+    } while (end != std::string::npos && end + 5 < yaml.size() && yaml[end + 5] == ' ');
+    const std::string block = yaml.substr(start, end == std::string::npos ? std::string::npos : end - start);
     const json& props = components.at(req).at("properties");
     CHECK(props.contains("genres"));
     CHECK(props.contains("year_from"));
     CHECK(props.contains("year_to"));
     for (const auto& [prop, sub] : props.items()) {
       if (!sub.contains("$ref")) continue;
-      const std::string line = "        " + prop + ": { $ref: '" + sub["$ref"].get<std::string>() + "'";
-      INFO(req << ": " << line);
-      CHECK(yaml.find(line) != std::string::npos);
+      const std::string head = "\n        " + prop + ": { $ref: '" + sub["$ref"].get<std::string>() + "'";
+      INFO(req << ": " << head.substr(1));
+      const std::size_t at = block.find(head);
+      REQUIRE(at != std::string::npos);
+      const std::size_t line_end = block.find('\n', at + head.size());
+      CHECK(ref_line_tail_ok(block.substr(at + head.size(), line_end - (at + head.size()))));
     }
   }
   const json& genres = components.at("Genres");

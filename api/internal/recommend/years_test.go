@@ -440,10 +440,12 @@ func TestYearsCacheKeyFields(t *testing.T) {
 // The fixture's inverted_years case never reaches recs-model.
 func TestYearsInvertedFixtureNoModelCall(t *testing.T) {
 	for _, op := range []string{"recommend", "compare"} {
+		found := false
 		for _, c := range cachetest.PublicCases(t, op) {
 			if c.Name != "inverted_years" {
 				continue
 			}
+			found = true
 			e := newEnv(t, nil)
 			uid, tok := cachetest.NewUser(t, e.DB, "alice")
 			seedAlice(t, e.DB, uid)
@@ -451,6 +453,9 @@ func TestYearsInvertedFixtureNoModelCall(t *testing.T) {
 			if calls := yearCalls(t, e.Fake); len(calls) != 0 {
 				t.Errorf("%s/inverted_years reached recs-model: %+v", op, calls)
 			}
+		}
+		if !found {
+			t.Errorf("public %s fixtures have no inverted_years case", op)
 		}
 	}
 }
