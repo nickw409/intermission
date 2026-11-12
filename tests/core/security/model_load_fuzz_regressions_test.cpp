@@ -1,5 +1,5 @@
-// Regression tests for model files that loaded but then produced NaN scores: inputs found by the
-// Model::load fuzzers (tests/fuzz/core/model_load_*.cpp) and by the SA2 re-test.
+// Regression tests for model files that loaded but then produced NaN or +inf scores: inputs found
+// by the Model::load fuzzers (tests/fuzz/core/model_load_*.cpp) and by the SA2 re-test.
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -14,6 +15,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <nlohmann/json.hpp>
 
+#include "../../fuzz/core/score_check.hpp"
 #include "../data/temp_dir.hpp"
 #include "recs/dataset.hpp"
 #include "recs/model.hpp"
@@ -68,13 +70,13 @@ TEST_CASE("mf load rejects finite but absurd parameters", "[security][fuzz][mf]"
     }
   }
 
-  // The original file still loads, and fold-in + scoring stays NaN-free.
+  // The original file still loads, and fold-in + scoring gives no NaN or +inf scores.
   dir.write("item_factors.bin", good);
   auto m = recs::make_model("mf");
   REQUIRE_NOTHROW(m->load(dir.path()));
   std::vector<float> out(m->n_items());
   m->score(m->fold_in(std::vector<recs::Rating>{{0, 4.5f, 0}, {3, 2.0f, 0}}), out);
-  for (const float v : out) CHECK_FALSE(std::isnan(v));
+  for (const float v : out) CHECK(recs::fuzz::score_allowed(v));
 }
 
 // SA2-7: a crafted ALS artifact (lambda = 1e-300, k = 1, Y = [1e-39, 0]) loaded, fold-in overflowed
@@ -128,7 +130,7 @@ TEST_CASE("SA2-7: als load rejects a degenerate lambda, alpha or factor", "[secu
   m->load(dir.path());
   std::vector<float> out(2);
   m->score(m->fold_in(std::vector<recs::Rating>{{0, 5.0f, 0}}), out);
-  for (const float v : out) CHECK_FALSE(std::isnan(v));
+  for (const float v : out) CHECK(recs::fuzz::score_allowed(v));
 }
 
 // MF: lambda comes from config.json. With lambda = 0 the fold-in ridge falls to 1e-9 and the solve
@@ -165,4 +167,41 @@ TEST_CASE("mf save rejects parameters that load would reject", "[security][mf]")
   // init_sd = 1e7 with a negligible learning rate leaves |q| far above 1e6 after one epoch.
   m->fit(small_dataset(), recs::Config{{"k", 3}, {"max_epochs", 1}, {"init_sd", 1e7}, {"lr", 1e-30}}, {});
   CHECK_THROWS_WITH(m->save(dir.path()), ContainsSubstring("out of range"));
+}
+
+// fuzz_model_load_pop_count crash (#80, once the fuzzers trapped +inf as well as NaN): a scores.bin
+// holding +inf loaded, since the loader rejected only NaN. save() never writes a non-finite score
+// (see the next test), so both variants now reject one on load.
+TEST_CASE("pop load rejects non-finite scores", "[security][fuzz][popularity]") {
+  for (const char* name : {"pop", "pop_count"}) {
+    TempDir dir("pop-fuzz-inf");
+    auto fitted = recs::make_model(name);
+    fitted->fit(small_dataset(), recs::Config::object(), {});
+    fitted->save(dir.path());
+    const std::string good = read_bytes(dir / "scores.bin");
+
+    for (const float v : {std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity(),
+                          std::numeric_limits<float>::quiet_NaN()}) {
+      INFO(name << ": last score = " << v);
+      std::string bad = good;
+      std::memcpy(bad.data() + bad.size() - sizeof v, &v, sizeof v);  // scores are the file's tail
+      dir.write("scores.bin", bad);
+      auto m = recs::make_model(name);
+      CHECK_THROWS_WITH(m->load(dir.path()), ContainsSubstring("non-finite score"));
+    }
+
+    dir.write("scores.bin", good);
+    auto m = recs::make_model(name);
+    REQUIRE_NOTHROW(m->load(dir.path()));
+  }
+}
+
+// The save side of the rule above (#80 review): pop accepts any finite m >= 0, and with m = 1e308
+// the shrinkage term m * C overflows, so fit() produced +inf for every item. save() must refuse to
+// write what load() would reject, as mf and als already do.
+TEST_CASE("pop save rejects non-finite scores", "[security][fuzz][popularity]") {
+  TempDir dir("pop-save-inf");
+  auto m = recs::make_model("pop");
+  m->fit(small_dataset(), recs::Config{{"m", 1e308}}, {});
+  CHECK_THROWS_WITH(m->save(dir.path()), ContainsSubstring("non-finite score"));
 }

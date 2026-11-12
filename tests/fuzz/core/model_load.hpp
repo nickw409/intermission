@@ -8,7 +8,8 @@
 // fuzz_util.hpp).
 //
 // After a successful load the model is used once (fold_in + score over a few items), so a file
-// that loads but leaves inconsistent state is caught too. The ranking mask runs as well.
+// that loads but leaves inconsistent state is caught too. The ranking mask runs as well. Every
+// resulting score must pass score_allowed(): finite or -infinity, never NaN or +infinity.
 #pragma once
 
 #include <cstddef>
@@ -21,6 +22,7 @@
 
 #include "fuzz_util.hpp"
 #include "recs/model.hpp"
+#include "score_check.hpp"
 
 namespace recs::fuzz {
 
@@ -96,9 +98,14 @@ inline int model_load(std::string_view model, const std::uint8_t* data, std::siz
     const UserState u = m->fold_in(ratings);
     std::vector<float> out(n);
     m->score(u, out);
+    // Check before the mask too: it overwrites masked items with -inf, which would hide a bad
+    // score from eval's prediction path (that one does not mask).
+    for (float v : out) {
+      if (!score_allowed(v)) __builtin_trap();  // NaN or +inf (see score_check.hpp)
+    }
     m->mask_unrankable(out);  // the ranking mask must cope with whatever the file held
     for (float v : out) {
-      if (v != v) __builtin_trap();  // NaN scores are forbidden by the Model contract
+      if (!score_allowed(v)) __builtin_trap();
     }
   } catch (const std::exception&) {
     // A model may refuse a profile; that is a clean failure, not a crash.

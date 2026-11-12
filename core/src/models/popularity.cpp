@@ -99,6 +99,11 @@ class Popularity final : public Model {
   Explanation explain(const UserState& /*u*/, ItemIdx /*item*/) const override { return {}; }
 
   void save(const fs::path& dir) const override {
+    // load() rejects non-finite scores, so never write one. An absurd m (finite, but large enough
+    // that m * C overflows) gives +inf scores in fit().
+    for (float s : scores_) {
+      if (!std::isfinite(s)) throw std::invalid_argument(std::string(name()) + ": non-finite score, not saved");
+    }
     binio::Writer w(dir / "scores.bin", kMagic, kVersion);
     w.u32(count_variant_ ? 1 : 0);
     w.f64(m_);
@@ -126,7 +131,8 @@ class Popularity final : public Model {
     for (auto& v : counts) v = r.u32();
     for (auto& v : scores) {
       v = r.f32();
-      if (std::isnan(v)) throw ArtifactError(std::string(name()) + ": NaN score in scores.bin");
+      // save() only writes finite scores; ±inf (or NaN) means the file is corrupt.
+      if (!std::isfinite(v)) throw ArtifactError(std::string(name()) + ": non-finite score in scores.bin");
     }
     r.finish();
     m_ = m;
