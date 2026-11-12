@@ -1,13 +1,13 @@
 # Automated deploy (follow-up plan)
 
-Status: **step 0 done** (branch `feat/deploy-artifact-check`); steps 1–4 not started.
+Status: **step 0 done**: merged in PR #68 (`ca223ad`, 2026-11-12) but not deployed yet (the next `release.sh` deploys it). Steps 1–4 have not started.
 
 Today a release reaches the site only when someone runs `deploy/release.sh <sha>` on the host.
 CI builds and checks images on every push to `main` but cannot deploy (no registry, no access to
 the host). The goal is continuous deployment of green `main` commits, with releases that need a
 retrain handled safely.
 
-## Step 0: retrain detection (done)
+## Step 0: retrain detection (done, PR #68)
 
 - `recs-model --check` loads and verifies the artifact `CURRENT` names through the server's own
   watcher code, prints `version=`, `git_sha=`, `models=`, and exits 0 or 1.
