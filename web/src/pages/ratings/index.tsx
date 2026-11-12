@@ -210,6 +210,18 @@ function NotInterestedSection() {
   const { state, reload, update } = useAsync(load);
   const [problem, setProblem] = useState<string | null>(null);
   const [undone, setUndone] = useState<string | null>(null);
+  // Where focus goes once an undone movie's row is gone: the next row's Undo, else the heading.
+  const focusNext = useRef<number | null>(null);
+  const sectionRef = useRef<HTMLElement>(null);
+  const items = state.status === 'ready' ? state.data.items : null;
+  useEffect(() => {
+    if (focusNext.current === null || items === null) return;
+    const target = focusNext.current;
+    focusNext.current = null;
+    const button = sectionRef.current?.querySelector<HTMLElement>(`[data-movie-id="${target}"] button`);
+    if (button) button.focus();
+    else sectionRef.current?.querySelector<HTMLElement>('h2')?.focus();
+  }, [items]);
 
   if (state.status === 'loading') return null;
   if (state.status === 'error') {
@@ -224,9 +236,11 @@ function NotInterestedSection() {
 
   const undo = async (movie: Hidden) => {
     const without = (data: { items: Hidden[] }) => ({ items: data.items.filter((m) => m.movieId !== movie.movieId) });
+    const list = state.data.items;
+    const at = list.findIndex((m) => m.movieId === movie.movieId);
+    focusNext.current = (list[at + 1] ?? list[at - 1])?.movieId ?? -1;
     update(without);
     setProblem(null);
-    setUndone(null);
     try {
       await feedbackHook.undoNotInterested(movie.movieId);
       setUndone(`${displayTitle(movie.title)} can be recommended to you again.`);
@@ -237,15 +251,17 @@ function NotInterestedSection() {
   };
 
   return (
-    <section aria-labelledby="not-interested-heading" className="not-interested">
-      <h2 id="not-interested-heading">Not interested</h2>
+    <section ref={sectionRef} aria-labelledby="not-interested-heading" className="not-interested">
+      <h2 id="not-interested-heading" tabIndex={-1}>
+        Not interested
+      </h2>
       <p className="muted">Movies you hid on For you. They are left out of your recommendations.</p>
       <p role="status">{undone}</p>
       {problem && <ErrorMessage message={problem} />}
       {state.data.items.length > 0 && (
         <ul className="not-interested__list">
           {state.data.items.map((movie) => (
-            <li key={movie.movieId}>
+            <li key={movie.movieId} data-movie-id={movie.movieId}>
               <Link to={`/movies/${movie.movieId}`}>{displayTitle(movie.title)}</Link>
               {movie.year !== null && <span className="muted"> ({movie.year})</span>}{' '}
               <button

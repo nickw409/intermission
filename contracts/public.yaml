@@ -262,7 +262,7 @@ paths:
     get:
       tags: [ratings]
       operationId: listNotInterested
-      summary: Movies the user marked "not interested", newest first (the Ratings page lists them with an undo). Titles come from recs-api's movie cache, so this works while recs-model is down.
+      summary: Movies the user marked "not interested", newest first (the Ratings page lists them with an undo). Titles come from recs-api's movie cache only (recs-model is never asked), so this works while recs-model is down; a movie missing from the cache is titled "Movie <id>".
       security: [{ session: [] }]
       responses:
         '200': { description: Movies., content: { application/json: { schema: { $ref: '#/components/schemas/NotInterestedList' } } } }

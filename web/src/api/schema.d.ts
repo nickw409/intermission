@@ -251,7 +251,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Movies the user marked "not interested", newest first (the Ratings page lists them with an undo). Titles come from recs-api's movie cache, so this works while recs-model is down. */
+        /** Movies the user marked "not interested", newest first (the Ratings page lists them with an undo). Titles come from recs-api's movie cache only (recs-model is never asked), so this works while recs-model is down; a movie missing from the cache is titled "Movie <id>". */
         get: operations["listNotInterested"];
         put?: never;
         post?: never;

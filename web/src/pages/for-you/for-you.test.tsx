@@ -166,7 +166,7 @@ describe('For you page', () => {
     const posts = recordRequests('/api/feedback', 'POST');
     const deletes = recordRequests('/api/feedback/not-interested/4993', 'DELETE');
     await user.click(within(card(LOTR)).getByRole('button', { name: `Not interested in ${LOTR}` }));
-    const undo = screen.getByRole('button', { name: 'Undo' });
+    const undo = screen.getByRole('button', { name: `Undo not interested in ${LOTR}` });
     expect(undo.closest('[role="status"]')).toHaveTextContent(/won't see .* in your recommendations/);
     await waitFor(() => expect(undo).toHaveFocus());
     await waitFor(() => expect(posts).toHaveLength(1));
@@ -174,7 +174,9 @@ describe('For you page', () => {
     expect(await screen.findByRole('heading', { level: 2, name: LOTR })).toBeInTheDocument();
     expect(screen.getAllByRole('article')).toHaveLength(3);
     await waitFor(() => expect(deletes).toHaveLength(1));
-    expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Undo not interested/ })).not.toBeInTheDocument();
+    // Focus goes to the card that came back.
+    expect(within(card(LOTR)).getByRole('link', { name: LOTR })).toHaveFocus();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
@@ -195,7 +197,7 @@ describe('For you page', () => {
     );
     await openPage();
     await user.click(within(card(LOTR)).getByRole('button', { name: `Not interested in ${LOTR}` }));
-    await user.click(screen.getByRole('button', { name: 'Undo' }));
+    await user.click(screen.getByRole('button', { name: `Undo not interested in ${LOTR}` }));
     // The card is back at once, but the DELETE waits for the POST.
     expect(await screen.findByRole('heading', { level: 2, name: LOTR })).toBeInTheDocument();
     expect(order).toEqual([]);
@@ -208,10 +210,111 @@ describe('For you page', () => {
     server.use(http.delete('/api/feedback/not-interested/:movieId', () => errorBody('internal', 500)));
     await openPage();
     await user.click(within(card(LOTR)).getByRole('button', { name: `Not interested in ${LOTR}` }));
-    await user.click(screen.getByRole('button', { name: 'Undo' }));
-    expect(await screen.findByRole('alert')).toHaveTextContent(/Couldn't undo "Not interested"/);
+    await user.click(screen.getByRole('button', { name: `Undo not interested in ${LOTR}` }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Couldn't undo "Not interested".*Ratings page/);
     expect(screen.queryByRole('heading', { level: 2, name: LOTR })).not.toBeInTheDocument();
     expect(screen.getAllByRole('article')).toHaveLength(2);
+  });
+
+  /** A server that really leaves hidden movies out of /api/recommend, like recs-api does. */
+  function serverWithHiding() {
+    const hiddenIds = new Set<number>();
+    const order: string[] = [];
+    const posts = gate();
+    let holdPosts = false;
+    server.use(
+      http.post('/api/feedback', async ({ request }) => {
+        const body = (await request.json()) as { movieId: number };
+        if (holdPosts) await posts.wait;
+        hiddenIds.add(body.movieId);
+        order.push(`post ${body.movieId}`);
+        return new HttpResponse(null, { status: 204 });
+      }),
+      http.delete('/api/feedback/not-interested/:movieId', ({ params }) => {
+        hiddenIds.delete(Number(params.movieId));
+        order.push(`delete ${String(params.movieId)}`);
+        return new HttpResponse(null, { status: 204 });
+      }),
+      http.get('/api/recommend', async () => {
+        const response = responseFor(fixtureFor('recommend').cases[0]!);
+        const data = (await response.json()) as { items: { movieId: number }[] };
+        return HttpResponse.json({ ...data, items: data.items.filter((i) => !hiddenIds.has(i.movieId)) });
+      }),
+    );
+    return { hiddenIds, order, holdPosts: () => (holdPosts = true), releasePosts: posts.release };
+  }
+
+  it('brings the movie back on undo even after the list was refetched without it', async () => {
+    const user = userEvent.setup();
+    const fake = serverWithHiding();
+    await openPage();
+    const recommend = recordRequests('/api/recommend');
+    await user.click(within(card(LOTR)).getByRole('button', { name: `Not interested in ${LOTR}` }));
+    await waitFor(() => expect(fake.hiddenIds.has(4993)).toBe(true));
+    // Rating another movie refetches the list (500 ms later); the server leaves LOTR out.
+    rateWithKeyboard(within(card('Fight Club')).getByRole('slider'), 4);
+    await waitFor(() => expect(recommend).toHaveLength(1));
+    await waitFor(() => expect(screen.getAllByRole('article')).toHaveLength(2));
+    await user.click(screen.getByRole('button', { name: `Undo not interested in ${LOTR}` }));
+    // The undo refetches, and LOTR is back.
+    expect(await screen.findByRole('heading', { level: 2, name: LOTR })).toBeInTheDocument();
+    expect(fake.hiddenIds.has(4993)).toBe(false);
+  });
+
+  it('keeps hide, undo and hide again in order on the server', async () => {
+    const user = userEvent.setup();
+    const fake = serverWithHiding();
+    fake.holdPosts();
+    await openPage();
+    const notInterested = () => within(card(LOTR)).getByRole('button', { name: `Not interested in ${LOTR}` });
+    await user.click(notInterested());
+    await user.click(screen.getByRole('button', { name: `Undo not interested in ${LOTR}` }));
+    await user.click(notInterested()); // the card is back: hide it again
+    expect(screen.queryByRole('heading', { level: 2, name: LOTR })).not.toBeInTheDocument();
+    fake.releasePosts();
+    await waitFor(() => expect(fake.order).toEqual(['post 4993', 'delete 4993', 'post 4993']));
+    expect(fake.hiddenIds.has(4993)).toBe(true);
+    expect(screen.queryByRole('heading', { level: 2, name: LOTR })).not.toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('shows no error when the save fails after the user already undid it', async () => {
+    const user = userEvent.setup();
+    const { wait, release } = gate();
+    server.use(
+      http.post('/api/feedback', async () => {
+        await wait;
+        return errorBody('internal', 500);
+      }),
+    );
+    await openPage();
+    await user.click(within(card(LOTR)).getByRole('button', { name: `Not interested in ${LOTR}` }));
+    await user.click(screen.getByRole('button', { name: `Undo not interested in ${LOTR}` }));
+    release();
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(screen.getByRole('heading', { level: 2, name: LOTR })).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('drops the undo offer when the model changes', async () => {
+    const user = userEvent.setup();
+    await openPage();
+    await user.click(within(card(LOTR)).getByRole('button', { name: `Not interested in ${LOTR}` }));
+    expect(screen.getByRole('button', { name: `Undo not interested in ${LOTR}` })).toBeInTheDocument();
+    await user.selectOptions(screen.getByRole('combobox', { name: /model/i }), 'knn');
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: `Undo not interested in ${LOTR}` })).not.toBeInTheDocument(),
+    );
+  });
+
+  it('has no axe violations with the undo offer shown', async () => {
+    const user = userEvent.setup();
+    const { container } = await openPage();
+    await user.click(within(card(LOTR)).getByRole('button', { name: `Not interested in ${LOTR}` }));
+    await screen.findByRole('button', { name: `Undo not interested in ${LOTR}` });
+    expect(await axeViolations(container)).toEqual([]);
   });
 
   it('drops a "Not interested" error when the model changes', async () => {

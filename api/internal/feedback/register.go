@@ -218,9 +218,11 @@ func bumpVersion(ctx context.Context, tx *sql.Tx, uid int64) error {
 }
 
 // listNotInterested serves GET /api/feedback/not-interested: newest first,
-// titles from the movie cache. recs-model is asked only for movies missing
-// from the cache; if it is down those get a placeholder title, so the list
-// always works (as GET /api/ratings does).
+// titles from the movie cache only. recs-model is never asked: a movie the
+// user hid was on a recommendation list, so it is in the cache; anything else
+// (a movie dropped by a new dataset, or an ID a client made up) gets a
+// placeholder title. So the list works while recs-model is down, and stored
+// IDs can't be used to make this request call recs-model (security review).
 func (h *handler) listNotInterested(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	uid, ok := auth.UserID(ctx)
@@ -252,14 +254,14 @@ func (h *handler) listNotInterested(w http.ResponseWriter, r *http.Request) {
 	for i, it := range out.Items {
 		ids[i] = it.MovieID
 	}
-	res, err := h.movies.Get(ctx, ids)
+	cached, err := h.movies.Lookup(ctx, ids)
 	if err != nil {
-		h.logger.WarnContext(ctx, "not interested list: some titles unavailable", "request_id", reqid.FromContext(ctx),
-			"missing", len(res.Unchecked), "err", err)
+		h.fail(w, r, "look up titles", err)
+		return
 	}
 	for i := range out.Items {
 		it := &out.Items[i]
-		if m, ok := res.Movies[it.MovieID]; ok {
+		if m, ok := cached[it.MovieID]; ok {
 			it.Title, it.Year = m.Title, m.Year
 		} else {
 			it.Title = "Movie " + strconv.FormatInt(it.MovieID, 10)
@@ -283,34 +285,47 @@ func (h *handler) undoNotInterested(w http.ResponseWriter, r *http.Request) {
 		apperr.Write(w, err)
 		return
 	}
-	err = func() error {
-		tx, err := h.db.Writer.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = tx.Rollback() }()
-		res, err := tx.ExecContext(ctx,
-			"DELETE FROM feedback WHERE user_id = ? AND movie_id = ? AND action = 'not_interested'", uid, movieID)
-		if err != nil {
-			return err
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			return nil
-		}
-		if err := bumpVersion(ctx, tx, uid); err != nil {
-			return err
-		}
-		return tx.Commit()
-	}()
+	err = h.undo(ctx, uid, movieID)
 	if err != nil {
 		h.fail(w, r, "undo not interested", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// undo removes uid's "not interested" row for movieID and bumps
+// ratings_version, in one write transaction. Nothing to remove is a no-op,
+// checked on the reader first so a repeated undo never takes the single
+// writer connection.
+func (h *handler) undo(ctx context.Context, uid, movieID int64) error {
+	var exists bool
+	if err := h.db.Reader.QueryRowContext(ctx,
+		"SELECT EXISTS (SELECT 1 FROM feedback WHERE user_id = ? AND movie_id = ? AND action = 'not_interested')",
+		uid, movieID).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	tx, err := h.db.Writer.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx,
+		"DELETE FROM feedback WHERE user_id = ? AND movie_id = ? AND action = 'not_interested'", uid, movieID)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return err
+	} else if n == 0 {
+		return nil // removed by a concurrent undo since the check
+	}
+	if err := bumpVersion(ctx, tx, uid); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // fail logs an internal error (never a request body) and writes it: an

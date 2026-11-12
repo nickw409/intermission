@@ -187,8 +187,23 @@ describe('My ratings page', () => {
       const deletes = recordRequests('/api/feedback/not-interested/2959', 'DELETE');
       await user.click(within(section).getByRole('button', { name: 'Undo not interested in Fight Club' }));
       expect(within(section).queryByRole('link', { name: 'Fight Club' })).not.toBeInTheDocument();
+      // Focus moves to the next movie's Undo.
+      expect(within(section).getByRole('button', { name: 'Undo not interested in Toy Story' })).toHaveFocus();
       await waitFor(() => expect(deletes).toHaveLength(1));
       expect(await within(section).findByText('Fight Club can be recommended to you again.')).toBeInTheDocument();
+    });
+
+    it('keeps the section, with its message, after the last movie is undone', async () => {
+      const user = userEvent.setup();
+      server.use(http.delete('/api/feedback/not-interested/:movieId', () => new HttpResponse(null, { status: 204 })));
+      await openPage();
+      const section = await screen.findByRole('region', { name: 'Not interested' });
+      await user.click(within(section).getByRole('button', { name: 'Undo not interested in Fight Club' }));
+      await user.click(within(section).getByRole('button', { name: 'Undo not interested in Toy Story' }));
+      expect(await within(section).findByText('Toy Story can be recommended to you again.')).toBeInTheDocument();
+      expect(within(section).queryByRole('listitem')).not.toBeInTheDocument();
+      // Nothing left to focus in the list: the heading takes it.
+      expect(within(section).getByRole('heading', { name: 'Not interested' })).toHaveFocus();
     });
 
     it('puts the movie back and says so when the undo fails', async () => {
@@ -196,8 +211,9 @@ describe('My ratings page', () => {
       server.use(http.delete('/api/feedback/not-interested/:movieId', () => errorBody('internal', 500)));
       await openPage();
       const section = await screen.findByRole('region', { name: 'Not interested' });
-      await user.click(within(section).getByRole('button', { name: 'Undo not interested in Toy Story' }));
-      expect(await within(section).findByRole('alert')).toHaveTextContent(/Couldn't undo "Not interested" for Toy Story/);
+      // The first (newest) one, so putting it back must restore the order.
+      await user.click(within(section).getByRole('button', { name: 'Undo not interested in Fight Club' }));
+      expect(await within(section).findByRole('alert')).toHaveTextContent(/Couldn't undo "Not interested" for Fight Club/);
       expect(within(section).getAllByRole('link').map((l) => l.textContent)).toEqual(['Fight Club', 'Toy Story']);
     });
 

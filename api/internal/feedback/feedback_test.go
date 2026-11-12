@@ -420,6 +420,8 @@ func TestListNewestFirstWithPlaceholderTitles(t *testing.T) {
 	cachetest.SeedMovies(t, e.DB, cachetest.Movie(10, "Ten", 2000))
 	seedNotInterested(t, e.DB, uid, 10, 5)
 	seedNotInterested(t, e.DB, uid, 424242, 9) // not in the cache and unknown to recs-model
+	seedNotInterested(t, e.DB, uid, 2959, 5)   // known to recs-model but not cached: not fetched
+	e.Fake.ResetCalls()
 	seedNotInterested(t, e.DB, bob, 11, 7)
 	if _, err := e.DB.Writer.Exec("INSERT INTO feedback (user_id, movie_id, model, action, ts) VALUES (?, 12, 'als', 'click', 8)", uid); err != nil {
 		t.Fatal(err)
@@ -432,9 +434,15 @@ func TestListNewestFirstWithPlaceholderTitles(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Items) != 2 || got.Items[0].MovieID != 424242 || got.Items[0].Title != "Movie 424242" || got.Items[0].Year != nil ||
-		got.Items[1].MovieID != 10 || got.Items[1].Title != "Ten" || got.Items[1].HiddenAt != 5 {
+	// Newest first; equal times by insertion, newest first (2959 after 10).
+	if len(got.Items) != 3 || got.Items[0].MovieID != 424242 || got.Items[0].Title != "Movie 424242" || got.Items[0].Year != nil ||
+		got.Items[1].MovieID != 2959 || got.Items[1].Title != "Movie 2959" ||
+		got.Items[2].MovieID != 10 || got.Items[2].Title != "Ten" || got.Items[2].HiddenAt != 5 {
 		t.Errorf("items %+v", got.Items)
+	}
+	// Titles come from the cache only: recs-model is never asked.
+	if calls := e.Fake.Calls(); len(calls) != 0 {
+		t.Errorf("recs-model calls: %+v", calls)
 	}
 	// An empty list is [], not null.
 	_, carolTok := cachetest.NewUser(t, e.DB, "carol")
