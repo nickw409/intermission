@@ -114,6 +114,17 @@ tc() { run_lib "REPO_DIR='$repo'; training_changed $1 $2 && echo RC0 || echo RC\
 [[ "$(tc deadbee "$cfg")" == RC2 ]] && ok "commit not in repo: cannot tell" || bad "missing commit gave $(tc deadbee "$cfg")"
 [[ "$(tc "'-p'" "$cfg")" == RC2 ]] && ok "option-like git_sha refused" || bad "option-like gave $(tc "'-p'" "$cfg")"
 
+for d in core train; do
+  mkdir -p "$repo/$d"; echo a > "$repo/$d/x.cpp"; g add -A; g commit -q -m "add $d"
+  before="$(g rev-parse HEAD)"  # full 40-character id as FROM
+  echo b > "$repo/$d/x.cpp"; g commit -q -am "change $d"
+  [[ "$(tc "$before" "$(g rev-parse --short=7 HEAD)")" == RC0 ]] && ok "$d/ change (full-length FROM): retrain recommended" || bad "$d/ change gave $(tc "$before" HEAD)"
+done
+[[ "$(tc "$(g rev-parse HEAD)" "$(g rev-parse --short=7 HEAD)")" == RC1 ]] && ok "full-length FROM, same commit: no retrain" || bad "full-length same commit"
+[[ "$(tc "$(g rev-parse HEAD)a" HEAD)" == RC2 ]] && ok "41-character FROM: cannot tell" || bad "41 chars accepted"
+[[ "$(tc "$(g rev-parse "HEAD^{tree}")" HEAD)" == RC2 ]] && ok "a tree id is not a commit: cannot tell" || bad "tree id accepted"
+[[ "$(tc "$base" deadbeefdeadbeef)" == RC2 ]] && ok "TO not a commit: cannot tell" || bad "bad TO gave $(tc "$base" deadbeefdeadbeef)"
+
 # A branch named like a commit id prefix must not be resolved instead of the commit.
 g branch "$base" "$cfg"
 [[ "$(tc "$base" "$cfg")" == RC0 ]] && ok "hex-named branch ignored, the commit is used" || bad "hex-named branch gave $(tc "$base" "$cfg")"

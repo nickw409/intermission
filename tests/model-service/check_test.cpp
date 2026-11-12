@@ -10,12 +10,14 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <nlohmann/json.hpp>
 
 #include "check.hpp"
 #include "fixtures.hpp"
 #include "recs/artifact.hpp"
 #include "recs/dataset.hpp"
 #include "recs/model.hpp"
+#include "recs/sha256.hpp"
 
 namespace fs = std::filesystem;
 
@@ -82,12 +84,25 @@ TEST_CASE("check: a servable artifact passes and is described for the deploy scr
 
 TEST_CASE("check: a git_sha that is not a hex commit id is reported as unknown", "[check]") {
   // The value is printed for a shell script to read: never pass through arbitrary manifest text.
-  for (const std::string sha : {"test", "abc12", "abc1234\nversion=x", "ABC1234", ""}) {
+  for (const std::string& sha : std::vector<std::string>{"test", "abc12", "abc123", "abc1234\nversion=x", "ABC1234", "", "zzzzzzz", "release-1",
+                                std::string(41, 'a'), "abc-1234"}) {
+    INFO("git_sha " << sha);
     TempDir t;
     publish(t.path, "2026-11-12T00-00-00Z", sha);
     const auto r = run_check(t.path);
     CHECK(r.code == 0);
     CHECK(contains(r.out, "\ngit_sha=unknown\n"));
+  }
+}
+
+TEST_CASE("check: short and full hex commit ids pass through unchanged", "[check]") {
+  for (const std::string& sha : std::vector<std::string>{"abc1234", std::string(40, 'f'), "0123456789abcdef0123456789abcdef01234567"}) {
+    INFO("git_sha " << sha);
+    TempDir t;
+    publish(t.path, "2026-11-12T00-00-00Z", sha);
+    const auto r = run_check(t.path);
+    CHECK(r.code == 0);
+    CHECK(contains(r.out, "\ngit_sha=" + sha + "\n"));
   }
 }
 
@@ -136,4 +151,44 @@ TEST_CASE("check: an intact artifact under another version's name fails", "[chec
   CHECK(r.out.empty());
   CHECK(contains(r.log, "artifact 2026-11-12T01-00-00Z rejected"));
   CHECK(contains(r.log, "does not match"));
+}
+
+TEST_CASE("check: a model file in a format this recs-model does not read fails", "[check]") {
+  // The case the deploy preflight exists for (e.g. MF format 1 after min_support): every file
+  // matches its manifest hash, but one model file carries a format version this binary refuses.
+  TempDir t;
+  const std::string version = "2026-11-12T00-00-00Z";
+  publish(t.path, version, "abc1234");
+  const fs::path dir = t.path / version;
+  nlohmann::json manifest;
+  {
+    std::ifstream in(dir / "manifest.json");
+    manifest = nlohmann::json::parse(in);
+  }
+  std::string key;
+  for (const auto& [file, hash] : manifest.at("files").items()) {
+    const fs::path f(file);
+    if (f.filename() == "scores.bin" && f.parent_path().filename() == "pop") key = file;
+  }
+  REQUIRE(!key.empty());
+  {
+    // scores.bin: magic "RECSPOP1", then the u32 format version (little-endian) at offset 8.
+    std::fstream f(dir / key, std::ios::in | std::ios::out | std::ios::binary);
+    char magic[8] = {};
+    f.read(magic, 8);
+    REQUIRE(std::string(magic, 8) == "RECSPOP1");
+    const char future[4] = {99, 0, 0, 0};
+    f.seekp(8);
+    f.write(future, 4);
+  }
+  manifest["files"][key] = recs::sha256_file_hex(dir / key);
+  {
+    std::ofstream out(dir / "manifest.json", std::ios::trunc);
+    out << manifest.dump(2);
+  }
+  const auto r = run_check(t.path);
+  CHECK(r.code == 3);
+  CHECK(r.out.empty());
+  CHECK(contains(r.log, "artifact " + version + " rejected"));
+  CHECK(contains(r.log, "unsupported version"));
 }
