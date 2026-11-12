@@ -69,6 +69,7 @@ The site is live (as of 2026-11-12). It went public through Tailscale Funnel on 
 14. **Merging PRs.**
     - Agents may merge a PR once every CI check passes on its current head commit. Never use `--admin`, `--auto`, or any other way around a failing or pending check.
     - Merge with `gh pr merge <n> --merge` (merge commits, never squash or rebase) and without `--delete-branch`.
+    - Run `gh pr merge` as a command on its own: no `&&`, `;` or pipes, and nothing else in the same call. Only then does the owner's allow rule for it apply. Bundled with other commands, the merge goes to the permission check and can be blocked.
     - If the branch is behind `main`, merge `origin/main` into it inside its worktree, push, and wait for CI on the new head. Never rebase or force-push a pushed branch.
     - Delete a branch only after `gh pr view <n> --json state` reports `MERGED`. Deleting the remote branch of an open PR closes the PR. Never chain cleanup after `gh pr merge` with `;`. Check the state first, then remove the worktree, the local branch and the remote branch.
 
