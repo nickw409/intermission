@@ -170,8 +170,8 @@ TEST_CASE("mf save rejects parameters that load would reject", "[security][mf]")
 }
 
 // fuzz_model_load_pop_count crash (#80, once the fuzzers trapped +inf as well as NaN): a scores.bin
-// holding +inf loaded, since the loader rejected only NaN. fit() never writes an infinite score
-// (pop is a shrunk mean, pop_count a count), so both variants now reject any non-finite score.
+// holding +inf loaded, since the loader rejected only NaN. save() never writes a non-finite score
+// (see the next test), so both variants now reject one on load.
 TEST_CASE("pop load rejects non-finite scores", "[security][fuzz][popularity]") {
   for (const char* name : {"pop", "pop_count"}) {
     TempDir dir("pop-fuzz-inf");
@@ -194,4 +194,14 @@ TEST_CASE("pop load rejects non-finite scores", "[security][fuzz][popularity]") 
     auto m = recs::make_model(name);
     REQUIRE_NOTHROW(m->load(dir.path()));
   }
+}
+
+// The save side of the rule above (#80 review): pop accepts any finite m >= 0, and with m = 1e308
+// the shrinkage term m * C overflows, so fit() produced +inf for every item. save() must refuse to
+// write what load() would reject, as mf and als already do.
+TEST_CASE("pop save rejects non-finite scores", "[security][fuzz][popularity]") {
+  TempDir dir("pop-save-inf");
+  auto m = recs::make_model("pop");
+  m->fit(small_dataset(), recs::Config{{"m", 1e308}}, {});
+  CHECK_THROWS_WITH(m->save(dir.path()), ContainsSubstring("non-finite score"));
 }

@@ -98,9 +98,14 @@ inline int model_load(std::string_view model, const std::uint8_t* data, std::siz
     const UserState u = m->fold_in(ratings);
     std::vector<float> out(n);
     m->score(u, out);
-    m->mask_unrankable(out);  // the ranking mask must cope with whatever the file held
+    // Check before the mask too: it overwrites masked items with -inf, which would hide a bad
+    // score from eval's prediction path (that one does not mask).
     for (float v : out) {
       if (!score_allowed(v)) __builtin_trap();  // NaN or +inf (see score_check.hpp)
+    }
+    m->mask_unrankable(out);  // the ranking mask must cope with whatever the file held
+    for (float v : out) {
+      if (!score_allowed(v)) __builtin_trap();
     }
   } catch (const std::exception&) {
     // A model may refuse a profile; that is a clean failure, not a crash.
