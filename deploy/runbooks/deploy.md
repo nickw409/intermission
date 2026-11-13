@@ -12,8 +12,11 @@ deploy/release.sh <sha>
 
 `release.sh`:
 
-1. builds `intermission-{api,model,train,web,backup}:<sha>` from a clean `git worktree` of the
-   commit if they are not already loaded (`deploy/build.sh <sha>`; ~10 min cold, C++ dominates),
+1. makes sure `intermission-{api,model,train,web,backup}:<sha>` are loaded. If they are not, it
+   pulls and verifies the set CI published (`deploy/fetch-images.sh <sha>`, see "Images from the
+   registry" below), and if that fails it builds them from a clean `git worktree` of the commit
+   (`deploy/build.sh <sha>`; ~10 min cold on the desktop, C++ dominates; much longer on the Pi).
+   It logs which path it took,
 2. runs the new image's `recs-model --check` against the artifact `CURRENT` points at (see
    "Retrain detection" below) and **stops, changing nothing,** if it would not load or the check
    cannot run,
@@ -33,10 +36,47 @@ Database migrations run automatically when recs-api starts and must work with bo
 and new recs-api (add columns, never rename or drop in the same release; spec "Build and
 deploy"). recs-api takes its own backup before migrating.
 
-Using CI-built images instead of building locally: download the `images-<sha>` artifact from
-the `release` workflow run, then `zstd -dc images-<sha>.tar.zst | docker load`, `git fetch`
-(release.sh only accepts SHAs that exist in the local repository) and run
-`deploy/release.sh <sha>`.
+### Images from the registry
+
+On every push to `main` that passes its gates, the `release` workflow publishes
+`ghcr.io/nickw409/intermission-<name>:<sha>` for `api`, `model`, `train`, `web` and `backup`.
+Each one is an image index with `linux/amd64` and `linux/arm64` builds, each built natively and
+gated (non-root/no-shell, edge) on its own architecture, and the index is signed with cosign
+keyless signing. The packages are public, so the host needs **no GitHub credentials**.
+
+`deploy/fetch-images.sh <sha>` (run by `release.sh`; it can also be run on its own):
+
+1. `docker pull`s each image (Docker picks the host's architecture from the index),
+2. reads the digest it actually pulled,
+3. verifies that digest with cosign (pinned image, run by Docker) against a fixed policy: a
+   certificate from `https://token.actions.githubusercontent.com` for
+   `https://github.com/nickw409/intermission/.github/workflows/release.yml@refs/heads/main`,
+   trigger `push`, built from exactly `<sha>`, logged in Rekor,
+4. tags all five `intermission-<name>:<sha>` only when every one verifies.
+
+Anything else (not published yet, a package not public, no or wrong signature, another commit,
+a digest from another repository) is refused: nothing is tagged, the pulled references are
+removed, and `release.sh` builds locally instead. A refusal of a commit that CI did publish is
+not routine: find out why before deploying it (`fetch-images.sh <sha>` prints the cosign error).
+
+Outbound connections for this: `ghcr.io` and its blob host `pkg-containers.githubusercontent.com`,
+`tuf-repo-cdn.sigstore.dev` (Sigstore trust root) and `rekor.sigstore.dev` (transparency log).
+They belong on the host's outbound allowlist (#98).
+
+**First publish (owner, once):** after the first green push to `main` with the publish jobs, set
+each of the five `intermission-*` packages to public (GitHub → profile → Packages → package →
+Package settings → Change visibility). Until then `fetch-images.sh` fails and every release
+builds locally.
+
+**Rolling back to an image older than the registry switch** (commits before the publish jobs
+existed, or more than the packages keep): nothing is published for them, so `release.sh <sha>`
+falls back to `build.sh` and builds them on the host. On arm64 (the Pi), only commits that
+build with `-ffp-contract=off` produce models bit-identical to the x86 training build
+(`docs/plans/2026-11-12-pi-migration.md` §2.1); roll back no further than that.
+
+The old route still works on an amd64 host: download the `images-<sha>` artifact from the
+`release` workflow run (needs a GitHub token; kept 7 days), `zstd -dc images-<sha>.tar.zst |
+docker load`, `git fetch`, then `deploy/release.sh <sha>`.
 
 Before any of this, the scripts check `deploy/.env`: it is forced to mode 0600, and they stop if
 any value still starts with `change-me` (the `.env.example` placeholders). Release, backup,

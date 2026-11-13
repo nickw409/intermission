@@ -92,6 +92,25 @@ images_present() {
   done
 }
 
+# obtain_images COMMIT: make intermission-*:<sha7> present. Order: already loaded; else the
+# CI-published set from GHCR, verified (fetch-images.sh); else a local build (build.sh). Logs
+# which path it took. Dies if the images are still missing.
+obtain_images() {
+  local tag
+  tag="$(short_sha "$1")"
+  if images_present "$tag"; then
+    log "images for $tag: already present locally"
+    return 0
+  fi
+  if "$DEPLOY_DIR/fetch-images.sh" "$1"; then
+    log "images for $tag: pulled from the registry and verified"
+  else
+    log "images for $tag: no verified registry images; building locally (deploy/build.sh)"
+    "$DEPLOY_DIR/build.sh" "$1"
+  fi
+  images_present "$tag" || die "images for $tag are still missing"
+}
+
 # wait_healthy URL HOST SECONDS: poll URL until it returns 200.
 wait_healthy() {
   local url="$1" host="$2" deadline=$((SECONDS + $3))

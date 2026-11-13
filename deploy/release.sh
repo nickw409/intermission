@@ -6,7 +6,8 @@
 #   deploy/release.sh --list                 # the last 5 deployed SHAs (deploy/history;
 #                                            # RECS_HISTORY_FILE overrides it, tests only)
 #
-# Steps: make sure the images exist (build them from git if not), check that the new recs-model
+# Steps: make sure the images exist (if not: pull and verify the CI-published set with
+# fetch-images.sh, or build them from git when that fails), check that the new recs-model
 # loads the current model artifact (stop, changing nothing, if not: a retrain is needed), set TAG=<sha> in
 # deploy/.env, `docker compose up -d`, wait for /healthz, run deploy/smoke.sh, then record the
 # SHA in deploy/history (last 5 kept). Safe to re-run: deploying the running SHA again just
@@ -33,11 +34,7 @@ acquire_lock release "${RELEASE_LOCK_WAIT:-120}"
 tag="$(short_sha "$1")"
 previous="$(env_get TAG)"
 
-if ! images_present "$tag"; then
-  log "images for $tag not found locally; building them"
-  "$DEPLOY_DIR/build.sh" "$1"
-fi
-images_present "$tag" || die "images for $tag are still missing"
+obtain_images "$1"
 
 # Preflight, before anything changes: the new recs-model must accept the artifact CURRENT points
 # at. It refuses one whose model file format it no longer reads (or, on a rollback to an image
