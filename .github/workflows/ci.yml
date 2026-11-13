@@ -41,13 +41,20 @@ jobs:
         working-directory: tools/contracts
 
   cpp:
-    name: cpp (${{ matrix.preset }})
+    name: cpp (${{ matrix.preset }}${{ matrix.arch && format(', {0}', matrix.arch) || '' }})
     timeout-minutes: 40
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.runner || 'ubuntu-24.04' }}
     strategy:
       fail-fast: false
       matrix:
-        preset: [debug, release]
+        # Include-only matrix: each entry is its own job. (Next to a `preset:` list, an include
+        # with preset release would be merged into the x86 release job instead of adding one.)
+        # Production runs on arm64 (docs/plans/2026-11-12-pi-migration.md): the release suite,
+        # golden and determinism tests included, must also pass there. Native runner, no QEMU.
+        include:
+          - { preset: debug }
+          - { preset: release }
+          - { preset: release, arch: arm64, runner: ubuntu-24.04-arm }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
@@ -56,15 +63,15 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: build/${{ matrix.preset }}/_deps
-          key: deps-${{ matrix.preset }}-${{ hashFiles('cmake/deps.cmake') }}
+          key: deps-${{ matrix.preset }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }}-${{ hashFiles('cmake/deps.cmake') }}
       # Compiler cache: a PR recompiles only the translation units it changed. Every run
       # restores the newest cache from main; only pushes to main save one, so PR pushes never
       # evict main's entries (caches are scoped per branch; main's are readable by PRs).
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .ccache
-          key: ccache-${{ matrix.preset }}-${{ github.sha }}
-          restore-keys: ccache-${{ matrix.preset }}-
+          key: ccache-${{ matrix.preset }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }}-${{ github.sha }}
+          restore-keys: ccache-${{ matrix.preset }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }}-
       - run: >-
           cmake --preset ${{ matrix.preset }} -DRECS_GIT_SHA=${{ github.sha }}
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
@@ -74,7 +81,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .ccache
-          key: ccache-${{ matrix.preset }}-${{ github.sha }}
+          key: ccache-${{ matrix.preset }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }}-${{ github.sha }}
       - run: ctest --preset ${{ matrix.preset }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with: { node-version: '24', cache: npm, cache-dependency-path: tools/contracts/package-lock.json }
