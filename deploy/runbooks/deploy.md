@@ -6,9 +6,19 @@ Commands run from the repo root on the host, as the deploy user (a member of the
 ## Routine deploy
 
 ```bash
-git fetch && git log --oneline -3 origin/main     # pick the SHA (CI must be green for it)
-deploy/release.sh <sha>
+deploy/release.sh                                 # newest green, published commit on main
+deploy/release.sh <sha>                           # or a specific commit (any git ref works)
 ```
+
+With no SHA, `release.sh` runs `git fetch` and walks back from `origin/main` (first parent, at most
+20 commits) to the newest commit whose check runs on GitHub all completed as success, skipped or
+neutral, including `publish (multi-arch index, cosign signature)`, so its image set is published
+and signed. Each skipped commit is logged with the reason (checks still running, a failed check,
+not published). It asks GitHub's public API without credentials (one request per commit
+checked; the limit is 60 an hour). It stops, deploying nothing, if the API cannot be reached
+(it never falls back to an older commit for that reason), if no commit in the window qualifies,
+or if the running version is newer than the one it found (a rollback has to name its SHA).
+With a SHA it does no CI check: make sure CI is green for it.
 
 `release.sh`:
 

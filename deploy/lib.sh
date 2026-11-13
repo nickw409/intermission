@@ -92,6 +92,73 @@ images_present() {
   done
 }
 
+# The GitHub repository whose CI and published images release.sh trusts.
+GITHUB_REPO="nickw409/intermission"
+# The release workflow job that signs (and verifies) the published image set.
+SIGN_CHECK="publish (multi-arch index, cosign signature)"
+
+# commit_green SHA: whether every check run on SHA completed successfully and the image set was
+# published and signed. GitHub's public API, no credentials (60 requests an hour per IP).
+# Exit 0: green and published. 1: not (reason logged). 2: the API could not be asked.
+commit_green() {
+  local sha="$1" json reason rc=0
+  json="$(curl -fsS --max-time 15 -H 'Accept: application/vnd.github+json' \
+    "https://api.github.com/repos/$GITHUB_REPO/commits/$sha/check-runs?per_page=100" 2>&1)" \
+    || { log "GitHub API request for ${sha:0:7} failed: ${json:0:200}"; return 2; }
+  reason="$(python3 -c '
+import json, sys
+sign = sys.argv[1]
+try:
+    d = json.loads(sys.stdin.read())
+    runs = d["check_runs"]
+except Exception as e:
+    print("unreadable API response: %s" % e); sys.exit(2)
+if not runs:
+    print("no check runs"); sys.exit(1)
+if d.get("total_count", len(runs)) > len(runs):
+    print("more check runs than one page"); sys.exit(1)
+pending = sorted(r["name"] for r in runs if r["status"] != "completed")
+if pending:
+    print("checks still running: " + ", ".join(pending)); sys.exit(1)
+failed = sorted(r["name"] for r in runs if r["conclusion"] not in ("success", "skipped", "neutral"))
+if failed:
+    print("checks failed: " + ", ".join(failed)); sys.exit(1)
+if not any(r["name"] == sign and r["conclusion"] == "success" for r in runs):
+    print("image set not published and signed (no successful %r check)" % sign); sys.exit(1)
+' "$SIGN_CHECK" <<<"$json")" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1) log "${sha:0:7}: $reason"; return 1 ;;
+    *) log "${sha:0:7}: $reason"; return 2 ;;
+  esac
+}
+
+# latest_green_main: print the newest commit on origin/main (first parent, after a git fetch)
+# that commit_green accepts, looking back at most 20 commits. Dies if none qualifies, or if the
+# API cannot be asked: it never falls back to an older commit because of an API failure.
+latest_green_main() {
+  local sha rc
+  git -C "$REPO_DIR" fetch --quiet origin || die "git fetch failed"
+  for sha in $(git -C "$REPO_DIR" rev-list --first-parent --max-count=20 origin/main); do
+    rc=0
+    commit_green "$sha" || rc=$?
+    case "$rc" in
+      0) printf '%s\n' "$sha"; return 0 ;;
+      1) ;;
+      *) die "cannot check CI status on GitHub; deploy a SHA explicitly or retry later" ;;
+    esac
+  done
+  die "none of the last 20 commits on origin/main has green checks and a published image set"
+}
+
+# is_rollback NEW PREVIOUS: whether deploying commit NEW would move back from PREVIOUS (the
+# running TAG): NEW is a proper ancestor of PREVIOUS. False if PREVIOUS is empty or unknown here.
+is_rollback() {
+  local new="$1" prev
+  prev="$(commit_id "${2:-}")" || return 1
+  [[ "$new" != "$prev" ]] && git -C "$REPO_DIR" merge-base --is-ancestor "$new" "$prev"
+}
+
 # obtain_images COMMIT: make intermission-*:<sha7> present. Order: already loaded (trusted as is:
 # only the docker group, which is root-equivalent, can load images); else the CI-published set
 # from GHCR, verified (fetch-images.sh); else, only when nothing is published, a local build

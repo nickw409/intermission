@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Deploy one image set (spec: "Build and deploy"). Rollback is the same command with an older SHA.
 #
+#   deploy/release.sh                        # deploy the newest green, published commit on main
 #   deploy/release.sh <sha>                  # deploy; on smoke failure, roll back automatically
 #   deploy/release.sh --no-rollback <sha>    # deploy; on smoke failure, leave it running
 #   deploy/release.sh --list                 # the last 5 deployed SHAs (deploy/history;
@@ -21,7 +22,7 @@ case "${1:-}" in
   --list) [[ -f "$HISTORY" ]] && cat "$HISTORY"; exit 0 ;;
   --no-rollback) rollback=0; shift ;;
 esac
-[[ $# -eq 1 ]] || die "usage: deploy/release.sh [--no-rollback] <sha> | --list"
+[[ $# -le 1 ]] || die "usage: deploy/release.sh [--no-rollback] [<sha>] | --list"
 
 require_env_file
 command -v curl >/dev/null || die "curl is required"
@@ -31,8 +32,17 @@ require_data_dirs db exports posters reports artifacts
 # most 2 minutes rather than queueing behind a long retrain.
 acquire_lock release "${RELEASE_LOCK_WAIT:-120}"
 
-tag="$(short_sha "$1")"
 previous="$(env_get TAG)"
+if [[ $# -eq 0 ]]; then
+  # No SHA: the newest commit on main whose CI passed and whose images CI published and signed.
+  latest="$(latest_green_main)"
+  if is_rollback "$latest" "$previous"; then
+    die "the running version $previous is newer than the latest green, published commit ${latest:0:7}; nothing deployed (name a SHA to roll back on purpose)"
+  fi
+  log "latest green, published commit on main: ${latest:0:7}"
+  set -- "$latest"
+fi
+tag="$(short_sha "$1")"
 
 obtain_images "$1"
 
