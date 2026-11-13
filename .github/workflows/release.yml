@@ -52,6 +52,8 @@ jobs:
         run: deploy/tests/test_lib.sh
       - name: fetch-images verification policy and release fallback
         run: deploy/tests/test_fetch_images.sh
+      - name: init-data.sh owners and modes (as root, in a container)
+        run: deploy/tests/test_init_data.sh
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with: { go-version: '1.27.4', cache-dependency-path: deploy/tools/recs-backup/go.sum }
       - name: recs-backup vet, staticcheck, govulncheck, tests
