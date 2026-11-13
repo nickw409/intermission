@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Deploy one image set (spec: "Build and deploy"). Rollback is the same command with an older SHA.
 #
-#   deploy/release.sh                        # deploy the newest green, published commit on main
+#   deploy/release.sh                        # deploy the newest green commit on main (verified
+#                                            # registry images only, never a local build)
 #   deploy/release.sh <sha>                  # deploy; on smoke failure, roll back automatically
 #   deploy/release.sh --no-rollback <sha>    # deploy; on smoke failure, leave it running
 #   deploy/release.sh --list                 # the last 5 deployed SHAs (deploy/history;
@@ -33,18 +34,25 @@ require_data_dirs db exports posters reports artifacts
 acquire_lock release "${RELEASE_LOCK_WAIT:-120}"
 
 previous="$(env_get TAG)"
+image_args=()
 if [[ $# -eq 0 ]]; then
-  # No SHA: the newest commit on main whose CI passed and whose images CI published and signed.
+  # No SHA: the newest commit on main whose ci.yml and release.yml push runs passed. Its images
+  # must come from the registry and verify; there is no local-build fallback in this mode.
   latest="$(latest_green_main)"
-  if is_rollback "$latest" "$previous"; then
-    die "the running version $previous is newer than the latest green, published commit ${latest:0:7}; nothing deployed (name a SHA to roll back on purpose)"
-  fi
-  log "latest green, published commit on main: ${latest:0:7}"
+  fwd=0
+  moves_forward "$latest" "$previous" || fwd=$?
+  case "$fwd" in
+    0) ;;
+    1) die "the latest green commit ${latest:0:7} is not newer than the running version $previous (older, or on another line of history); nothing deployed (name a SHA to roll back on purpose)" ;;
+    *) die "the running version '$previous' is not a commit in this repository (git fetch?); nothing deployed (name a SHA)" ;;
+  esac
+  log "latest green commit on main: ${latest:0:7}"
   set -- "$latest"
+  image_args=(--verified-only)
 fi
 tag="$(short_sha "$1")"
 
-obtain_images "$1"
+obtain_images "$1" "${image_args[@]}"
 
 # Preflight, before anything changes: the new recs-model must accept the artifact CURRENT points
 # at. It refuses one whose model file format it no longer reads (or, on a rollback to an image

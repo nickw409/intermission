@@ -11,14 +11,26 @@ deploy/release.sh <sha>                           # or a specific commit (any gi
 ```
 
 With no SHA, `release.sh` runs `git fetch` and walks back from `origin/main` (first parent, at most
-20 commits) to the newest commit whose check runs on GitHub all completed as success, skipped or
-neutral, including `publish (multi-arch index, cosign signature)`, so its image set is published
-and signed. Each skipped commit is logged with the reason (checks still running, a failed check,
-not published). It asks GitHub's public API without credentials (one request per commit
-checked; the limit is 60 an hour). It stops, deploying nothing, if the API cannot be reached
-(it never falls back to an older commit for that reason), if no commit in the window qualifies,
-or if the running version is newer than the one it found (a rollback has to name its SHA).
-With a SHA it does no CI check: make sure CI is green for it.
+20 commits) to the newest commit whose latest push runs of `ci.yml` and `release.yml` on `main`
+both succeeded. `release.yml`'s push run publishes and signs the image set, so such a commit has
+one. Other workflows (the scheduled security scan) and check runs from other apps are ignored.
+Each skipped commit is logged with the reason (a workflow still running, failed, or not run). It
+asks GitHub's public Actions API without credentials (one request per commit checked; the limit
+is 60 an hour).
+
+In this mode the images **must** come from the registry and pass `fetch-images.sh`; there is no
+local-build fallback. It stops, deploying nothing:
+
+- if the API cannot be reached or answers something unreadable (it never falls back to an older
+  commit for that reason),
+- if no commit in the window qualifies,
+- if the commit it found is not newer than the running `TAG` (older, or on another line of
+  history), or the running `TAG` is not a commit in this clone (`git fetch`): a rollback names
+  its SHA,
+- if the commit's images are not in the registry, or fail verification.
+
+With a SHA it does no CI check (make sure CI is green for it), and the local-build fallback
+applies when nothing is published.
 
 `release.sh`:
 
