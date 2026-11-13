@@ -92,13 +92,100 @@ images_present() {
   done
 }
 
-# obtain_images COMMIT: make intermission-*:<sha7> present. Order: already loaded (trusted as is:
-# only the docker group, which is root-equivalent, can load images); else the CI-published set
-# from GHCR, verified (fetch-images.sh); else, only when nothing is published, a local build
-# (build.sh). An image that is published but fails verification stops the release: that is a
-# security event, not a missing build. Logs which path it took. Dies if images are still missing.
+# The GitHub repository whose CI and published images release.sh trusts.
+GITHUB_REPO="nickw409/intermission"
+# The workflows that gate a release: every push to main must pass both. release.yml's push run
+# also publishes and signs the image set (its publish jobs run on every push to main once the
+# gates pass), so a successful one means a signed set exists; fetch-images.sh still verifies it.
+# Other workflows (the scheduled security scan, which attaches to whatever main's head is) and
+# check runs posted by other apps do not count.
+GATE_WORKFLOWS=".github/workflows/ci.yml .github/workflows/release.yml"
+
+# commit_green SHA: whether the latest push-triggered run on main of every GATE_WORKFLOWS
+# workflow for SHA completed successfully. GitHub's public Actions API, no credentials (60
+# requests an hour per IP; one per call). Exit 0: green. 1: not (reason logged). 2: the API could
+# not be asked or answered something unreadable.
+commit_green() {
+  local sha="$1" json reason rc=0
+  json="$(curl -fsS --max-time 15 -H 'Accept: application/vnd.github+json' \
+    "https://api.github.com/repos/$GITHUB_REPO/actions/runs?head_sha=$sha&event=push&branch=main&per_page=100" 2>&1)" \
+    || { log "GitHub API request for ${sha:0:7} failed: $(printf '%s' "${json:0:200}" | tr -cd '[:print:]')"; return 2; }
+  reason="$(python3 -c '
+import json, sys
+sha, gates = sys.argv[1], sys.argv[2].split()
+def clean(x):  # API text goes into logs: printable characters only
+    return "".join(c for c in str(x) if c.isprintable())[:80]
+try:
+    d = json.loads(sys.stdin.read())
+    runs = d["workflow_runs"]
+except Exception as e:
+    print("unreadable API response: %s" % clean(e)); sys.exit(2)
+if d.get("total_count", len(runs)) > len(runs):
+    print("more workflow runs than one page"); sys.exit(2)  # cannot decide: stop, never skip back
+problems = []
+for path in gates:
+    mine = [r for r in runs if r.get("path") == path and r.get("head_sha") == sha
+            and r.get("event") == "push" and r.get("head_branch") == "main"]
+    name = path.rsplit("/", 1)[-1]
+    if not mine:
+        problems.append("%s has not run" % name); continue
+    r = max(mine, key=lambda r: r["id"])  # the newest run; re-runs update it in place
+    if r.get("status") != "completed":
+        problems.append("%s still running" % name)
+    elif r.get("conclusion") != "success":
+        problems.append("%s %s" % (name, clean(r.get("conclusion"))))
+if problems:
+    print("; ".join(problems)); sys.exit(1)
+' "$sha" "$GATE_WORKFLOWS" <<<"$json")" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1) log "${sha:0:7}: $reason"; return 1 ;;
+    *) log "${sha:0:7}: $reason"; return 2 ;;
+  esac
+}
+
+# latest_green_main: print the newest commit on origin/main (first parent, after a git fetch)
+# that commit_green accepts, looking back at most 20 commits. Dies if none qualifies, or if the
+# API cannot be asked: it never falls back to an older commit because of an API failure.
+latest_green_main() {
+  local sha rc shas
+  git -C "$REPO_DIR" fetch --quiet origin || die "git fetch failed"
+  shas="$(git -C "$REPO_DIR" rev-list --first-parent --max-count=20 origin/main)" \
+    || die "cannot list commits on origin/main"
+  for sha in $shas; do
+    rc=0
+    commit_green "$sha" || rc=$?
+    case "$rc" in
+      0) printf '%s\n' "$sha"; return 0 ;;
+      1) ;;
+      *) die "cannot check CI status on GitHub; deploy a SHA explicitly or retry later" ;;
+    esac
+  done
+  die "none of the last 20 commits on origin/main passed ci.yml and release.yml"
+}
+
+# moves_forward NEW PREVIOUS: whether deploying commit NEW keeps or advances PREVIOUS (the running
+# TAG): PREVIOUS is NEW or an ancestor of it. Exit 0: yes, or nothing runs yet (empty PREVIOUS).
+# 1: NEW is older than PREVIOUS or on another line of history. 2: PREVIOUS is not exactly one
+# commit in this repository, so it cannot be decided (fail closed).
+moves_forward() {
+  local new="$1" prev
+  [[ -n "${2:-}" ]] || return 0
+  prev="$(commit_id "$2")" || return 2
+  if git -C "$REPO_DIR" merge-base --is-ancestor "$prev" "$new"; then return 0; fi
+  return 1
+}
+
+# obtain_images COMMIT [--verified-only]: make intermission-*:<sha7> present. Order: already
+# loaded (trusted as is: only the docker group, which is root-equivalent, can load images); else
+# the CI-published set from GHCR, verified (fetch-images.sh); else, only when nothing is
+# published, a local build (build.sh). With --verified-only there is no local build: the images
+# must come from the registry and pass verification. An image that is published but fails
+# verification stops the release: that is a security event, not a missing build. Logs which path
+# it took. Dies if images are still missing.
 obtain_images() {
-  local tag rc=0
+  local tag rc=0 verified_only=0
+  [[ "${2:-}" == --verified-only ]] && verified_only=1
   tag="$(short_sha "$1")"
   if images_present "$tag"; then
     log "images for $tag: already present locally"
@@ -108,7 +195,10 @@ obtain_images() {
   case "$rc" in
     0) job_status image_verify 0
        log "images for $tag: pulled from the registry and verified" ;;
-    2) log "images for $tag: not available from the registry; building locally (deploy/build.sh)"
+    2) if [[ $verified_only -eq 1 ]]; then
+         die "images for $tag: not available from the registry, and this release only deploys verified registry images (name the SHA to allow a local build)"
+       fi
+       log "images for $tag: not available from the registry; building locally (deploy/build.sh)"
        "$DEPLOY_DIR/build.sh" "$1" ;;
     3) job_status image_verify 1
        die "images for $tag: REFUSED, the published images failed signature verification. Nothing was deployed and nothing will be built. See deploy/runbooks/deploy.md, \"Images from the registry\"" ;;

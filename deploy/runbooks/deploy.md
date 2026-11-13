@@ -6,9 +6,35 @@ Commands run from the repo root on the host, as the deploy user (a member of the
 ## Routine deploy
 
 ```bash
-git fetch && git log --oneline -3 origin/main     # pick the SHA (CI must be green for it)
-deploy/release.sh <sha>
+deploy/release.sh                                 # newest green, published commit on main
+deploy/release.sh <sha>                           # or a specific commit (any git ref works)
 ```
+
+With no SHA, `release.sh` runs `git fetch` and walks back from `origin/main` (first parent, at most
+20 commits) to the newest commit whose latest push runs of `ci.yml` and `release.yml` on `main`
+both succeeded. `release.yml`'s push run publishes and signs the image set, so such a commit has
+one. Other workflows (the scheduled security scan) and check runs from other apps are ignored.
+Each skipped commit is logged with the reason (a workflow still running, failed, or not run). It
+asks GitHub's public Actions API without credentials (one request per commit checked; the limit
+is 60 an hour).
+
+In this mode the images **must** come from the registry and pass `fetch-images.sh`; there is no
+local-build fallback. It stops, deploying nothing:
+
+- if the API cannot be reached or answers something unreadable (it never falls back to an older
+  commit for that reason),
+- if no commit in the window qualifies,
+- if the commit it found is not newer than the running `TAG` (older, or on another line of
+  history), or the running `TAG` is not a commit in this clone (`git fetch`): a rollback names
+  its SHA,
+- if the commit's images are not in the registry, or fail verification.
+
+Images already loaded on the host under that SHA (from an earlier release, a named-SHA local build
+or a `docker load`) are used as they are, without re-verification: only the docker group, which is
+root-equivalent, can load them.
+
+With a SHA it does no CI check (make sure CI is green for it), and the local-build fallback
+applies when nothing is published.
 
 `release.sh`:
 
