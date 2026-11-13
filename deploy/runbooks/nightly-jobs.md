@@ -35,7 +35,7 @@ journalctl -u intermission-nightly.service --since yesterday     # which step fa
 ```
 
 - **export failed**: recs-api could not write `data/exports/` (check ownership:
-  `sudo deploy/init-data.sh`) or the database is locked/corrupt (`restore.md`). Retrain was
+  `sudo RECS_OPS_OWNER=<deploy user> deploy/init-data.sh`) or the database is locked/corrupt (`restore.md`). Retrain was
   skipped; the site keeps serving the current model.
 - **retrain failed**: recs-model keeps serving the previous artifact (a half-written artifact
   is never published). Check the train output in the journal; out-of-memory shows as exit 137

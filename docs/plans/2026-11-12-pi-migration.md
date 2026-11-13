@@ -101,7 +101,9 @@ OS and services:
 - #98 requirements: a dedicated `deploy` user (docker group only), no GitHub credentials, SSH over
   Tailscale only, outbound allowlist (`github.com`, `api.github.com`, `ghcr.io`, the TMDB API, the
   alert channel).
-- `deploy/init-data.sh` for the data directories, then the systemd units in `deploy/systemd/`.
+- `sudo RECS_DATA_DIR=/srv/intermission/data RECS_OPS_OWNER=deploy deploy/init-data.sh` for the
+  data directories (on every run, including after copying data in), then the systemd units in
+  `deploy/systemd/`.
 
 ## 4. Training on the desktop
 
