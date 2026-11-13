@@ -16,10 +16,14 @@ The site is live (as of 2026-11-12). It went public through Tailscale Funnel on 
 - **Phase mode: Pipelined** (approved by the owner on 2026-11-10; plan §2). Code for later phases may start early behind the frozen contracts. Merges to `main` and phase sign-offs still happen strictly in phase order.
 - **Phases:** Phase 0 is signed off (tag `phase-0-done`). Phase 1 (`docs/phase-1.md`) is not signed off yet, and `docs/phase-2.md` is not written.
 - **The repo is public** (`github.com/nickw409/intermission`).
-- **Production** serves ml-32m artifacts trained with `recs-train train ... --set-current`. `recs-train retrain` is still a stub, so the model is only retrained by hand. A full ml-32m train took 37 min on 2026-11-12.
-- **Deploys are manual:** `deploy/release.sh <sha>` on the host (`deploy/runbooks/deploy.md`); `deploy/release.sh --list` shows what is live. Merging to `main` deploys nothing. Since PR #68, the release first checks that the new recs-model can load the current artifact and stops if a retrain is needed ("Retrain detection" in the runbook).
-- **Alerts are not delivered anywhere yet.** Prometheus rules fire only at `127.0.0.1:9090/alerts` (`deploy/runbooks/monitoring.md`, "Known gaps").
+- **Production host: a Raspberry Pi 4, 4 GB, arm64** (since 2026-11-12; `docs/plans/2026-11-12-pi-migration.md`), still published through Tailscale Funnel. It only serves; it has no GitHub credentials (#98). Every C++ build uses `-ffp-contract=off` so arm64 and x86 compute the same results, and CI runs the release suite on arm64 too.
+- **Training runs on the desktop**, by hand: `recs-train retrain` is still a stub (Phase 5), and the Pi cannot train ml-32m (2.5 GiB peak). The trained artifact is copied to the Pi. The Pi's `deploy/.env` sets `RECS_NIGHTLY_RETRAIN=off`, so its nightly job only exports and backs up. A full ml-32m train took 37–41 min on 2026-11-12.
+- **Images:** every push to `main` builds amd64 and arm64 images, publishes them to public GHCR packages and signs them with cosign (`release.yml`). The host pulls and verifies them with `deploy/fetch-images.sh`; a set that fails verification stops the release.
+- **Deploys are manual**, on the Pi (`deploy/runbooks/deploy.md`): `deploy/release.sh` alone deploys the newest commit on `main` whose `ci.yml` and `release.yml` passed, using verified registry images only; `deploy/release.sh <sha>` deploys a named commit; `deploy/release.sh --list` shows what is live. Merging to `main` deploys nothing. The release first checks that the new recs-model can load the current artifact and stops if a retrain is needed ("Retrain detection" in the runbook).
+- **Host setup:** run `sudo RECS_DATA_DIR=... RECS_OPS_OWNER=deploy deploy/init-data.sh` (every time, so `data/ops/textfile` stays the deploy user's).
+- **Alerts are not delivered anywhere yet.** Prometheus rules (including `ImageVerifyRefused`) fire only at `127.0.0.1:9090/alerts` on the host, when the monitoring profile runs (`deploy/runbooks/monitoring.md`, "Known gaps").
 - **Open plans:**
+  - `docs/plans/2026-11-12-pi-migration.md`: what is left of the move (§4 desktop↔Pi transfer of exports and artifacts, §5 checks on the Pi).
   - `docs/plans/2026-11-12-automated-deploy.md`: alert delivery, then an auto-deploy timer and auto-retrain. Steps 1–4 need owner decisions first.
   - `docs/plans/2026-11-12-new-releases.md`
   - `docs/plans/2026-11-11-feature-backlog.md`
