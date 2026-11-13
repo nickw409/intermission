@@ -12,8 +12,12 @@ deploy/release.sh <sha>
 
 `release.sh`:
 
-1. builds `intermission-{api,model,train,web,backup}:<sha>` from a clean `git worktree` of the
-   commit if they are not already loaded (`deploy/build.sh <sha>`; ~10 min cold, C++ dominates),
+1. makes sure `intermission-{api,model,train,web,backup}:<sha>` are loaded. If they are not, it
+   pulls and verifies the set CI published (`deploy/fetch-images.sh <sha>`, see "Images from the
+   registry" below). Only if nothing is published for the commit does it build them from a clean
+   `git worktree` of the commit (`deploy/build.sh <sha>`; ~10 min cold on the desktop, C++
+   dominates; much longer on the Pi). Published images that **fail verification stop the
+   release**. It logs which path it took,
 2. runs the new image's `recs-model --check` against the artifact `CURRENT` points at (see
    "Retrain detection" below) and **stops, changing nothing,** if it would not load or the check
    cannot run,
@@ -33,10 +37,68 @@ Database migrations run automatically when recs-api starts and must work with bo
 and new recs-api (add columns, never rename or drop in the same release; spec "Build and
 deploy"). recs-api takes its own backup before migrating.
 
-Using CI-built images instead of building locally: download the `images-<sha>` artifact from
-the `release` workflow run, then `zstd -dc images-<sha>.tar.zst | docker load`, `git fetch`
-(release.sh only accepts SHAs that exist in the local repository) and run
-`deploy/release.sh <sha>`.
+### Images from the registry
+
+On every push to `main` that passes its gates, the `release` workflow publishes
+`ghcr.io/nickw409/intermission-<name>:<sha>` for `api`, `model`, `train`, `web` and `backup`.
+Each one is an image index with `linux/amd64` and `linux/arm64` builds, each built natively and
+gated (non-root/no-shell, edge) on its own architecture, and the index is signed with cosign
+keyless signing. The packages are public, so the host needs **no GitHub credentials**.
+
+`deploy/fetch-images.sh <sha>` (run by `release.sh`; it can also be run on its own):
+
+1. `docker pull`s each image (Docker picks the host's architecture from the index),
+2. reads the digest it actually pulled,
+3. verifies that digest with cosign (pinned image, run by Docker) against a fixed policy: a
+   certificate from `https://token.actions.githubusercontent.com` for
+   `https://github.com/nickw409/intermission/.github/workflows/release.yml@refs/heads/main`,
+   trigger `push`, built from exactly `<sha>`, logged in Rekor,
+4. tags all five `intermission-<name>:<sha>` only when every one verifies.
+
+On any failure nothing is tagged and the pulled references are removed. Two kinds of failure are
+handled differently:
+
+| `fetch-images.sh` exit | Meaning | `release.sh` |
+|---|---|---|
+| 2, not available | Not published (yet), a package not public, the pull output had no single digest, or no network | Builds locally with `build.sh` |
+| 3, **REFUSED** | Published images that fail verification: unsigned, another signer or commit, tampered | **Stops** before any change, writes `image_verify` status 1, which fires **ImageVerifyRefused** (`page`) |
+
+After an ImageVerifyRefused alert:
+
+1. Run `deploy/fetch-images.sh <sha>` by hand; it prints cosign's error.
+2. If the error is a network failure reaching `tuf-repo-cdn.sigstore.dev` or `rekor.sigstore.dev`
+   (a Sigstore outage, not tampering), wait and re-run `release.sh <sha>`.
+3. Otherwise treat it as a possible compromise of the registry or of CI. Do not deploy that
+   commit, do not build it locally to "get around" the check, and look at the `release` run for
+   that commit (its job summary lists the index digests it signed) against what GHCR serves.
+4. A release that verifies its images clears the alert.
+
+Images already loaded on the host (`intermission-<name>:<sha>` exists) are deployed without
+re-verification: only the docker group, which is root-equivalent, can load them.
+
+Outbound connections for this: `ghcr.io` and its blob host `pkg-containers.githubusercontent.com`,
+`tuf-repo-cdn.sigstore.dev` (Sigstore trust root) and `rekor.sigstore.dev` (transparency log).
+They belong on the host's outbound allowlist (#98). The `build.sh` fallback needs more: Docker
+Hub and `gcr.io` for the base images, `snapshot.ubuntu.com` and the npm and Go module proxies.
+Under a strict allowlist the fallback cannot run, and every release needs a published image set.
+
+Not every `main` commit is guaranteed an image set: a publish can fail (the `release` run is
+red), and commits older than the publish jobs have none. Those fall back to `build.sh`.
+
+**First publish (owner, once):** after the first green push to `main` with the publish jobs, set
+each of the five `intermission-*` packages to public (GitHub → profile → Packages → package →
+Package settings → Change visibility). Until then `fetch-images.sh` fails and every release
+builds locally.
+
+**Rolling back to an image older than the registry switch** (commits before the publish jobs
+existed, or more than the packages keep): nothing is published for them, so `release.sh <sha>`
+falls back to `build.sh` and builds them on the host. On arm64 (the Pi), only commits that
+build with `-ffp-contract=off` produce models bit-identical to the x86 training build
+(`docs/plans/2026-11-12-pi-migration.md` §2.1); roll back no further than that.
+
+The old route still works on an amd64 host: download the `images-<sha>` artifact from the
+`release` workflow run (needs a GitHub token; kept 7 days), `zstd -dc images-<sha>.tar.zst |
+docker load`, `git fetch`, then `deploy/release.sh <sha>`.
 
 Before any of this, the scripts check `deploy/.env`: it is forced to mode 0600, and they stop if
 any value still starts with `change-me` (the `.env.example` placeholders). Release, backup,

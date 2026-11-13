@@ -92,6 +92,31 @@ images_present() {
   done
 }
 
+# obtain_images COMMIT: make intermission-*:<sha7> present. Order: already loaded (trusted as is:
+# only the docker group, which is root-equivalent, can load images); else the CI-published set
+# from GHCR, verified (fetch-images.sh); else, only when nothing is published, a local build
+# (build.sh). An image that is published but fails verification stops the release: that is a
+# security event, not a missing build. Logs which path it took. Dies if images are still missing.
+obtain_images() {
+  local tag rc=0
+  tag="$(short_sha "$1")"
+  if images_present "$tag"; then
+    log "images for $tag: already present locally"
+    return 0
+  fi
+  "$DEPLOY_DIR/fetch-images.sh" "$1" || rc=$?
+  case "$rc" in
+    0) job_status image_verify 0
+       log "images for $tag: pulled from the registry and verified" ;;
+    2) log "images for $tag: not available from the registry; building locally (deploy/build.sh)"
+       "$DEPLOY_DIR/build.sh" "$1" ;;
+    3) job_status image_verify 1
+       die "images for $tag: REFUSED, the published images failed signature verification. Nothing was deployed and nothing will be built. See deploy/runbooks/deploy.md, \"Images from the registry\"" ;;
+    *) die "images for $tag: fetch-images.sh failed (exit $rc)" ;;
+  esac
+  images_present "$tag" || die "images for $tag are still missing"
+}
+
 # wait_healthy URL HOST SECONDS: poll URL until it returns 200.
 wait_healthy() {
   local url="$1" host="$2" deadline=$((SECONDS + $3))
