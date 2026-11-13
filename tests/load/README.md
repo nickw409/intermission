@@ -25,6 +25,11 @@ stack, and the load generator is built in the pinned Go image when the host has 
 is not touched: the scratch stack has its own project, port, data and accounts. The second
 argument only labels the result.
 
+It does share the host with production: a second recs-api, recs-model and Caddy (about 0.5 GB
+more under load; the scratch recs-model is capped at 1 GB, `LOAD_MODEL_MEM_LIMIT`), plus 20
+clients of load. Production's latency suffers while it runs. Run it at a quiet time and check
+`free -h` first; stop if less than about 1.5 GB is available.
+
 `LOAD_GENRES` (the generator's `-genres`) adds `&genres=<list>` to every timed request. The
 Phase 2 ml-32m sign-off includes filtered passes (`Film-Noir`, and all 19 genres) next to the
 unfiltered one.

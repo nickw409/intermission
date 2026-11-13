@@ -61,6 +61,9 @@ mkdir -p "$(dirname "$out")"
 artifacts="${LOAD_ARTIFACTS:-}"
 if [[ -n "$artifacts" ]]; then
   [[ -d "$artifacts" ]] || { echo "LOAD_ARTIFACTS: $artifacts is not a directory" >&2; exit 2; }
+  # Absolute and colon-free: docker -v would read a bare name as a (new, empty) named volume.
+  artifacts="$(cd "$artifacts" && pwd -P)"
+  [[ "$artifacts" != *:* ]] || { echo "LOAD_ARTIFACTS: a path with ':' cannot be mounted" >&2; exit 2; }
   # No MovieLens data is needed: stack_init only checks that the directory exists.
   RAW_DIR="$STACK_DIR/no-raw"
   mkdir -p "$RAW_DIR"
@@ -80,14 +83,21 @@ if [[ -n "$artifacts" ]]; then
     "$STACK_HELPER_IMAGE" bash -c '
       set -euo pipefail
       v="$(cat /src/CURRENT)"
-      [[ "$v" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "CURRENT does not name an artifact: $v" >&2; exit 1; }
+      # A leading letter or digit: rules out "." and "..", which would copy the wrong tree.
+      [[ "$v" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "CURRENT does not name an artifact: $v" >&2; exit 1; }
       [[ -d "/src/$v" && ! -L "/src/$v" ]] || { echo "artifact $v is missing" >&2; exit 1; }
+      if [[ -n "$(find "/src/$v" -type l -print -quit)" ]]; then
+        echo "artifact $v contains symlinks; refusing to copy it" >&2; exit 1
+      fi
       cp -a "/src/$v" /s/data/artifacts/
       printf "%s\n" "$v" > /s/data/artifacts/CURRENT
       chown -R 10003:10000 /s/data/artifacts
       chmod -R g+rX,o-rwx /s/data/artifacts/"$v" /s/data/artifacts/CURRENT
       echo "$v"')"
   label="$dataset, artifact $version (LOAD_ARTIFACTS)"
+  # The serving host runs production next to this stack: cap the scratch recs-model well below
+  # compose.yaml's 4g default (it peaks around 160 MiB with all six ml-32m models).
+  echo "MODEL_MEM_LIMIT=${LOAD_MODEL_MEM_LIMIT:-1g}" >> "$STACK_DIR/env"
   slog "serving artifact $version copied from $artifacts (no training)"
 else
   # recs-train prefers knn.<dataset>.tuned.json over knn.json; remove the copied tuned files so
