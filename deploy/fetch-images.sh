@@ -7,15 +7,20 @@
 # ghcr.io/nickw409/intermission-{api,model,train,web,backup}:<sha7> as amd64 + arm64 image indexes
 # and signs each one with cosign keyless signing. For every image this script:
 #   1. pulls it from GHCR (public packages: no credentials on this host),
-#   2. reads the digest Docker actually pulled (the index digest, never just the tag),
+#   2. reads the digest Docker actually pulled from `docker pull`'s own output (the index digest;
+#      never the tag, and never RepoDigests, which can list several digests),
 #   3. verifies that digest with cosign: a Fulcio certificate issued by GitHub Actions to
 #      release.yml on refs/heads/main, triggered by a push, built from exactly <commit>,
 #      and logged in Rekor,
 #   4. only when all five verify, tags each one intermission-<name>:<sha7> (what release.sh uses).
 #
-# Any failure (no published image, unsigned, wrong identity or commit, tampered digest) exits 1
-# and tags nothing; the pulled GHCR references are removed again. release.sh then builds locally
-# instead (deploy/build.sh). Cosign runs from a pinned image, so the host needs only Docker.
+# Exit codes (nothing is tagged on any failure; the pulled GHCR references are removed again):
+#   0  all five verified and tagged
+#   2  not available: an image is not published (yet), the package is not public, or the
+#      registry cannot be reached. release.sh builds locally instead (deploy/build.sh).
+#   3  REFUSED: an image is there but fails verification (unsigned, another signer or commit,
+#      tampered). A security event, not a missing build: release.sh stops.
+# Cosign runs from a pinned image, so the host needs only Docker.
 #
 # Network: ghcr.io (and its blob host), plus the Sigstore public-good instance for verification
 # (tuf-repo-cdn.sigstore.dev, rekor.sigstore.dev). See deploy/runbooks/deploy.md.
@@ -24,8 +29,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 [[ $# -eq 1 ]] || die "usage: deploy/fetch-images.sh <commit>"
 
-REGISTRY="${RECS_IMAGE_REGISTRY:-ghcr.io/nickw409}"
-# Who may have produced the images. Not overridable: loosening it would defeat the check.
+# Where the images come from and who may have produced them. Fixed on purpose: no overrides.
+REGISTRY="ghcr.io/nickw409"
 SIGNER_IDENTITY="https://github.com/nickw409/intermission/.github/workflows/release.yml@refs/heads/main"
 SIGNER_ISSUER="https://token.actions.githubusercontent.com"
 # cosign v3.1.4, multi-arch index, pinned by digest.
@@ -45,24 +50,24 @@ verified=()
 for name in "${IMAGES[@]}"; do
   ref="$REGISTRY/intermission-$name:$tag"
   log "pulling $ref"
-  if ! docker pull --quiet "$ref" >/dev/null; then
-    log "no published image $ref (not published yet, or the package is not public)"
+  if ! pull_out="$(docker pull "$ref" 2>&1)"; then
+    printf '%s\n' "$pull_out" | tail -n 2 >&2
+    log "no published image $ref (not published yet, the package is not public, or no network)"
     cleanup_pulled
-    exit 1
+    exit 2
   fi
   pulled+=("$ref")
 
-  # The digest Docker pulled for this repository. Verifying this digest (not the tag) and tagging
-  # it afterwards means a tag moved on the registry in between cannot slip through.
-  digest_ref=""
-  while IFS= read -r d; do
-    if [[ "$d" == "$REGISTRY/intermission-$name@sha256:"* ]]; then digest_ref="$d"; fi
-  done < <(docker image inspect "$ref" --format '{{range .RepoDigests}}{{println .}}{{end}}')
-  if [[ ! "$digest_ref" =~ @sha256:[0-9a-f]{64}$ ]]; then
-    log "cannot read the pulled digest of $ref"
+  # The digest this pull resolved the tag to: exactly one "Digest: sha256:..." line. Verifying
+  # this digest (not the tag) and tagging it afterwards means a tag moved on the registry in
+  # between cannot slip through.
+  digests="$(sed -n 's/^Digest: \(sha256:[0-9a-f]\{64\}\)$/\1/p' <<<"$pull_out")"
+  if [[ ! "$digests" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    log "cannot read exactly one pulled digest for $ref"
     cleanup_pulled
-    exit 1
+    exit 2
   fi
+  digest_ref="$REGISTRY/intermission-$name@$digests"
   pulled+=("$digest_ref")
 
   log "verifying $digest_ref"
@@ -78,13 +83,18 @@ for name in "${IMAGES[@]}"; do
     printf '%s\n' "$out" | tail -n 5 >&2
     log "REFUSED $digest_ref: no valid signature from the release workflow for commit $full"
     cleanup_pulled
-    exit 1
+    exit 3
   fi
   verified+=("$name=$digest_ref")
 done
 
 for entry in "${verified[@]}"; do
   name="${entry%%=*}"
-  docker tag "${entry#*=}" "intermission-$name:$tag"
+  if ! docker tag "${entry#*=}" "intermission-$name:$tag"; then
+    # Remove the tags made so far: images_present must never see a partial set.
+    for e in "${verified[@]}"; do docker image rm "intermission-${e%%=*}:$tag" >/dev/null 2>&1 || true; done
+    cleanup_pulled
+    die "could not tag intermission-$name:$tag"
+  fi
   log "verified intermission-$name:$tag = ${entry#*=}"
 done

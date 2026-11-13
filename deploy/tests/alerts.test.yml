@@ -94,6 +94,27 @@ tests:
         alertname: JobFailed
         exp_alerts: []
 
+  # A refused image set (deploy/fetch-images.sh exit 3) fires ImageVerifyRefused, not JobFailed;
+  # it clears once a release verifies its images.
+  - interval: 1m
+    input_series:
+      - series: 'intermission_job_last_status{task="image_verify"}'
+        values: '1x5 0x5'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: ImageVerifyRefused
+        exp_alerts:
+          - exp_labels: { severity: page, task: image_verify }
+            exp_annotations:
+              summary: 'A release was refused: its published images failed signature verification'
+              runbook: deploy/runbooks/deploy.md
+      - eval_time: 2m
+        alertname: JobFailed
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: ImageVerifyRefused
+        exp_alerts: []
+
   # Both clear once a release records success.
   - interval: 1m
     input_series:

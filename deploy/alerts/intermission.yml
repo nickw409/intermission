@@ -60,6 +60,16 @@ groups:
           summary: 'A release is blocked: its recs-model cannot load the current model artifact (retrain first)'
           runbook: deploy/runbooks/deploy.md
 
+      # deploy/fetch-images.sh found published images that fail signature verification (#97):
+      # possible tampering, or a Sigstore outage. The release stopped before any change. Clears
+      # when a release verifies its images.
+      - alert: ImageVerifyRefused
+        expr: max by (task) (intermission_job_last_status{task="image_verify"}) != 0
+        labels: { severity: page }
+        annotations:
+          summary: 'A release was refused: its published images failed signature verification'
+          runbook: deploy/runbooks/deploy.md
+
       # The serving artifact loads, but the training code (lib.sh TRAINING_PATHS) differs between
       # the running release and the commit that trained it, so the site's model does not match the
       # code. Clears when a release finds them equal (after a retrain, re-run deploy/release.sh

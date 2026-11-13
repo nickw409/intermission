@@ -14,9 +14,10 @@ deploy/release.sh <sha>
 
 1. makes sure `intermission-{api,model,train,web,backup}:<sha>` are loaded. If they are not, it
    pulls and verifies the set CI published (`deploy/fetch-images.sh <sha>`, see "Images from the
-   registry" below), and if that fails it builds them from a clean `git worktree` of the commit
-   (`deploy/build.sh <sha>`; ~10 min cold on the desktop, C++ dominates; much longer on the Pi).
-   It logs which path it took,
+   registry" below). Only if nothing is published for the commit does it build them from a clean
+   `git worktree` of the commit (`deploy/build.sh <sha>`; ~10 min cold on the desktop, C++
+   dominates; much longer on the Pi). Published images that **fail verification stop the
+   release**. It logs which path it took,
 2. runs the new image's `recs-model --check` against the artifact `CURRENT` points at (see
    "Retrain detection" below) and **stops, changing nothing,** if it would not load or the check
    cannot run,
@@ -54,14 +55,35 @@ keyless signing. The packages are public, so the host needs **no GitHub credenti
    trigger `push`, built from exactly `<sha>`, logged in Rekor,
 4. tags all five `intermission-<name>:<sha>` only when every one verifies.
 
-Anything else (not published yet, a package not public, no or wrong signature, another commit,
-a digest from another repository) is refused: nothing is tagged, the pulled references are
-removed, and `release.sh` builds locally instead. A refusal of a commit that CI did publish is
-not routine: find out why before deploying it (`fetch-images.sh <sha>` prints the cosign error).
+On any failure nothing is tagged and the pulled references are removed. Two kinds of failure are
+handled differently:
+
+| `fetch-images.sh` exit | Meaning | `release.sh` |
+|---|---|---|
+| 2, not available | Not published (yet), a package not public, the pull output had no single digest, or no network | Builds locally with `build.sh` |
+| 3, **REFUSED** | Published images that fail verification: unsigned, another signer or commit, tampered | **Stops** before any change, writes `image_verify` status 1, which fires **ImageVerifyRefused** (`page`) |
+
+After an ImageVerifyRefused alert:
+
+1. Run `deploy/fetch-images.sh <sha>` by hand; it prints cosign's error.
+2. If the error is a network failure reaching `tuf-repo-cdn.sigstore.dev` or `rekor.sigstore.dev`
+   (a Sigstore outage, not tampering), wait and re-run `release.sh <sha>`.
+3. Otherwise treat it as a possible compromise of the registry or of CI. Do not deploy that
+   commit, do not build it locally to "get around" the check, and look at the `release` run for
+   that commit (its job summary lists the index digests it signed) against what GHCR serves.
+4. A release that verifies its images clears the alert.
+
+Images already loaded on the host (`intermission-<name>:<sha>` exists) are deployed without
+re-verification: only the docker group, which is root-equivalent, can load them.
 
 Outbound connections for this: `ghcr.io` and its blob host `pkg-containers.githubusercontent.com`,
 `tuf-repo-cdn.sigstore.dev` (Sigstore trust root) and `rekor.sigstore.dev` (transparency log).
-They belong on the host's outbound allowlist (#98).
+They belong on the host's outbound allowlist (#98). The `build.sh` fallback needs more: Docker
+Hub and `gcr.io` for the base images, `snapshot.ubuntu.com` and the npm and Go module proxies.
+Under a strict allowlist the fallback cannot run, and every release needs a published image set.
+
+Not every `main` commit is guaranteed an image set: a publish can fail (the `release` run is
+red), and commits older than the publish jobs have none. Those fall back to `build.sh`.
 
 **First publish (owner, once):** after the first green push to `main` with the publish jobs, set
 each of the five `intermission-*` packages to public (GitHub → profile → Packages → package →
