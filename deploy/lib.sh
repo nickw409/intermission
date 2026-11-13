@@ -121,7 +121,7 @@ try:
 except Exception as e:
     print("unreadable API response: %s" % clean(e)); sys.exit(2)
 if d.get("total_count", len(runs)) > len(runs):
-    print("more workflow runs than one page"); sys.exit(1)
+    print("more workflow runs than one page"); sys.exit(2)  # cannot decide: stop, never skip back
 problems = []
 for path in gates:
     mine = [r for r in runs if r.get("path") == path and r.get("head_sha") == sha

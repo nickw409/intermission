@@ -29,6 +29,10 @@ local-build fallback. It stops, deploying nothing:
   its SHA,
 - if the commit's images are not in the registry, or fail verification.
 
+Images already loaded on the host under that SHA (from an earlier release, a named-SHA local build
+or a `docker load`) are used as they are, without re-verification: only the docker group, which is
+root-equivalent, can load them.
+
 With a SHA it does no CI check (make sure CI is green for it), and the local-build fallback
 applies when nothing is published.
 

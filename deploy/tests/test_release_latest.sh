@@ -133,6 +133,13 @@ echo 'not json' > "$tmp/stub/$(c 4).json"
 pick
 [[ $rc -ne 0 && -z "$out" ]] && ok "exit non-zero, nothing chosen" || bad "rc=$rc out=$out"
 
+echo "== more runs than one page: stops, never skips back"
+printf '{"total_count": 150, "workflow_runs": [%s]}' "$(IFS=,; printf '%s' "${green[*]}" | sed "s/@SHA@/$(c 4)/g")" > "$tmp/stub/$(c 4).json"
+runs 3 "${green[@]}"
+pick
+[[ $rc -ne 0 && -z "$out" ]] && ok "exit non-zero, nothing chosen" || bad "rc=$rc out=$out"
+[[ "$(wc -l < "$tmp/log")" -eq 1 ]] && ok "stopped at the paged commit" || bad "calls: $(wc -l < "$tmp/log")"
+
 echo "== control characters in API text never reach the log"
 runs 4 "$(wf ci.yml completed '"fail\\u001b[2Jure\\nFAKE LOG LINE"')" "$(wf release.yml completed '"success"')"
 runs 3 "${green[@]}"
