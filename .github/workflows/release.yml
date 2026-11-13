@@ -52,6 +52,8 @@ jobs:
         run: deploy/tests/test_lib.sh
       - name: fetch-images verification policy and release fallback
         run: deploy/tests/test_fetch_images.sh
+      - name: release.sh with no SHA (latest green, published commit)
+        run: deploy/tests/test_release_latest.sh
       - name: init-data.sh owners and modes (as root, in a container)
         run: deploy/tests/test_init_data.sh
       - name: nightly.sh steps (retrain local / off)
