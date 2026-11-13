@@ -13,6 +13,15 @@
 #   LOAD_OUT=path     JSON summary (default data/load-results/<UTC time>-<dataset>.json; data/ is
 #                     gitignored)
 #   KEEP_STACK=1      leave the stack running (prints the teardown command)
+#   LOAD_ARTIFACTS=dir  serve an existing model instead of training one: dir holds CURRENT and the
+#                     artifact it names (for production: /srv/intermission/data/artifacts). The
+#                     version CURRENT names is copied into the scratch stack by a root helper
+#                     container, read-only, so neither MovieLens data nor training is needed. Use
+#                     it on the serving host (the Pi), which cannot train; the dataset argument
+#                     then only labels the result. The artifact must contain knn.
+#
+# The load generator is built with the host's Go if there is one, else in the pinned Go image
+# (network none; it uses the standard library only), so the serving host needs only Docker.
 #
 # The sign-off measurement is ml-32m with the tuned KNN config (configs/knn.ml-32m.tuned.json);
 # ml-latest-small is a quick check. The Phase 2 ml-32m run must also include filtered passes
@@ -49,24 +58,70 @@ fi
 out="${LOAD_OUT:-$STACK_REPO/data/load-results/$(date -u +%Y%m%dT%H%M%SZ)-$dataset$suffix.json}"
 mkdir -p "$(dirname "$out")"
 
-knn_config="${KNN_CONFIG:-}"
-if [[ -z "$knn_config" ]]; then
-  knn_config="$STACK_REPO/configs/knn.$dataset.tuned.json"
-  [[ -f "$knn_config" ]] || knn_config="$STACK_REPO/configs/knn.json"
+artifacts="${LOAD_ARTIFACTS:-}"
+if [[ -n "$artifacts" ]]; then
+  [[ -d "$artifacts" ]] || { echo "LOAD_ARTIFACTS: $artifacts is not a directory" >&2; exit 2; }
+  # Absolute and colon-free: docker -v would read a bare name as a (new, empty) named volume.
+  artifacts="$(cd "$artifacts" && pwd -P)"
+  [[ "$artifacts" != *:* ]] || { echo "LOAD_ARTIFACTS: a path with ':' cannot be mounted" >&2; exit 2; }
+  # No MovieLens data is needed: stack_init only checks that the directory exists.
+  RAW_DIR="$STACK_DIR/no-raw"
+  mkdir -p "$RAW_DIR"
+else
+  knn_config="${KNN_CONFIG:-}"
+  if [[ -z "$knn_config" ]]; then
+    knn_config="$STACK_REPO/configs/knn.$dataset.tuned.json"
+    [[ -f "$knn_config" ]] || knn_config="$STACK_REPO/configs/knn.json"
+  fi
 fi
 
 stack_init
-# recs-train prefers knn.<dataset>.tuned.json over knn.json; remove the copied tuned files so the
-# config requested here is the one trained (and named in the result label).
-rm -f "$STACK_DIR"/configs/knn.*.tuned.json
-install -m 0644 "$knn_config" "$STACK_DIR/configs/knn.json"
-slog "knn config ($knn_config): $(cat "$knn_config")"
-stack_train "$dataset" pop,knn knn
+if [[ -n "$artifacts" ]]; then
+  # Copy only the version CURRENT names, as root (production artifacts are 10003:10000, 2750),
+  # from a read-only mount; the scratch copy gets the owners recs-train would have given it.
+  version="$(docker run --rm --network none -v "$artifacts:/src:ro" -v "$STACK_DIR:/s" \
+    "$STACK_HELPER_IMAGE" bash -c '
+      set -euo pipefail
+      v="$(cat /src/CURRENT)"
+      # A leading letter or digit: rules out "." and "..", which would copy the wrong tree.
+      [[ "$v" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "CURRENT does not name an artifact: $v" >&2; exit 1; }
+      [[ -d "/src/$v" && ! -L "/src/$v" ]] || { echo "artifact $v is missing" >&2; exit 1; }
+      if [[ -n "$(find "/src/$v" -type l -print -quit)" ]]; then
+        echo "artifact $v contains symlinks; refusing to copy it" >&2; exit 1
+      fi
+      cp -a "/src/$v" /s/data/artifacts/
+      printf "%s\n" "$v" > /s/data/artifacts/CURRENT
+      chown -R 10003:10000 /s/data/artifacts
+      chmod -R g+rX,o-rwx /s/data/artifacts/"$v" /s/data/artifacts/CURRENT
+      echo "$v"')"
+  label="$dataset, artifact $version (LOAD_ARTIFACTS)"
+  # The serving host runs production next to this stack: cap the scratch recs-model well below
+  # compose.yaml's 4g default (it peaks around 160 MiB with all six ml-32m models).
+  echo "MODEL_MEM_LIMIT=${LOAD_MODEL_MEM_LIMIT:-1g}" >> "$STACK_DIR/env"
+  slog "serving artifact $version copied from $artifacts (no training)"
+else
+  # recs-train prefers knn.<dataset>.tuned.json over knn.json; remove the copied tuned files so
+  # the config requested here is the one trained (and named in the result label).
+  rm -f "$STACK_DIR"/configs/knn.*.tuned.json
+  install -m 0644 "$knn_config" "$STACK_DIR/configs/knn.json"
+  slog "knn config ($knn_config): $(cat "$knn_config")"
+  stack_train "$dataset" pop,knn knn
+  label="$dataset, knn $(tr -d '\n ' < "$knn_config")"
+fi
 stack_up
 code="$(stack_invite "$(( ${LOAD_USERS:-70} + 5 ))")"
 [[ -n "$code" ]] || { slog "no invite code"; exit 1; }
 
-(cd "$here" && go build -o "$STACK_DIR/recs-load" .)
+if command -v go >/dev/null; then
+  (cd "$here" && go build -o "$STACK_DIR/recs-load" .)
+else
+  slog "no Go toolchain on this host: building the load generator in the pinned Go image"
+  docker run --rm --network none --user "$(id -u):$(id -g)" \
+    -e GOCACHE=/tmp/gocache -e GOPATH=/tmp/gopath -e GOTOOLCHAIN=local \
+    -v "$here:/src:ro" -v "$STACK_DIR:/out" -w /src \
+    golang:1.27.4-trixie@sha256:b54b2639de8c1bfe538ec5ffc45f29b1932235ac5f6d63c059853646677112d9 \
+    go build -buildvcs=false -o /out/recs-load .
+fi
 # Between setup and measurement: report the host state; with WAIT_QUIET=1, first wait until no
 # fuzzer is running (other load is reported, not waited for).
 # (Bracketed so the pattern does not match the shell running it.)
@@ -82,5 +137,5 @@ EOF
 # shellcheck disable=SC2086
 LOAD_INVITE="$code" "$STACK_DIR/recs-load" -before-measure "$quiet" -base "http://127.0.0.1:$STACK_PORT" -origin "$STACK_ORIGIN" \
   -out "$out" -users "${LOAD_USERS:-70}" -clients "${LOAD_CLIENTS:-20}" -genres "$genres" \
-  -label "$dataset, knn $(tr -d '\n ' < "$knn_config")${genres:+, genres $genres}" \
+  -label "$label${genres:+, genres $genres}" \
   ${LOAD_ARGS:-}
