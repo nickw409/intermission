@@ -34,7 +34,7 @@ mkdir -p "$tmp/bin"
 cat > "$tmp/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$STUB_LOG"
-digest_of() { printf 'sha256:%064d' "${#1}"; }
+digest_of() { printf 'sha256:%s' "$(printf '%s' "$1" | sha256sum | cut -c1-64)"; }
 is() { [[ -n "${!1:-}" && "$2" == *"intermission-${!1}"[:@]* ]]; }
 case "$1" in
   pull)
@@ -64,16 +64,29 @@ run_fetch() {
   rc=$?
 }
 tags_made() { grep -c '^tag ' "$tmp/log" || true; }
+# The digest the stub's pull reports for an image: distinct per image, like the registry's.
+dg() { printf 'sha256:%s' "$(printf '%s' "$1" | sha256sum | cut -c1-64)"; }
+# removed NAME...: every pulled reference (tag and digest) of each NAME was removed again.
+removed() {
+  local n
+  for n in "$@"; do
+    grep -qx "image rm $reg/intermission-$n:$tag" "$tmp/log" || return 1
+    grep -qx "image rm $reg/intermission-$n@$(dg "$n")" "$tmp/log" || return 1
+  done
+}
 
 echo "== signed set: verified by digest, then tagged"
 run_fetch
 [[ $rc -eq 0 ]] && ok "exit 0" || bad "exit $rc: $out"
 [[ "$(tags_made)" -eq 5 ]] && ok "5 images tagged" || bad "tags: $(tags_made)"
-for name in api model train web backup; do
-  grep -q "^tag $reg/intermission-$name@sha256:[0-9a-f]\{64\} intermission-$name:$tag$" "$tmp/log" \
-    && ok "$name tagged from its verified digest" || bad "$name not tagged from a digest"
-done
 verify_lines="$(grep '^run ' "$tmp/log")"
+for name in api model train web backup; do
+  grep -qx "tag $reg/intermission-$name@$(dg "$name") intermission-$name:$tag" "$tmp/log" \
+    && ok "$name tagged from the digest its pull reported" || bad "$name not tagged from its pulled digest"
+  grep -q " $reg/intermission-$name@$(dg "$name")\$" <<<"$verify_lines" \
+    && ok "$name verified at the digest its pull reported" || bad "$name not verified at its pulled digest"
+done
+grep -q '^image rm ' "$tmp/log" && bad "removed references after a good fetch" || ok "nothing removed on success"
 [[ "$(wc -l <<<"$verify_lines")" -eq 5 ]] && ok "5 verifications" || bad "verifications: $verify_lines"
 # The signer policy must stay exact: this pins it against accidental loosening.
 policy=(
@@ -103,7 +116,7 @@ for name in api model backup; do
   [[ $rc -eq 3 ]] && ok "$name: exit 3" || bad "$name: exit $rc"
   [[ "$(tags_made)" -eq 0 ]] && ok "$name: no tags" || bad "$name: $(tags_made) tags made"
   grep -q "REFUSED .*intermission-$name@" <<<"$out" && ok "$name: refusal logged" || bad "$name: no refusal: $out"
-  grep -q "^image rm $reg/intermission-$name@" "$tmp/log" && ok "$name: pulled references removed" || bad "$name: pulled refs left"
+  removed api "$name" && ok "$name: pulled references removed" || bad "$name: pulled refs left"
 done
 
 echo "== missing image: not available (exit 2), never verified"
@@ -111,6 +124,7 @@ run_fetch STUB_PULL_FAIL=web
 [[ $rc -eq 2 ]] && ok "exit 2" || bad "exit $rc"
 [[ "$(tags_made)" -eq 0 ]] && ok "no tags" || bad "$(tags_made) tags made"
 grep -q '^run .*intermission-web@' "$tmp/log" && bad "verified an image it could not pull" || ok "web never verified"
+removed api model train && ok "earlier pulls removed" || bad "earlier pulls left"
 
 echo "== pull output without exactly one digest: not trusted"
 for v in STUB_NO_DIGEST STUB_TWO_DIGESTS; do
@@ -118,6 +132,8 @@ for v in STUB_NO_DIGEST STUB_TWO_DIGESTS; do
   [[ $rc -eq 2 ]] && ok "$v: exit 2" || bad "$v: exit $rc"
   [[ "$(tags_made)" -eq 0 ]] && ok "$v: no tags" || bad "$v: $(tags_made) tags made"
   grep -q '^run .*intermission-model@' "$tmp/log" && bad "$v: verified anyway" || ok "$v: model never verified"
+  removed api && grep -qx "image rm $reg/intermission-model:$tag" "$tmp/log" \
+    && ok "$v: pulled references removed" || bad "$v: pulled refs left"
 done
 
 echo "== tag fails part-way: the tags already made are removed"
@@ -126,6 +142,7 @@ run_fetch STUB_TAG_FAIL=train
 for name in api model train web backup; do
   grep -q "^image rm intermission-$name:$tag$" "$tmp/log" && ok "$name tag removed" || bad "$name tag left"
 done
+removed api model train web backup && ok "pulled references removed" || bad "pulled refs left"
 
 echo "== unknown commit"
 : > "$tmp/log"
