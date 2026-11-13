@@ -13,6 +13,18 @@ tests/load/run-load.sh <sha>                            # quick check: ml-latest
 LOAD_GENRES=Film-Noir tests/load/run-load.sh <sha>      # filtered pass (narrow genre)
 ```
 
+**On the serving host (the Pi)**, which cannot train and has no Go or MovieLens data, serve the
+production model instead of training one:
+
+```bash
+LOAD_ARTIFACTS=/srv/intermission/data/artifacts WAIT_QUIET=1 tests/load/run-load.sh "$(sed -n 's/^TAG=//p' deploy/.env)" ml-32m
+```
+
+The version `CURRENT` names is copied (read-only, by a root helper container) into the scratch
+stack, and the load generator is built in the pinned Go image when the host has no `go`. Production
+is not touched: the scratch stack has its own project, port, data and accounts. The second
+argument only labels the result.
+
 `LOAD_GENRES` (the generator's `-genres`) adds `&genres=<list>` to every timed request. The
 Phase 2 ml-32m sign-off includes filtered passes (`Film-Noir`, and all 19 genres) next to the
 unfiltered one.
