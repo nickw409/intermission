@@ -195,10 +195,12 @@ at an older artifact (keep the previous artifact until the new one has been live
    runs from touching it, you can point production elsewhere with `RECS_DATA_DIR=/srv/intermission/data`
    in `deploy/.env`.
 3. `sudo RECS_OPS_OWNER=<deploy user> deploy/init-data.sh` creates the data directories with
-   the owners the containers use (UIDs 10001–10004, group 10000), and gives `data/ops/` to the
-   deploy user, who writes the job status files there. Idempotent. Pass `RECS_OPS_OWNER` on every
-   run (and `RECS_DATA_DIR` if the data lives outside the repo): without it `data/ops/` goes to
-   the user who ran `sudo`, and the deploy scripts then warn "could not write job status".
+   the owners the containers use (UIDs 10001–10004, group 10000), and gives `data/ops/textfile/`
+   to the deploy user, who writes the job status files there (`data/ops/` itself stays root's).
+   Idempotent. Pass `RECS_OPS_OWNER` on every run (and `RECS_DATA_DIR` if the data lives outside
+   the repo): without it `textfile/` goes to the user who ran `sudo`, and the deploy scripts then
+   warn "could not write job status". It refuses to run if any directory it manages is a
+   symlink.
 4. `install -m 0600 deploy/.env.example deploy/.env`, then edit it: `RECS_SITE_ORIGIN`
    (`https://intermission.<tailnet-name>.ts.net`), `SMOKE_PASSWORD` (long, random),
    `GRAFANA_ADMIN_PASSWORD`. The TMDB key is added by the owner (`rotate-tmdb-key.md`).

@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Tests for deploy/init-data.sh, run as root in a throwaway container (it needs root to chown):
-#   - default: data/ops belongs to the user who ran sudo (SUDO_UID/SUDO_GID)
-#   - RECS_OPS_OWNER=<user> gives data/ops (and files already in it) to that user, so a re-run
-#     with sudo from an admin account no longer takes it away from the deploy user
+#   - default: data/ops/textfile belongs to the user who ran sudo (SUDO_UID/SUDO_GID)
+#   - RECS_OPS_OWNER=<user> gives data/ops/textfile (and files already in it) to that user, so a
+#     re-run with sudo from an admin account no longer takes it away from the deploy user
 #   - an unknown RECS_OPS_OWNER is refused before anything is created or changed
+#   - data/ops itself stays root:root, and a symlink planted at data/ops or data/ops/textfile is
+#     refused instead of followed (root would otherwise chown the link target to the deploy user)
 #   - the container directories keep their fixed owners and modes
 #
 #   deploy/tests/test_init_data.sh
@@ -30,9 +32,10 @@ echo "== RECS_OPS_OWNER=deploy, re-run by the admin: deploy keeps ops"
 touch $D/ops/textfile/intermission_job_backup.prom; chown admin:admin $D/ops/textfile/intermission_job_backup.prom
 RECS_DATA_DIR=$D RECS_OPS_OWNER=deploy SUDO_UID=$(id -u admin) SUDO_GID=$(id -g admin) /deploy/init-data.sh >/dev/null \
   && ok "exit 0" || bad "exit non-zero"
-for p in ops ops/textfile ops/textfile/intermission_job_backup.prom; do
+for p in ops/textfile ops/textfile/intermission_job_backup.prom; do
   [[ "$(owner $D/$p)" == deploy:deploy ]] && ok "$p deploy:deploy" || bad "$p $(owner $D/$p)"
 done
+[[ "$(owner $D/ops) $(stat -c %a $D/ops)" == "root:root 755" ]] && ok "ops root:root 0755" || bad "ops $(owner $D/ops) $(stat -c %a $D/ops)"
 [[ "$(stat -c %a $D/ops/textfile)" == 755 ]] && ok "ops/textfile 0755" || bad "ops/textfile mode $(stat -c %a $D/ops/textfile)"
 su deploy -s /bin/bash -c "touch $D/ops/textfile/.w" && ok "deploy can write ops/textfile" || bad "deploy cannot write"
 
@@ -46,6 +49,23 @@ D=/tmp/d3
 if out=$(RECS_DATA_DIR=$D RECS_OPS_OWNER=nosuchuser /deploy/init-data.sh 2>&1); then bad "exit 0"; else ok "exit non-zero"; fi
 grep -q nosuchuser <<<"$out" && ok "error names the user" || bad "error: $out"
 [[ ! -e $D ]] && ok "nothing created" || bad "created $D"
+
+echo "== symlink planted at ops/textfile (legacy deploy-owned ops): refused, target untouched"
+D=/tmp/d4
+RECS_DATA_DIR=$D RECS_OPS_OWNER=deploy /deploy/init-data.sh >/dev/null
+chown deploy:deploy $D/ops                               # how hosts set up before this fix look
+su deploy -s /bin/bash -c "rm -rf $D/ops/textfile && ln -s /etc $D/ops/textfile"
+if out=$(RECS_DATA_DIR=$D RECS_OPS_OWNER=deploy /deploy/init-data.sh 2>&1); then bad "exit 0"; else ok "exit non-zero"; fi
+grep -q symlink <<<"$out" && ok "error says symlink" || bad "error: $out"
+[[ "$(owner /etc) $(stat -c %a /etc)" == "root:root 755" ]] && ok "/etc untouched" || bad "/etc now $(owner /etc) $(stat -c %a /etc)"
+[[ -L $D/ops/textfile ]] && ok "link left for inspection" || bad "link removed or replaced"
+
+echo "== symlink planted at ops: refused, target untouched"
+D=/tmp/d5
+mkdir -p $D /tmp/victim && chown deploy:deploy $D && chmod 0700 /tmp/victim
+su deploy -s /bin/bash -c "ln -s /tmp/victim $D/ops"
+if RECS_DATA_DIR=$D RECS_OPS_OWNER=deploy /deploy/init-data.sh >/dev/null 2>&1; then bad "exit 0"; else ok "exit non-zero"; fi
+[[ "$(owner /tmp/victim) $(stat -c %a /tmp/victim)" == "root:root 700" ]] && ok "/tmp/victim untouched" || bad "/tmp/victim now $(owner /tmp/victim) $(stat -c %a /tmp/victim)"
 
 echo "== container directories unchanged"
 D=/tmp/d1
