@@ -1,8 +1,8 @@
 # Move production to a Raspberry Pi 4 — plan
 
-Status: **draft.** Hardware chosen by the owner (2026-11-12). Nothing is built yet. The
-top-level `CMakeLists.txt` and `.github/workflows/ci.yml` are frozen interfaces, so §2.1 and §2.2
-need orchestrator sign-off.
+Status: **in progress.** Hardware chosen by the owner (2026-11-12). §2.1 and §2.3 are done (PR
+#105); §2.2 is #97 (PR #106). The top-level `CMakeLists.txt` and `.github/workflows/ci.yml` are
+frozen interfaces: their changes in #105 had an independent review in place of the orchestrator.
 
 Related: #97 (publish images to GHCR), #98 (production server requirements), the
 automated-deploy plan (`2026-11-12-automated-deploy.md`, #77).
@@ -46,14 +46,18 @@ stays on the desktop.
 
 ## 2. Code and CI
 
-### 2.1 Disable FMA contraction (orchestrator: top-level `CMakeLists.txt`)
+### 2.1 Disable FMA contraction (done, PR #105)
 
-GCC contracts `a*b + c` into fused multiply-adds by default on arm64, and no build file sets
+GCC contracts `a*b + c` into fused multiply-adds by default on arm64, and no build file set
 `-ffp-contract=off`. `core/src/models/mf_sgd.cpp` (header comment) relies on no contraction for
-bit-identical training, and the golden tests pin exact values. Without the flag, arm64 builds are
-expected to fail those tests and to score slightly differently from the x86 training build.
+bit-identical training, and the golden tests pin exact values. Measured on the native arm64
+runner before the fix: 2 of 329 tests failed, both bit-exact (knn gate 1, the MF bit-for-bit
+golden test); with the flag all pass.
 
-- Add `-ffp-contract=off` to the project-wide compile options.
+- `-ffp-contract=off` is now a project-wide compile option (top-level `CMakeLists.txt`), ahead of
+  the third-party dependencies, so it covers every target and the image builds.
+- `CMakeLists.txt` is in `TRAINING_PATHS` (`deploy/lib.sh`), so the next release reports
+  `RetrainRecommended` although x86 output is unchanged. Expected; a retrain clears it.
 - Gate: the existing golden and determinism tests pass on arm64 (§2.3).
 
 ### 2.2 Multi-arch images (amends #97)
@@ -69,8 +73,9 @@ expected to fail those tests and to score slightly differently from the x86 trai
 
 ### 2.3 arm64 test job
 
-Run `ctest --preset release` and `make -C api check` on an arm64 runner on every push. This is
-what proves §2.1.
+Done (PR #105): `cpp (release, arm64)` runs the release C++ suite on a native arm64 runner on
+every push and PR. This is what proves §2.1. The Go services are pure Go and are exercised on
+arm64 by #97's `publish (arm64)` job (image build plus the edge gate), not by a separate test job.
 
 ### 2.4 Compose and `.env` for the Pi
 
