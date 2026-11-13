@@ -48,7 +48,8 @@ step() { # step NAME COMMAND...
 if [[ "$retrain_mode" == off ]]; then
   step export compose run --rm --no-deps api export-ratings || true
   log "nightly: retrain: off on this host (RECS_NIGHTLY_RETRAIN=off); training runs elsewhere"
-  rm -f "$(data_dir)/ops/textfile/intermission_job_retrain.prom"
+  rm -f "$(data_dir)/ops/textfile/intermission_job_retrain.prom" \
+    || log "WARNING: could not remove the old retrain status file (check data/ops/textfile ownership)"
 elif step export compose run --rm --no-deps api export-ratings; then
   step retrain compose run --rm --no-deps train retrain || true
 else

@@ -73,10 +73,20 @@ run_nightly "RECS_NIGHTLY_RETRAIN=off"
 grep -q "retrain.*off" <<<"$out" && ok "skip is logged" || bad "skip not logged: $out"
 
 echo "== off and a failed export: backup still runs, run fails, no retrain status"
+printf 'intermission_job_last_status{task="retrain"} 1\n' > "$status_dir/intermission_job_retrain.prom"
 run_nightly "RECS_NIGHTLY_RETRAIN=off" STUB_FAIL=api
 [[ $rc -ne 0 ]] && ok "exit non-zero" || bad "exit 0"
 [[ "$(calls)" == "api export-ratings|backup|" ]] && ok "backup still ran" || bad "calls $(calls)"
-[[ ! -e "$status_dir/intermission_job_retrain.prom" ]] && ok "no retrain status written" || bad "retrain status written"
+[[ ! -e "$status_dir/intermission_job_retrain.prom" ]] && ok "stale retrain status removed, none written" || bad "retrain status present"
+
+echo "== off and the stale status cannot be removed: warns, backup still runs"
+# A non-empty directory in its place: rm -f cannot remove it, whatever the permissions (the
+# export step's job_status re-chmods the status directory, so a read-only directory would not do).
+mkdir -p "$status_dir/intermission_job_retrain.prom/x"
+run_nightly "RECS_NIGHTLY_RETRAIN=off"
+grep -q "could not remove the old retrain status file" <<<"$out" && ok "warning logged" || bad "no warning: $out"
+grep -q "^backup" "$tmp/log" && ok "backup still ran" || bad "calls $(calls)"
+rm -rf "$status_dir/intermission_job_retrain.prom"
 
 echo "== default and a failed export: retrain skipped and marked failed (unchanged)"
 run_nightly "" STUB_FAIL=api

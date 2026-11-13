@@ -15,7 +15,9 @@ is skipped (logged as "retrain: off on this host"), any `intermission_job_retrai
 earlier runs is removed so `JobFailed` and `NightlyJobStale` do not fire for retrain, and export
 and backup run as before. Training then happens on another machine
 (`docs/plans/2026-11-12-pi-migration.md` §4). The default is `local`; any other value stops the
-nightly run before it starts.
+nightly run before it starts. With `off`, nothing on the serving host alerts if training on the
+other machine stops: watch the artifact age there (`RetrainRecommended`, `deploy/release.sh` output)
+until the training machine reports its own job status.
 
 Each step writes `data/ops/textfile/intermission_job_<step>.prom`, which node-exporter exposes
 for the `JobFailed` and `NightlyJobStale` alerts. A monthly timer runs
