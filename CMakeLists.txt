@@ -12,6 +12,13 @@ option(RECS_SANITIZE "Build with AddressSanitizer and UndefinedBehaviorSanitizer
 option(RECS_FUZZ "Build libFuzzer targets (requires clang)" OFF)
 option(RECS_BUILD_TESTS "Build the Catch2 test suite" ON)
 
+# Never fuse a*b + c into one FMA instruction. Fused and unfused results differ in the last bit,
+# and determinism (spec "Numerics and determinism"; the golden and bit-identity tests) needs the
+# same arithmetic on every architecture. GCC and Clang contract by default where the target has
+# FMA: always on arm64 (production, a Raspberry Pi 4), never on baseline x86-64. Applies to all
+# targets, third-party code included, so linked code agrees too.
+add_compile_options(-ffp-contract=off)
+
 if(RECS_SANITIZE)
   add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined)
   add_link_options(-fsanitize=address,undefined)
