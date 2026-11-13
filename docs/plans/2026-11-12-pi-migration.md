@@ -122,7 +122,10 @@ OS and services:
   - it is never sent anywhere else.
 - `recs-train retrain` is still a stub ("not implemented yet" in image `6c79854`, and
   `deploy/nightly.sh` swallows the failure with `|| true`). The desktop-side loop is new work in
-  any case: track it with the automated-deploy plan's step 4.
+  any case: track it with the automated-deploy plan's step 4. It is Phase 5 work, so it merges
+  only after Phases 1–4 are signed off (Pipelined mode).
+- On the Pi, `RECS_NIGHTLY_RETRAIN=off` in `deploy/.env` skips the nightly retrain step (export
+  and backup still run) and clears its stale status, so `JobFailed` stops firing for it.
 
 ## 5. Re-validate on the Pi
 

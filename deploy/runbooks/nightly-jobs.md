@@ -10,6 +10,15 @@
    trained by hand (`deploy.md`, "Model artifacts that need a retrain first").
 3. `deploy/backup.sh`: `VACUUM INTO` + integrity check; 7 daily + 4 weekly copies.
 
+**Serving-only host (the Raspberry Pi).** Set `RECS_NIGHTLY_RETRAIN=off` in `deploy/.env`: step 2
+is skipped (logged as "retrain: off on this host"), any `intermission_job_retrain.prom` left from
+earlier runs is removed so `JobFailed` and `NightlyJobStale` do not fire for retrain, and export
+and backup run as before. Training then happens on another machine
+(`docs/plans/2026-11-12-pi-migration.md` §4). The default is `local`; any other value stops the
+nightly run before it starts. With `off`, nothing on the serving host alerts if training on the
+other machine stops: watch the artifact age there (`RetrainRecommended`, `deploy/release.sh` output)
+until the training machine reports its own job status.
+
 Each step writes `data/ops/textfile/intermission_job_<step>.prom`, which node-exporter exposes
 for the `JobFailed` and `NightlyJobStale` alerts. A monthly timer runs
 `deploy/restore-drill.sh` (status file `intermission_job_restore_drill.prom`; alerts `JobFailed` and
