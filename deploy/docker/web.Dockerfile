@@ -7,7 +7,7 @@
 # ships a shell, so only its binary is used.
 # Avoid BuildKit-only syntax: the owner's host builds with the classic builder.
 
-FROM node:24.22.2-trixie-slim@sha256:0820eaa85e07d0490446dd01d14707e17e6108a36988cf374899cd057eb3812d AS web
+FROM node:25.9.0-trixie-slim@sha256:aabbe39553d15ede8a97cc60c9e1a97034ff772afcf696ea42b94e7f5f2ec71b AS web
 ENV NPM_CONFIG_UPDATE_NOTIFIER=false NPM_CONFIG_FUND=false NPM_CONFIG_AUDIT=false
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
