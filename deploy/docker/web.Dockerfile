@@ -24,7 +24,7 @@ RUN chmod -R a+rX dist && chmod 0644 /out/Caddyfile
 
 FROM caddy:2.11.9@sha256:0c2243efcf437ab7f7a978f1027fcf0d4f9be8a75df27b1b3fbc5dbe0ffa8cf0 AS caddy
 
-FROM gcr.io/distroless/static-debian13:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:aafe993665bf6200db38a02c11a9351e782a84b6a45e7f33b6695638c88e3931
 ARG GIT_SHA=unknown
 LABEL org.opencontainers.image.title="intermission-web" \
       org.opencontainers.image.source="https://github.com/nickw409/intermission" \
