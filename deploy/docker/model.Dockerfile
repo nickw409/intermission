@@ -34,7 +34,7 @@ RUN cmake --preset release -DRECS_BUILD_TESTS=OFF -DRECS_GIT_SHA="${GIT_SHA}" \
  && cp -L "$(g++ -print-file-name=libgomp.so.1)" /out/lib/libgomp.so.1 \
  && chown 10002:10000 /out/root/run/recs && chmod 0750 /out/root/run/recs
 
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cc66d222f0a7ec996b78a99fe76a969bc80b539a5016ad866c14d1949bc6d0ab
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cb87acc574abe719b6e5c547384defa2f7b1f24af9605d3f618cf852495d8be2
 ARG GIT_SHA=unknown
 LABEL org.opencontainers.image.title="intermission-model" \
       org.opencontainers.image.source="https://github.com/nickw409/intermission" \
