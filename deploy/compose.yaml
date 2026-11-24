@@ -220,7 +220,7 @@ services:
   node-exporter:
     <<: *hardening
     profiles: [monitoring]
-    image: prom/node-exporter:v1.12.1-distroless@sha256:8c9bac11973b94b59be88d6e11fee4429aa743c8846cdc75d65b18db33f6a106
+    image: prom/node-exporter:v1.13.1-distroless@sha256:eff07245bb583af003f21fb238cea72480a0df30856f0d75337d8ca7ded1f9af
     user: "65532:65532"
     command:
       - --path.rootfs=/host
