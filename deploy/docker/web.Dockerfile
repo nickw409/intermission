@@ -22,7 +22,7 @@ RUN npm run build
 COPY deploy/Caddyfile /out/Caddyfile
 RUN chmod -R a+rX dist && chmod 0644 /out/Caddyfile
 
-FROM caddy:2.11.9@sha256:0c2243efcf437ab7f7a978f1027fcf0d4f9be8a75df27b1b3fbc5dbe0ffa8cf0 AS caddy
+FROM caddy:2.11.9@sha256:4851e54a46b206517c574821bb5cc67f170d2156041e9fbc4c9193b45e84a75b AS caddy
 
 FROM gcr.io/distroless/static-debian13:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329
 ARG GIT_SHA=unknown
